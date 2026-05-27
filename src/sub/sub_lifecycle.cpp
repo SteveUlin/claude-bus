@@ -23,15 +23,29 @@ namespace {
 
 // Resolve a sibling binary in the same directory as this executable.
 // Lets the spawned tab call `bus agent-bar NAME` without hard-coding
-// /home/sulin/claude-bus/bin/.
+// any path; the bus can live anywhere on disk.
 auto selfDir() -> std::string {
   char buf[4096];
   const auto n = ::readlink("/proc/self/exe", buf, sizeof(buf));
-  if (n <= 0) return "/home/sulin/claude-bus/bin";  // fallback
+  if (n <= 0) return ".";  // fallback — almost never hit
   std::string path(buf, static_cast<std::size_t>(n));
   const auto slash = path.find_last_of('/');
   if (slash == std::string::npos) return ".";
   return path.substr(0, slash);
+}
+
+// Repo root = parent of selfDir() (since the binary lives in
+// $BUS_ROOT/bin/). Allows CLAUDE_BUS_ROOT to override for callers
+// running the binary from an out-of-tree build dir.
+auto busRoot() -> std::string {
+  if (const char* env = std::getenv("CLAUDE_BUS_ROOT");
+      env != nullptr && *env != '\0') {
+    return env;
+  }
+  const auto self = selfDir();
+  const auto slash = self.find_last_of('/');
+  if (slash == std::string::npos) return ".";
+  return self.substr(0, slash);
 }
 
 auto runSync(const std::vector<const char*>& argv) -> int {
@@ -61,6 +75,7 @@ auto subSpawn(std::span<const char* const> args) -> int {
   }
   const std::string name{args[0]};
   const std::string bin = selfDir();
+  const std::string root = busRoot();
   // Resolve at call time so the layout-string uses the right binary.
   // Note: the old name "bus-new" lived here during phase 4a; the rename
   // landed in 4a.6 but the layout string kept pointing at the dead
@@ -86,13 +101,13 @@ layout {{
         pane size=1 borderless=true name="{0}-bar" command="{1}" {{
             args "agent-bar" "{0}"
         }}
-        pane name="{0}" cwd="/home/sulin/claude-bus" command="{2}" {{
+        pane name="{0}" cwd="{3}" command="{2}" {{
             args "{0}"
         }}
     }}
 }}
 )LAYOUT",
-      name, bus_bin, agent_launch);
+      name, bus_bin, agent_launch, root);
 
   const int rc = runSync({"zellij", "action", "new-tab", "--name",
                           name.c_str(), "--layout-string", layout.c_str()});

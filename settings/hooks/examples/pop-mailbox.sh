@@ -11,7 +11,8 @@
 # subsequent turn until the box is empty.
 set -euo pipefail
 
-MAILBOX=/home/sulin/claude-bus/bin/mailbox
+BUS_ROOT=${CLAUDE_BUS_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)}
+MAILBOX=$BUS_ROOT/bin/mailbox
 agent="${CLAUDE_BUS_AGENT_ID:-}"
 if [ -z "$agent" ]; then
     exit 0

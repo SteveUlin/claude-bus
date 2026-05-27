@@ -23,7 +23,7 @@ verbs in `bin/bus`. Every agent is a `claude` process in a zellij pane,
 named by the layout. The broker pushes records into pane inboxes; agents
 read incoming records as fresh user prompts. Your pane is named `comms`.
 
-Read `/home/sulin/claude-bus/CLAUDE.md` if you need the longer story.
+Read the repo's `CLAUDE.md` if you need the longer story.
 
 ## Discovery — find who exists before drafting
 

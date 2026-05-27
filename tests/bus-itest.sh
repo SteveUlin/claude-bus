@@ -8,7 +8,11 @@
 
 set -uo pipefail
 
-BUS=${BUS:-/home/sulin/claude-bus/bin/bus}
+BUS_ROOT=${CLAUDE_BUS_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+BUS=${BUS:-$BUS_ROOT/bin/bus}
+
+# shellcheck disable=SC1091
+. "$BUS_ROOT/tests/lib/isolated-broker.sh"
 
 pass=0 fail=0
 results=()
@@ -692,35 +696,26 @@ rm -rf "$BROKER_STATE/blocking-op"
 # and the broker logs "defer for itestguy" every tick, making it hard
 # to observe a single race-itest tick within a reasonable sleep).
 echo "=== TC50b: pending /clear on commands-X gates inbox-X ==="
-ISO_STATE=$(mktemp -d -t tc50b-XXXXXX)
-mkdir -p "$ISO_STATE/topics"
-CLAUDE_BUS_STATE=$ISO_STATE "$BUS" broker run > "$ISO_STATE/broker.log" 2>&1 &
-iso_broker_pid=$!
-sleep 0.5
-CLAUDE_BUS_STATE=$ISO_STATE CLAUDE_BUS_AGENT_ID=itester \
-    "$BUS" slash race-iso "/clear" > /dev/null
-CLAUDE_BUS_STATE=$ISO_STATE CLAUDE_BUS_AGENT_ID=itester \
-    "$BUS" mail race-iso "should defer behind pending /clear" > /dev/null
+start_isolated_broker
+CLAUDE_BUS_AGENT_ID=itester "$BUS" slash race-iso "/clear" > /dev/null
+CLAUDE_BUS_AGENT_ID=itester "$BUS" mail race-iso "should defer behind pending /clear" > /dev/null
 # Broker ticks every 250ms; gate fires on each tick that processes the
 # inbox topic. Poll up to 5s for the log line.
 elapsed=0
 while [ $elapsed -lt 5 ]; do
-    if grep -q "defer agent-inbox dispatch for race-iso" "$ISO_STATE/broker.log"; then
+    if grep -q "defer agent-inbox dispatch for race-iso" "$CLAUDE_BUS_STATE/broker.log"; then
         break
     fi
     sleep 1
     elapsed=$(( elapsed + 1 ))
 done
-if grep -q "defer agent-inbox dispatch for race-iso" "$ISO_STATE/broker.log"; then
+if grep -q "defer agent-inbox dispatch for race-iso" "$CLAUDE_BUS_STATE/broker.log"; then
     tc_pass "TC50b pending /clear gates inbox dispatch"
 else
-    log_tail=$(tail -5 "$ISO_STATE/broker.log" 2>/dev/null | tr '\n' '|')
+    log_tail=$(tail -5 "$CLAUDE_BUS_STATE/broker.log" 2>/dev/null | tr '\n' '|')
     tc_fail "TC50b pending /clear gate" "no defer log after 5s; log tail: [$log_tail]"
 fi
-# Cleanup.
-CLAUDE_BUS_STATE=$ISO_STATE "$BUS" broker stop > /dev/null 2>&1
-wait "$iso_broker_pid" 2>/dev/null
-rm -rf "$ISO_STATE"
+stop_isolated_broker
 
 # ─────────────────────────────────────────────────────────────────────
 # Phase 4e tests — retry timer + audit escalation.

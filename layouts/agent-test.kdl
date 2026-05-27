@@ -1,5 +1,9 @@
 // Minimal test rig: one agent (alice) + ops. Each agent tab gets the
-// per-agent status strip via bin/agent-bar — same shape as fleet.kdl.
+// per-agent status strip via `bus agent-bar` — same shape as fleet.kdl.
+//
+// Path resolution: same idiom as fleet.kdl — bash wrappers resolve
+// the repo root as ${CLAUDE_BUS_ROOT:-$PWD}, so launching from the
+// project root just works without editing this file.
 
 layout {
     default_tab_template {
@@ -23,8 +27,8 @@ layout {
     }
 
     agent_tab name="alice" focus=true {
-        pane size=1 borderless=true name="alice-bar" command="/home/sulin/claude-bus/bin/bus" {
-            args "agent-bar" "alice"
+        pane size=1 borderless=true name="alice-bar" command="bash" {
+            args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" agent-bar alice"
         }
         pane name="alice" command="bash" {
             args "-c" "CLAUDE_BUS_AGENT_ID=alice exec claude --dangerously-skip-permissions"
@@ -42,23 +46,23 @@ layout {
                 y "10%"
                 width "40%"
                 height "30%"
-                command "/home/sulin/claude-bus/bin/bus"
-                args "broker" "run"
+                command "bash"
+                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
             }
         }
         pane split_direction="horizontal" {
-            pane name="human-inbox" size="67%" command="/home/sulin/claude-bus/bin/bus" {
-                args "inbox" "human"
+            pane name="human-inbox" size="67%" command="bash" {
+                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" inbox human"
             }
-            pane name="monitor" command="/home/sulin/claude-bus/bin/bus" {
-                args "monitor"
+            pane name="monitor" command="bash" {
+                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" monitor"
             }
         }
     }
 
     tab name="test" {
-        pane cwd="/home/sulin/claude-bus" command="bash" {
-            args "-l"
+        pane command="bash" {
+            args "-c" "cd \"${CLAUDE_BUS_ROOT:-$PWD}\" && exec bash -l"
         }
     }
 }

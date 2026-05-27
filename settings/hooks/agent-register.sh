@@ -23,6 +23,10 @@ set -euo pipefail
 EVENT=${1:-unknown}
 NAME=${CLAUDE_BUS_AGENT_ID:-}
 STATE=${CLAUDE_BUS_STATE:-/tmp/claude-bus}
+# CLAUDE_PROJECT_DIR is exported by claude-code into hook env; fall back
+# to walking up from this script's own path so the hook still works
+# when invoked outside the agent context (e.g. manual testing).
+BUS_ROOT=${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}
 
 [ -z "$NAME" ] && exit 0
 
@@ -32,7 +36,7 @@ ENTRY="$REG_DIR/$NAME.json"
 case "$EVENT" in
   SessionStart)
     mkdir -p "$REG_DIR"
-    PANE=$(/home/sulin/claude-bus/bin/bus pane-id "$NAME" 2>/dev/null || true)
+    PANE=$("$BUS_ROOT/bin/bus" pane-id "$NAME" 2>/dev/null || true)
     STARTED=$(date +%s)
     jq -n \
         --arg name      "$NAME" \

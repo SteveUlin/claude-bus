@@ -5,7 +5,8 @@
 
 set -uo pipefail
 
-BUS=/home/sulin/claude-bus/bin/bus
+BUS_ROOT=${CLAUDE_BUS_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+BUS=$BUS_ROOT/bin/bus
 export CLAUDE_BUS_STATE=/tmp/bus-play
 export CLAUDE_BUS_AGENT_ID=playground
 

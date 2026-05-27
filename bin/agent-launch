@@ -20,14 +20,19 @@
 # that the agent-register hook picks up. ROLE is set from --role; the
 # others are inherited from the caller's env if set.
 #
-# With --role NAME, /home/sulin/claude-bus/roles/NAME.md is stripped of
-# YAML frontmatter and passed to claude as --append-system-prompt-file.
+# With --role NAME, $BUS_ROOT/roles/NAME.md is stripped of YAML
+# frontmatter and passed to claude as --append-system-prompt-file.
 #
 # Used by bin/spawn-agent (live spawn) and by layouts/fleet.kdl (boot-time
 # spawn). Same identity rules apply either way.
 #
 # Usage: agent-launch [--role ROLE] NAME
 set -euo pipefail
+
+# Resolve repo root from this script's own location. Allows the bus to
+# live anywhere; fleet layouts and spawn helpers no longer need to hard-
+# code the path.
+BUS_ROOT=${CLAUDE_BUS_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
 
 role=""
 while [ $# -gt 0 ]; do
@@ -64,7 +69,9 @@ name=$1
 sessions_dir="$HOME/.cache/claude-bus/agents"
 session_file="$sessions_dir/$name.session"
 color_file="$sessions_dir/$name.color"
-project_dir="$HOME/.claude/projects/-home-sulin-claude-bus"
+# claude-code encodes the project's absolute path into the session
+# storage dir by replacing '/' with '-' (leading '-' included).
+project_dir="$HOME/.claude/projects$(echo "$BUS_ROOT" | sed 's|/|-|g')"
 
 mkdir -p "$sessions_dir"
 
@@ -124,10 +131,10 @@ if [ "$fresh_session" = 1 ]; then
     (
         for _ in $(seq 1 30); do
             sleep 1
-            mode=$(/home/sulin/claude-bus/bin/bus pane-state "$name" 2>/dev/null \
+            mode=$("$BUS_ROOT/bin/bus" pane-state "$name" 2>/dev/null \
                 | awk '/^mode:/ {print $2}')
             if [ "$mode" = "INSERT" ]; then
-                /home/sulin/claude-bus/bin/bus send "$name" "/color $color" \
+                "$BUS_ROOT/bin/bus" send "$name" "/color $color" \
                     >/dev/null 2>&1 || true
                 break
             fi
@@ -137,7 +144,7 @@ fi
 
 claude_role_flag=()
 if [ -n "$role" ]; then
-    role_file="/home/sulin/claude-bus/roles/$role.md"
+    role_file="$BUS_ROOT/roles/$role.md"
     if [ ! -f "$role_file" ]; then
         echo "agent-launch: role file not found: $role_file" >&2
         exit 1

@@ -29,6 +29,13 @@
 // (delivery failures, audit escalation). Real human-directed messages
 // go to `inbox-comms` and surface via the comms agent.
 //
+// Path resolution: zellij KDL doesn't expand env vars in attribute
+// strings, so this file uses bash wrappers everywhere and resolves the
+// repo root inside bash as ${CLAUDE_BUS_ROOT:-$PWD}. The expectation
+// is that the user launches zellij from the project root (or with
+// CLAUDE_BUS_ROOT exported), which makes the bus relocatable without
+// editing this file.
+//
 // Launch:   zellij --layout layouts/fleet.kdl
 
 layout {
@@ -66,7 +73,7 @@ layout {
                 width "40%"
                 height "30%"
                 command "bash"
-                args "-c" "exec /home/sulin/claude-bus/bin/bus broker run"
+                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
             }
         }
         // Viewers are wrapped in a bash restart loop so an unexpected
@@ -75,49 +82,49 @@ layout {
         // `trap 'exit 0' INT` lets a manual Ctrl+C end the wrapper.
         pane split_direction="horizontal" {
             pane name="ops-inbox" size="67%" command="bash" {
-                args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
             }
             pane name="monitor" command="bash" {
-                args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus monitor; rc=$?; printf '\\n\\033[1;31m[monitor exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" monitor; rc=$?; printf '\\n\\033[1;31m[monitor exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
             }
         }
     }
 
     agent_tab name="comms" focus=true {
         pane size=1 borderless=true name="comms-bar" command="bash" {
-            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar comms; printf '\\033[1;31m[comms-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar comms; printf '\\033[1;31m[comms-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
         // Wrap agent-launch in bash so CLAUDE_BUS_AGENT_KIND and
         // CLAUDE_BUS_AGENT_SESSION reach the agent-register hook.
-        pane name="comms" cwd="/home/sulin/claude-bus" command="bash" {
-            args "-c" "export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec /home/sulin/claude-bus/bin/agent-launch --role comms comms"
+        pane name="comms" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role comms comms"
         }
     }
 
     agent_tab name="bast" {
         pane size=1 borderless=true name="bast-bar" command="bash" {
-            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar bast; printf '\\033[1;31m[bast-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar bast; printf '\\033[1;31m[bast-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
-        pane name="bast" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
-            args "bast"
+        pane name="bast" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; exec \"$B/bin/agent-launch\" bast"
         }
     }
 
     agent_tab name="kvothe" {
         pane size=1 borderless=true name="kvothe-bar" command="bash" {
-            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar kvothe; printf '\\033[1;31m[kvothe-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar kvothe; printf '\\033[1;31m[kvothe-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
-        pane name="kvothe" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
-            args "kvothe"
+        pane name="kvothe" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; exec \"$B/bin/agent-launch\" kvothe"
         }
     }
 
     agent_tab name="elodin" {
         pane size=1 borderless=true name="elodin-bar" command="bash" {
-            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar elodin; printf '\\033[1;31m[elodin-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar elodin; printf '\\033[1;31m[elodin-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
-        pane name="elodin" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
-            args "elodin"
+        pane name="elodin" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; exec \"$B/bin/agent-launch\" elodin"
         }
     }
 }

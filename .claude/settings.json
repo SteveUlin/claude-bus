@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh UserPromptSubmit"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh UserPromptSubmit"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PreToolUse"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh PreToolUse"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PostToolUse"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh PostToolUse"
           }
         ]
       }
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh Stop"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh Stop"
           }
         ]
       }
@@ -50,11 +50,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh SessionStart"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh SessionStart"
           },
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/agent-register.sh SessionStart"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/agent-register.sh SessionStart"
           }
         ]
       }
@@ -65,11 +65,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh SessionEnd"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh SessionEnd"
           },
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/agent-register.sh SessionEnd"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/agent-register.sh SessionEnd"
           }
         ]
       }
@@ -80,7 +80,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh Notification"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh Notification"
           }
         ]
       }
@@ -91,7 +91,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PreCompact"
+            "command": "$CLAUDE_PROJECT_DIR/settings/hooks/log-event.sh PreCompact"
           }
         ]
       }

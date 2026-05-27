@@ -70,8 +70,11 @@ sessions_dir="$HOME/.cache/claude-bus/agents"
 session_file="$sessions_dir/$name.session"
 color_file="$sessions_dir/$name.color"
 # claude-code encodes the project's absolute path into the session
-# storage dir by replacing '/' with '-' (leading '-' included).
-project_dir="$HOME/.claude/projects$(echo "$BUS_ROOT" | sed 's|/|-|g')"
+# storage dir by replacing '/' with '-' (leading '-' included), and
+# stores it under ~/.claude/projects/<encoded>/. Note the slash between
+# "projects" and the encoded path — the encoded path itself begins with
+# '-' (from the leading '/' of BUS_ROOT).
+project_dir="$HOME/.claude/projects/$(echo "$BUS_ROOT" | sed 's|/|-|g')"
 
 mkdir -p "$sessions_dir"
 

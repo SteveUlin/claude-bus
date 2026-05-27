@@ -1,0 +1,22 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="bus" {
+        pane split_direction="vertical" {
+            pane name="alice" command="bash" {
+                args "-c" "CLAUDE_BUS_AGENT_ID=alice exec bash -i"
+            }
+            pane name="bob" command="bash" {
+                args "-c" "CLAUDE_BUS_AGENT_ID=bob exec bash -i"
+            }
+        }
+    }
+}

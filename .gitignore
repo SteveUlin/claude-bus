@@ -1,0 +1,37 @@
+/build/
+/result
+/.direnv/
+/compile_commands.json
+/.cache/
+/.claude/scheduled_tasks.lock
+
+# compiled binaries; CMake puts them next to any remaining shell scripts
+/bin/bus
+/bin/mailbox
+/bin/watcher
+
+# claude-code local notes (per-clone, not for the public repo)
+/CLAUDE.local.md
+
+# editor cruft
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# build cruft (defense in depth — CMake should keep these in build/)
+*.o
+*.a
+*.so
+core
+core.*
+
+# env overrides + secrets
+.env
+.env.*
+.envrc.local
+
+# stray logs
+*.log

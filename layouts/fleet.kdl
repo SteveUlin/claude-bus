@@ -1,0 +1,123 @@
+// Full working layout: ops + comms + the named agent fleet.
+//
+// `comms` is the human's communications layer (see docs/comms.md +
+// roles/comms.md). It launches via agent-launch's --role flag, which
+// appends roles/comms.md to claude's system prompt and exports
+// CLAUDE_BUS_AGENT_ROLE so the register hook records it in
+// $CLAUDE_BUS_STATE/agents/comms.json.
+//
+// Each agent tab runs bin/agent-launch NAME, which resumes the agent's
+// prior session (or creates a new one with a stable id on first boot).
+// Above each claude pane, `bus agent-bar NAME` renders one row of live
+// status: attach dot, state (IDLE / WORKING / HAS_MAIL / STUCK /
+// STARTING), current tool, last-event age, mail count, bypass-perms,
+// and an intervention warning when the TUI looks like it needs the
+// human.
+//
+// agent_tab is a named alias of default_tab_template. zellij templates
+// can't parameterize per-instance command args, so each usage inlines
+// its own agent-bar pane with the agent's name. Keep the bar's name
+// field in sync with the agent's name so monitor / pane-id keep
+// working.
+//
+// All non-agent panes call the unified `bus` binary with the matching
+// subcommand. bin/agent-launch stays as shell for now; it does session
+// UUID discovery + color seeding + role injection before exec'ing
+// claude.
+//
+// The ops tab tails `inbox-ops` — infrastructure notifications
+// (delivery failures, audit escalation). Real human-directed messages
+// go to `inbox-comms` and surface via the comms agent.
+//
+// Launch:   zellij --layout layouts/fleet.kdl
+
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab_template name="agent_tab" {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab name="ops" {
+        // Broker runs in a float so its log is visible — toggle with
+        // ctrl+p w. The broker's lifetime is tied to this pane: closing
+        // it terminates the broker, and the bus stops delivering
+        // (records still queue to disk). Relaunch the layout to bring
+        // it back. A flock on $STATE/broker.pid keeps the singleton —
+        // a second `bus broker run` exits 1.
+        floating_panes {
+            pane name="broker" {
+                x "55%"
+                y "10%"
+                width "40%"
+                height "30%"
+                command "bash"
+                args "-c" "exec /home/sulin/claude-bus/bin/bus broker run"
+            }
+        }
+        // Viewers are wrapped in a bash restart loop so an unexpected
+        // exit (SIGHUP, SIGPIPE, etc.) produces a visible banner and
+        // auto-respawns instead of leaving a frozen alt-screen frame.
+        // `trap 'exit 0' INT` lets a manual Ctrl+C end the wrapper.
+        pane split_direction="horizontal" {
+            pane name="ops-inbox" size="67%" command="bash" {
+                args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+            }
+            pane name="monitor" command="bash" {
+                args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus monitor; rc=$?; printf '\\n\\033[1;31m[monitor exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+            }
+        }
+    }
+
+    agent_tab name="comms" focus=true {
+        pane size=1 borderless=true name="comms-bar" command="bash" {
+            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar comms; printf '\\033[1;31m[comms-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+        }
+        // Wrap agent-launch in bash so CLAUDE_BUS_AGENT_KIND and
+        // CLAUDE_BUS_AGENT_SESSION reach the agent-register hook.
+        pane name="comms" cwd="/home/sulin/claude-bus" command="bash" {
+            args "-c" "export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec /home/sulin/claude-bus/bin/agent-launch --role comms comms"
+        }
+    }
+
+    agent_tab name="bast" {
+        pane size=1 borderless=true name="bast-bar" command="bash" {
+            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar bast; printf '\\033[1;31m[bast-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+        }
+        pane name="bast" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
+            args "bast"
+        }
+    }
+
+    agent_tab name="kvothe" {
+        pane size=1 borderless=true name="kvothe-bar" command="bash" {
+            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar kvothe; printf '\\033[1;31m[kvothe-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+        }
+        pane name="kvothe" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
+            args "kvothe"
+        }
+    }
+
+    agent_tab name="elodin" {
+        pane size=1 borderless=true name="elodin-bar" command="bash" {
+            args "-c" "trap 'exit 0' INT; while :; do /home/sulin/claude-bus/bin/bus agent-bar elodin; printf '\\033[1;31m[elodin-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+        }
+        pane name="elodin" cwd="/home/sulin/claude-bus" command="/home/sulin/claude-bus/bin/agent-launch" {
+            args "elodin"
+        }
+    }
+}

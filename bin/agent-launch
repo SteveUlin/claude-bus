@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Exec claude with stable identity for agent NAME:
+#   - claude --name NAME       (prompt-box label / terminal title / /resume picker)
+#   - Resume strategy, in order of preference:
+#       1. ~/.cache/claude-bus/agents/NAME.session caches the UUID; resume
+#          that directly.
+#       2. If no cache, scan ~/.claude/projects/<cwd>/*.jsonl by mtime and
+#          read line 1; the most recent one whose `customTitle` equals
+#          NAME is this agent's last session. Write the UUID to the cache
+#          so future spawns skip the scan.
+#       3. Otherwise mint a new UUID, write the cache, start fresh.
+#     The scan path lets a crashed/killed agent rehydrate by name without
+#     the human passing a UUID — `spawn-agent NAME` Just Works.
+#   - assigns a stable color from the 8 claude /color choices on first run
+#     (stored at NAME.color); on resumed sessions claude already remembers
+#     the color session-side. For fresh sessions we drop a NAME.pending
+#     marker that a colorizer (or sibling subshell) picks up.
+# Sets env for the bus and hooks: CLAUDE_BUS_AGENT_ID=NAME plus the
+# pass-through CLAUDE_BUS_AGENT_{ROLE,KIND,WORKSPACE,PROJECT,SESSION}
+# that the agent-register hook picks up. ROLE is set from --role; the
+# others are inherited from the caller's env if set.
+#
+# With --role NAME, /home/sulin/claude-bus/roles/NAME.md is stripped of
+# YAML frontmatter and passed to claude as --append-system-prompt-file.
+#
+# Used by bin/spawn-agent (live spawn) and by layouts/fleet.kdl (boot-time
+# spawn). Same identity rules apply either way.
+#
+# Usage: agent-launch [--role ROLE] NAME
+set -euo pipefail
+
+role=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --role)
+            [ $# -lt 2 ] && { echo "agent-launch: --role requires an argument" >&2; exit 2; }
+            role=$2
+            shift 2
+            ;;
+        --role=*)
+            role=${1#--role=}
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        --*)
+            echo "agent-launch: unknown flag: $1" >&2
+            exit 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: agent-launch [--role ROLE] NAME" >&2
+    exit 2
+fi
+
+name=$1
+sessions_dir="$HOME/.cache/claude-bus/agents"
+session_file="$sessions_dir/$name.session"
+color_file="$sessions_dir/$name.color"
+project_dir="$HOME/.claude/projects/-home-sulin-claude-bus"
+
+mkdir -p "$sessions_dir"
+
+# Locate the most-recent JSONL whose first line carries this agent's name
+# in its customTitle. Returns the bare UUID, or empty on miss.
+discover_session_id() {
+    local f
+    for f in $(ls -t "$project_dir"/*.jsonl 2>/dev/null); do
+        if head -c 256 "$f" | grep -q "\"customTitle\":\"$name\""; then
+            basename "$f" .jsonl
+            return 0
+        fi
+    done
+    return 1
+}
+
+fresh_session=0
+session_id=""
+if [ -f "$session_file" ]; then
+    session_id=$(cat "$session_file")
+    if [ ! -f "$project_dir/$session_id.jsonl" ]; then
+        # Cache pointed at a session claude no longer has; treat as fresh
+        # but reuse the same UUID so the identity is stable.
+        fresh_session=1
+    fi
+else
+    # No cache — try to rehydrate by name before minting a new UUID.
+    if discovered=$(discover_session_id); then
+        session_id=$discovered
+        echo "$session_id" > "$session_file"
+    else
+        session_id=$(uuidgen)
+        echo "$session_id" > "$session_file"
+        fresh_session=1
+    fi
+fi
+
+if [ "$fresh_session" = 1 ]; then
+    claude_flag=(--session-id "$session_id")
+else
+    claude_flag=(--resume "$session_id")
+fi
+
+# Assign a deterministic color from claude's 8-color palette if we don't have
+# one yet. cksum gives a stable name -> index.
+if [ ! -f "$color_file" ]; then
+    colors=(red blue green yellow purple orange pink cyan)
+    idx=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % ${#colors[@]} ))
+    printf '%s\n' "${colors[$idx]}" > "$color_file"
+fi
+color=$(cat "$color_file")
+
+# Fresh sessions: fork a subshell that waits for claude's TUI to be up and
+# then sends /color via the bus. The fork survives the exec below; we don't
+# need a long-lived daemon since this is one shot per spawn.
+if [ "$fresh_session" = 1 ]; then
+    (
+        for _ in $(seq 1 30); do
+            sleep 1
+            mode=$(/home/sulin/claude-bus/bin/bus pane-state "$name" 2>/dev/null \
+                | awk '/^mode:/ {print $2}')
+            if [ "$mode" = "INSERT" ]; then
+                /home/sulin/claude-bus/bin/bus send "$name" "/color $color" \
+                    >/dev/null 2>&1 || true
+                break
+            fi
+        done
+    ) &
+fi
+
+claude_role_flag=()
+if [ -n "$role" ]; then
+    role_file="/home/sulin/claude-bus/roles/$role.md"
+    if [ ! -f "$role_file" ]; then
+        echo "agent-launch: role file not found: $role_file" >&2
+        exit 1
+    fi
+    roles_cache="$HOME/.cache/claude-bus/roles"
+    mkdir -p "$roles_cache"
+    stripped="$roles_cache/${role}.stripped.md"
+    awk 'BEGIN { in_fm = 0; done = 0 }
+         NR == 1 && /^---$/ { in_fm = 1; next }
+         in_fm && /^---$/ { in_fm = 0; done = 1; next }
+         in_fm && !done { next }
+         { print }' "$role_file" > "$stripped"
+    claude_role_flag=(--append-system-prompt-file "$stripped")
+fi
+
+export CLAUDE_BUS_AGENT_ID="$name"
+export CLAUDE_BUS_AGENT_ROLE="$role"
+export CLAUDE_BUS_AGENT_KIND="${CLAUDE_BUS_AGENT_KIND:-}"
+export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-}"
+export CLAUDE_BUS_AGENT_PROJECT="${CLAUDE_BUS_AGENT_PROJECT:-}"
+export CLAUDE_BUS_AGENT_SESSION="${CLAUDE_BUS_AGENT_SESSION:-}"
+exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" --dangerously-skip-permissions

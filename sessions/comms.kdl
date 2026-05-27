@@ -1,0 +1,21 @@
+// Declarative session config for the comms helper.
+//
+// Until `bus session start` exists (see docs/external-projects.md),
+// launch with:
+//
+//   zellij --session comms --layout layouts/comms.kdl
+//
+// See docs/comms.md for what comms is and why it lives in its own
+// session.
+
+session "comms" {
+    // No `project` field — comms doesn't operate on a target codebase.
+
+    agent "comms" kind="coordinator" role="comms"
+
+    // Infrastructure tails alongside comms — broker daemon, fleet
+    // monitor, inbox-ops tail (delivery failures, audit escalation).
+    agent "broker"  kind="observer" view="broker"   // floating, ops tab
+    agent "monitor" kind="observer" view="monitor"
+    agent "ops"     kind="observer" view="inbox" inbox="ops"
+}

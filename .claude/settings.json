@@ -1,0 +1,101 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PostToolUse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh Stop"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh SessionStart"
+          },
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/agent-register.sh SessionStart"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh SessionEnd"
+          },
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/agent-register.sh SessionEnd"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh Notification"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sulin/claude-bus/settings/hooks/log-event.sh PreCompact"
+          }
+        ]
+      }
+    ]
+  },
+  "theme": "dark"
+}

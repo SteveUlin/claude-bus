@@ -1,0 +1,347 @@
+#include "topic_log.h"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <random>
+#include <span>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+namespace bus::topic {
+
+namespace {
+
+constexpr std::size_t kVersionOffset = 4;
+
+class Fd {
+ public:
+  Fd() = default;
+  explicit Fd(int fd) : fd_{fd} {}
+  ~Fd() { reset(); }
+  Fd(const Fd&) = delete;
+  auto operator=(const Fd&) -> Fd& = delete;
+  Fd(Fd&& o) noexcept : fd_{o.fd_} { o.fd_ = -1; }
+  auto operator=(Fd&& o) noexcept -> Fd& {
+    if (this != &o) {
+      reset();
+      fd_ = o.fd_;
+      o.fd_ = -1;
+    }
+    return *this;
+  }
+  auto get() const -> int { return fd_; }
+  auto valid() const -> bool { return fd_ >= 0; }
+  auto reset() -> void {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+ private:
+  int fd_{-1};
+};
+
+auto err(std::string what) -> Error { return Error{std::move(what)}; }
+
+auto errFromErrno(int e, std::string_view what) -> Error {
+  return err(std::format("{}: {}", what, std::strerror(e)));
+}
+
+auto nowMs() -> std::int64_t {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(system_clock::now().time_since_epoch())
+      .count();
+}
+
+auto randU16() -> std::uint16_t {
+  thread_local std::mt19937 rng{std::random_device{}()};
+  std::uniform_int_distribution<unsigned> dist{0, 0xFFFF};
+  return static_cast<std::uint16_t>(dist(rng));
+}
+
+auto putU16(std::vector<std::byte>& b, std::uint16_t v) -> void {
+  b.push_back(std::byte(v & 0xFF));
+  b.push_back(std::byte((v >> 8) & 0xFF));
+}
+auto putU32(std::vector<std::byte>& b, std::uint32_t v) -> void {
+  for (int i = 0; i < 4; ++i) b.push_back(std::byte((v >> (i * 8)) & 0xFF));
+}
+auto putU64(std::vector<std::byte>& b, std::uint64_t v) -> void {
+  for (int i = 0; i < 8; ++i) b.push_back(std::byte((v >> (i * 8)) & 0xFF));
+}
+auto putBytes(std::vector<std::byte>& b, std::string_view s) -> void {
+  for (char c : s) b.push_back(std::byte(c));
+}
+auto putBytes(std::vector<std::byte>& b,
+              std::span<const std::uint8_t> s) -> void {
+  for (auto v : s) b.push_back(std::byte(v));
+}
+auto patchU64(std::span<std::byte> b, std::size_t at,
+              std::uint64_t v) -> void {
+  for (int i = 0; i < 8; ++i) b[at + i] = std::byte((v >> (i * 8)) & 0xFF);
+}
+
+auto getU16(std::span<const std::byte> b) -> std::uint16_t {
+  return static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(b[0])) |
+         (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(b[1])) << 8);
+}
+auto getU32(std::span<const std::byte> b) -> std::uint32_t {
+  std::uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) {
+    v |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(b[i]))
+         << (i * 8);
+  }
+  return v;
+}
+auto getU64(std::span<const std::byte> b) -> std::uint64_t {
+  std::uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) {
+    v |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(b[i]))
+         << (i * 8);
+  }
+  return v;
+}
+
+auto makeFileHeader() -> std::array<std::byte, kFileHeaderBytes> {
+  std::array<std::byte, kFileHeaderBytes> h{};
+  h[0] = std::byte{'B'};
+  h[1] = std::byte{'U'};
+  h[2] = std::byte{'S'};
+  h[3] = std::byte{0};
+  const std::uint32_t v = kFormatVersion;
+  for (int i = 0; i < 4; ++i) {
+    h[kVersionOffset + i] = std::byte((v >> (i * 8)) & 0xFF);
+  }
+  return h;
+}
+
+auto ensureHeader(const std::string& path) -> Result<void> {
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (fd >= 0) {
+    Fd guard{fd};
+    const auto h = makeFileHeader();
+    if (::pwrite(fd, h.data(), kFileHeaderBytes, 0) !=
+        static_cast<ssize_t>(kFileHeaderBytes)) {
+      return std::unexpected{errFromErrno(errno, "write header")};
+    }
+    return {};
+  }
+  if (errno != EEXIST) {
+    return std::unexpected{errFromErrno(errno, "init topic log")};
+  }
+  return {};
+}
+
+auto readAll(const std::string& path)
+    -> Result<std::vector<std::byte>> {
+  Fd fd{::open(path.c_str(), O_RDONLY)};
+  if (!fd.valid()) {
+    if (errno == ENOENT) return std::vector<std::byte>{};
+    return std::unexpected{errFromErrno(errno, "open topic log")};
+  }
+  struct stat st;
+  if (::fstat(fd.get(), &st) != 0) {
+    return std::unexpected{errFromErrno(errno, "fstat")};
+  }
+  std::vector<std::byte> buf(static_cast<std::size_t>(st.st_size));
+  if (buf.empty()) return buf;
+  if (::pread(fd.get(), buf.data(), buf.size(), 0) !=
+      static_cast<ssize_t>(buf.size())) {
+    return std::unexpected{errFromErrno(errno, "pread topic log")};
+  }
+  if (buf.size() >= kFileHeaderBytes) {
+    const auto v = getU32({buf.data() + kVersionOffset, 4});
+    if (v != kFormatVersion) {
+      return std::unexpected{err(std::format(
+          "topic log {} has format v{}, runtime expects v{}; wipe and retry",
+          path, v, kFormatVersion))};
+    }
+  }
+  return buf;
+}
+
+auto parseFrom(std::span<const std::byte> buf, std::int64_t start_offset,
+               std::size_t limit) -> std::vector<Message> {
+  std::vector<Message> out;
+  if (buf.size() < kFileHeaderBytes) return out;
+  std::size_t pos = start_offset > static_cast<std::int64_t>(kFileHeaderBytes)
+                        ? static_cast<std::size_t>(start_offset)
+                        : kFileHeaderBytes;
+  while (pos + 8 <= buf.size() && out.size() < limit) {
+    const std::uint64_t rec_len = getU64({buf.data() + pos, 8});
+    if (rec_len < 8 || pos + rec_len > buf.size()) break;
+
+    std::size_t p = pos + 8;
+    if (p + 8 > buf.size()) break;
+    const std::uint64_t sent_ms = getU64({buf.data() + p, 8});
+    p += 8;
+    if (p + 2 > buf.size()) break;
+    const std::uint16_t rand_tag = getU16({buf.data() + p, 2});
+    p += 2;
+    if (p + 4 > buf.size()) break;
+    const std::uint32_t ttl_ms = getU32({buf.data() + p, 4});
+    p += 4;
+    if (p + 1 > buf.size()) break;
+    const auto deliver_when = std::to_integer<std::uint8_t>(buf[p]);
+    p += 1;
+    if (p + 1 > buf.size()) break;
+    const auto slen = std::to_integer<std::uint8_t>(buf[p]);
+    p += 1;
+    if (p + slen > buf.size()) break;
+    std::string sender(reinterpret_cast<const char*>(buf.data() + p), slen);
+    p += slen;
+    if (p + 1 > buf.size()) break;
+    const auto plen = std::to_integer<std::uint8_t>(buf[p]);
+    p += 1;
+    if (p + plen > buf.size()) break;
+    std::string protocol(reinterpret_cast<const char*>(buf.data() + p), plen);
+    p += plen;
+    if (p + 16 > buf.size()) break;
+    std::array<std::uint8_t, 16> correlation{};
+    for (int i = 0; i < 16; ++i) {
+      correlation[i] = std::to_integer<std::uint8_t>(buf[p + i]);
+    }
+    p += 16;
+    if (p + 4 > buf.size()) break;
+    const std::uint32_t blen = getU32({buf.data() + p, 4});
+    p += 4;
+    if (p + blen > buf.size()) break;
+    std::string body(reinterpret_cast<const char*>(buf.data() + p), blen);
+
+    out.push_back(Message{
+        .id = std::format("{:013}-{}-{:04x}", sent_ms, sender, rand_tag),
+        .sent_ms = static_cast<std::int64_t>(sent_ms),
+        .sender = std::move(sender),
+        .ttl_ms = ttl_ms,
+        .deliver_when = deliver_when,
+        .protocol = std::move(protocol),
+        .correlation = correlation,
+        .body = std::move(body),
+        .offset = static_cast<std::int64_t>(pos),
+        .next_offset = static_cast<std::int64_t>(pos + rec_len),
+    });
+    pos += rec_len;
+  }
+  return out;
+}
+
+}  // namespace
+
+TopicLog::TopicLog(std::string path) : path_{std::move(path)} {}
+
+auto TopicLog::append(std::string_view sender, std::string_view body,
+                      const SendOpts& opts) -> Result<std::string> {
+  if (opts.protocol.size() > 0xFF) {
+    return std::unexpected{err("protocol too long (>255 bytes)")};
+  }
+  if (sender.size() > 0xFF) {
+    return std::unexpected{err("sender too long (>255 bytes)")};
+  }
+  if (body.size() > 0xFFFFFFFFULL) {
+    return std::unexpected{err("body too large")};
+  }
+
+  std::error_code ec;
+  fs::create_directories(fs::path{path_}.parent_path(), ec);
+  if (ec) return std::unexpected{err("create topics dir: " + ec.message())};
+
+  if (auto r = ensureHeader(path_); !r) return std::unexpected{r.error()};
+
+  const auto sent_ms = nowMs();
+  const auto rand_tag = randU16();
+
+  std::vector<std::byte> record;
+  record.reserve(48 + sender.size() + opts.protocol.size() + body.size());
+
+  putU64(record, 0);  // placeholder; patched after we know size
+  putU64(record, static_cast<std::uint64_t>(sent_ms));
+  putU16(record, rand_tag);
+  putU32(record, opts.ttl_ms);
+  record.push_back(std::byte(opts.deliver_when));
+  record.push_back(std::byte(static_cast<std::uint8_t>(sender.size())));
+  putBytes(record, sender);
+  record.push_back(std::byte(static_cast<std::uint8_t>(opts.protocol.size())));
+  putBytes(record, opts.protocol);
+  putBytes(record, std::span<const std::uint8_t>{opts.correlation.data(),
+                                                 opts.correlation.size()});
+  putU32(record, static_cast<std::uint32_t>(body.size()));
+  putBytes(record, body);
+
+  patchU64(record, 0, record.size());
+
+  if (record.size() > kMaxRecordBytes) {
+    return std::unexpected{err(std::format(
+        "record size {} exceeds runaway-protection cap {}",
+        record.size(), kMaxRecordBytes))};
+  }
+
+  Fd fd{::open(path_.c_str(), O_WRONLY | O_APPEND)};
+  if (!fd.valid()) {
+    return std::unexpected{errFromErrno(errno, "open topic log for append")};
+  }
+  const auto n = ::write(fd.get(), record.data(), record.size());
+  if (n != static_cast<ssize_t>(record.size())) {
+    return std::unexpected{errFromErrno(errno, "append record")};
+  }
+  return std::format("{:013}-{}-{:04x}", sent_ms, sender, rand_tag);
+}
+
+auto TopicLog::peek(std::int64_t start_offset, std::size_t limit) const
+    -> Result<std::vector<Message>> {
+  auto buf = readAll(path_);
+  if (!buf) return std::unexpected{buf.error()};
+  return parseFrom(*buf, start_offset, limit);
+}
+
+auto TopicLog::dump() const -> Result<std::vector<Message>> {
+  return peek(static_cast<std::int64_t>(kFileHeaderBytes));
+}
+
+auto cursorPath(std::string_view state_root, std::string_view topic,
+                std::string_view consumer) -> std::string {
+  std::string c{consumer};
+  if (c.empty()) c = "_default";
+  return std::string{state_root} + "/cursors/" + std::string{topic} + "/" +
+         c + ".cursor";
+}
+
+auto readCursor(const std::string& path) -> std::int64_t {
+  Fd fd{::open(path.c_str(), O_RDONLY)};
+  if (!fd.valid()) return 0;
+  std::array<std::byte, 8> buf{};
+  const auto n = ::read(fd.get(), buf.data(), buf.size());
+  if (n != 8) return 0;
+  return static_cast<std::int64_t>(getU64({buf.data(), 8}));
+}
+
+auto writeCursor(const std::string& path, std::int64_t offset) -> bool {
+  std::error_code ec;
+  fs::create_directories(fs::path{path}.parent_path(), ec);
+  if (ec) return false;
+  // Atomic via tmp+rename.
+  const std::string tmp = path + ".tmp";
+  Fd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)};
+  if (!fd.valid()) return false;
+  std::array<std::byte, 8> buf{};
+  const auto v = static_cast<std::uint64_t>(offset);
+  for (int i = 0; i < 8; ++i) buf[i] = std::byte((v >> (i * 8)) & 0xFF);
+  if (::write(fd.get(), buf.data(), buf.size()) != 8) return false;
+  fd.reset();
+  return ::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+}  // namespace bus::topic

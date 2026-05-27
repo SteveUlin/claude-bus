@@ -1,0 +1,64 @@
+// Minimal test rig: one agent (alice) + ops. Each agent tab gets the
+// per-agent status strip via bin/agent-bar — same shape as fleet.kdl.
+
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    tab_template name="agent_tab" {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=1 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+
+    agent_tab name="alice" focus=true {
+        pane size=1 borderless=true name="alice-bar" command="/home/sulin/claude-bus/bin/bus" {
+            args "agent-bar" "alice"
+        }
+        pane name="alice" command="bash" {
+            args "-c" "CLAUDE_BUS_AGENT_ID=alice exec claude --dangerously-skip-permissions"
+        }
+    }
+
+    tab name="ops" {
+        // Observability + the human inbox. The broker runs in the
+        // floating pane below — close it to stop delivery. Inbox
+        // dominates the tab (it's the human's destination on the bus);
+        // monitor sits on the side.
+        floating_panes {
+            pane name="broker" {
+                x "55%"
+                y "10%"
+                width "40%"
+                height "30%"
+                command "/home/sulin/claude-bus/bin/bus"
+                args "broker" "run"
+            }
+        }
+        pane split_direction="horizontal" {
+            pane name="human-inbox" size="67%" command="/home/sulin/claude-bus/bin/bus" {
+                args "inbox" "human"
+            }
+            pane name="monitor" command="/home/sulin/claude-bus/bin/bus" {
+                args "monitor"
+            }
+        }
+    }
+
+    tab name="test" {
+        pane cwd="/home/sulin/claude-bus" command="bash" {
+            args "-l"
+        }
+    }
+}

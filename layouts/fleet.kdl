@@ -68,10 +68,6 @@ layout {
         // a second `bus broker run` exits 1.
         floating_panes {
             pane name="broker" {
-                x "55%"
-                y "10%"
-                width "40%"
-                height "30%"
                 command "bash"
                 args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
             }

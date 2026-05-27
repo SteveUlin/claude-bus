@@ -63,8 +63,19 @@ auto computeStateFromLabel(std::string_view label) -> State {
   return State::New;
 }
 
+// One RPC + a broker-liveness flag. broker_alive=false signals
+// "couldn't reach the broker" — the dashboard renders a banner so a
+// dead broker is visible rather than masquerading as an empty fleet.
+// Mirrors the (broker down) sentinel that sub_agent_bar shows per pane.
+struct Snapshot {
+  bool broker_alive{false};
+  json::Value state;
+};
+
 auto fetchAll(const std::string& socket_path,
-              const std::set<std::string>& filter) -> json::Value {
+              const std::set<std::string>& filter) -> Snapshot {
+  Snapshot snap;
+  snap.state = json::Value::fromObject({});
   std::map<std::string, json::Value> req;
   req.insert({"op", json::Value::from("state")});
   // No "agent" key when filter is empty — broker returns all agents.
@@ -72,30 +83,49 @@ auto fetchAll(const std::string& socket_path,
   // the typical case (filter empty) needs only one round-trip.
   auto resp = rpc::call(socket_path,
                         json::Value::fromObject(std::move(req)));
-  if (!resp) return json::Value::fromObject({});
-  if (!resp->getOrBool("ok")) return json::Value::fromObject({});
+  if (!resp || !resp->getOrBool("ok")) return snap;
+  snap.broker_alive = true;
   const auto* state = resp->get("state");
-  if (state == nullptr || !state->isObject()) {
-    return json::Value::fromObject({});
+  if (state == nullptr || !state->isObject()) return snap;
+  if (filter.empty()) {
+    snap.state = *state;
+    return snap;
   }
-  // Filter client-side when set is non-empty.
-  if (filter.empty()) return *state;
   std::map<std::string, json::Value> out;
   for (const auto& [name, entry] : state->asObject()) {
     if (filter.contains(name)) out.insert({name, entry});
   }
-  return json::Value::fromObject(std::move(out));
+  snap.state = json::Value::fromObject(std::move(out));
+  return snap;
 }
 
-auto render(const json::Value& state, std::int64_t /*now_ms*/) -> void {
+auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   std::print("{}", kCursorHome);
   std::println("{}🚌 claude-bus monitor{}   {}refresh: 1s   Ctrl+C to exit{}{}",
                kBold, kReset, kDim, kReset, kClearEol);
+
+  // Broker-liveness banner — matches the (broker down) sentinel that
+  // sub_agent_bar uses per pane. The RPC retries every tick, so a
+  // recovered broker flips this back to connected automatically.
+  if (snap.broker_alive) {
+    std::println("{}🔌 broker connected{}{}", kDim, kReset, kClearEol);
+  } else {
+    std::println("{}⛔ broker down — retrying...{}{}", kRed, kReset, kClearEol);
+  }
+
   std::println("{}", kClearEol);
   std::println("{}{:<14}     {:<10} {:>5}  {:<22} {:>7}  {:<6} {:<28}{}{}",
                kBold, "AGENT", "STATE", "MAIL", "LAST EVENT", "AGE", "MODE",
                "INPUT", kReset, kClearEol);
 
+  if (!snap.broker_alive) {
+    // Don't pretend the fleet is empty; the broker just isn't answering.
+    std::print("{}", kClearBelow);
+    std::fflush(stdout);
+    return;
+  }
+
+  const auto& state = snap.state;
   if (!state.isObject() || state.asObject().empty()) {
     std::println("{}(no live agents){}{}", kDim, kReset, kClearEol);
     std::print("{}", kClearBelow);
@@ -169,8 +199,8 @@ auto subMonitor(std::span<const char* const> args) -> int {
   std::fflush(stdout);
 
   while (!gStopMonitor) {
-    const auto state = fetchAll(socket, filter);
-    render(state, nowMs());
+    const auto snap = fetchAll(socket, filter);
+    render(snap, nowMs());
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 

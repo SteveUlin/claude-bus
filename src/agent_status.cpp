@@ -34,10 +34,24 @@ auto extractField(std::string_view line, std::string_view key) -> std::string {
   pat += "\":\"";
   const auto pos = line.find(pat);
   if (pos == std::string_view::npos) return {};
-  const auto start = pos + pat.size();
-  const auto end = line.find('"', start);
-  if (end == std::string_view::npos) return {};
-  return std::string(line.substr(start, end - start));
+  std::size_t curr = pos + pat.size();
+  std::string out;
+  while (curr < line.size()) {
+    if (line[curr] == '"') break;
+    if (line[curr] == '\\' && curr + 1 < line.size()) {
+      char next = line[curr + 1];
+      if (next == '"' || next == '\\' || next == '/') out += next;
+      else if (next == 'n') out += '\n';
+      else if (next == 'r') out += '\r';
+      else if (next == 't') out += '\t';
+      else out += next; // fallback
+      curr += 2;
+    } else {
+      out += line[curr];
+      curr += 1;
+    }
+  }
+  return out;
 }
 
 // Parse "YYYY-MM-DDTHH:MM:SS.mmmZ" to ms since epoch (UTC). 0 on failure.

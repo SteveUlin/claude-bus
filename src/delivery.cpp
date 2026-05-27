@@ -240,7 +240,13 @@ auto Loop::scanEvents() -> void {
   in.seekg(events_offset_);
 
   std::string line;
+  auto valid_pos = in.tellg();
   while (std::getline(in, line)) {
+    if (in.eof()) {
+      break; // partial line, wait for the rest
+    }
+    valid_pos = in.tellg();
+
     if (line.empty()) continue;
     const auto event = extractField(line, "event");
     const auto agent = extractField(line, "agent");
@@ -305,8 +311,7 @@ auto Loop::scanEvents() -> void {
     removeInflight(oldest_id);
     in_flight_.erase(oldest_id);
   }
-  const auto pos = in.tellg();
-  events_offset_ = pos < 0 ? size : static_cast<std::int64_t>(pos);
+  events_offset_ = static_cast<std::int64_t>(valid_pos);
 }
 
 auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {

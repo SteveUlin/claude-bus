@@ -47,10 +47,24 @@ auto extractStr(std::string_view line, std::string_view key) -> std::string {
   pat += "\":\"";
   const auto pos = line.find(pat);
   if (pos == std::string_view::npos) return {};
-  const auto start = pos + pat.size();
-  const auto end = line.find('"', start);
-  if (end == std::string_view::npos) return {};
-  return std::string(line.substr(start, end - start));
+  std::size_t curr = pos + pat.size();
+  std::string out;
+  while (curr < line.size()) {
+    if (line[curr] == '"') break;
+    if (line[curr] == '\\' && curr + 1 < line.size()) {
+      char next = line[curr + 1];
+      if (next == '"' || next == '\\' || next == '/') out += next;
+      else if (next == 'n') out += '\n';
+      else if (next == 'r') out += '\r';
+      else if (next == 't') out += '\t';
+      else out += next; // fallback
+      curr += 2;
+    } else {
+      out += line[curr];
+      curr += 1;
+    }
+  }
+  return out;
 }
 
 // One-line formatted summary: HH:MM:SS.mmm  agent  event[:tool]  detail
@@ -111,8 +125,16 @@ auto ensureFileExists() -> void {
 auto drainStream(std::ifstream& in, std::string_view filter_agent,
                  std::string_view since) -> void {
   std::string line;
+  auto pos = in.tellg();
   while (std::getline(in, line)) {
     if (gStopEvents) return;
+    if (in.eof()) {
+      in.clear();
+      in.seekg(pos);
+      break;
+    }
+    pos = in.tellg();
+
     if (!filter_agent.empty()) {
       if (extractStr(line, "agent") != filter_agent) continue;
     }

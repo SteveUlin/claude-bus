@@ -146,16 +146,8 @@ class Parser {
           case 'b':  out += '\b'; break;
           case 'f':  out += '\f'; break;
           case 'u': {
-            // Only handle \u00XX → byte. Higher code points uncommon
-            // in our schema; reject if we see them.
             if (pos_ + 4 > src_.size()) {
               return std::unexpected{"truncated \\u escape"};
-            }
-            const auto hex = src_.substr(pos_, 4);
-            pos_ += 4;
-            if (hex[0] != '0' || hex[1] != '0') {
-              return std::unexpected{
-                  "\\u escapes beyond \\u00XX are not supported"};
             }
             auto hexVal = [](char ch) -> int {
               if (ch >= '0' && ch <= '9') return ch - '0';
@@ -163,12 +155,23 @@ class Parser {
               if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
               return -1;
             };
-            const int h1 = hexVal(hex[2]);
-            const int h2 = hexVal(hex[3]);
-            if (h1 < 0 || h2 < 0) {
-              return std::unexpected{"bad hex in \\u escape"};
+            int codepoint = 0;
+            for (int i = 0; i < 4; ++i) {
+              int h = hexVal(src_[pos_ + i]);
+              if (h < 0) return std::unexpected{"bad hex in \\u escape"};
+              codepoint = (codepoint << 4) | h;
             }
-            out += static_cast<char>(h1 * 16 + h2);
+            pos_ += 4;
+            if (codepoint <= 0x7F) {
+              out += static_cast<char>(codepoint);
+            } else if (codepoint <= 0x7FF) {
+              out += static_cast<char>(0xC0 | (codepoint >> 6));
+              out += static_cast<char>(0x80 | (codepoint & 0x3F));
+            } else {
+              out += static_cast<char>(0xE0 | (codepoint >> 12));
+              out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+              out += static_cast<char>(0x80 | (codepoint & 0x3F));
+            }
             break;
           }
           default:

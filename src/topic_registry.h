@@ -8,29 +8,56 @@
 // Persistence is crash-safe: writes go to topics.json.tmp then rename.
 
 #include "json_min.h"
+#include "types.h"
 
 #include <expected>
 #include <map>
 #include <string>
+#include <variant>
+#include <vector>
 #include <string_view>
 #include <vector>
 
 namespace bus {
 
-// All topics share these fields. Per-kind extras (subscribers for
-// pubsub, agent name for inbox/commands) live in `kind_config` as a
-// raw JSON blob — broker code keys off the kind string.
+struct AgentInboxConfig {
+  std::string agent;
+};
+
+struct TuiCommandsConfig {
+  std::string agent;
+};
+
+struct PubsubConfig {};
+
+struct WorkQueueConfig {};
+
+struct BlackboardConfig {};
+
+struct AppendLogConfig {};
+
+using TopicKindConfig = std::variant<
+    std::monostate,
+    AgentInboxConfig,
+    TuiCommandsConfig,
+    PubsubConfig,
+    WorkQueueConfig,
+    BlackboardConfig,
+    AppendLogConfig>;
+
+// A topic is a typed, persisted message stream.
 struct TopicConfig {
   std::string name;
   std::string kind;
   std::int64_t max_record_bytes{4096};
-  std::int64_t retention_ms{0};
-  json::Value kind_config{};  // free-form per-kind blob
+  std::int64_t retention_ms{0};  // 0 means unbounded
+  json::Value kind_config{json::Value::null_()};
+  TopicKindConfig parsed_config;  // free-form per-kind blob
 
   // Serialize / deserialize for topics.json.
   auto toJson() const -> json::Value;
   static auto fromJson(const json::Value& v)
-      -> std::expected<TopicConfig, std::string>;
+      -> Result<TopicConfig>;
 };
 
 // Known kinds. Other strings are accepted by the registry but rejected
@@ -47,15 +74,15 @@ class TopicRegistry {
   explicit TopicRegistry(std::string path);
 
   // Read topics.json into memory. ENOENT is success (empty registry).
-  auto load() -> std::expected<void, std::string>;
+  auto load() -> Result<void>;
 
   // Write the in-memory state atomically (tmp + rename). Called by
   // create() etc.; callers don't usually invoke directly.
-  auto save() const -> std::expected<void, std::string>;
+  auto save() const -> Result<void>;
 
   // Declare a new topic. Errors if name is invalid or already exists.
   // Persists to disk on success.
-  auto create(TopicConfig cfg) -> std::expected<void, std::string>;
+  auto create(TopicConfig cfg) -> Result<void>;
 
   // Existence check.
   auto contains(std::string_view name) const -> bool;
@@ -71,7 +98,7 @@ class TopicRegistry {
   // pre-existing or freshly created). On unknown patterns, returns
   // an error.
   auto getOrAutoCreate(std::string_view name)
-      -> std::expected<TopicConfig, std::string>;
+      -> Result<TopicConfig>;
 
  private:
   std::string path_;

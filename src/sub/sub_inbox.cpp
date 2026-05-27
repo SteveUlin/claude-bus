@@ -92,7 +92,7 @@ auto subInbox(std::span<const char* const> args) -> int {
   topic::TopicLog log{log_path};
   auto initial = log.dump();
   if (!initial) {
-    std::println(stderr, "inbox: dump failed: {}", initial.error().what);
+    std::println(stderr, "inbox: dump failed: {}", initial.error().message);
     return 1;
   }
   printHeader(topic_name, initial->size());

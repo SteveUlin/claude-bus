@@ -40,24 +40,37 @@ auto TopicConfig::toJson() const -> json::Value {
 }
 
 auto TopicConfig::fromJson(const json::Value& v)
-    -> std::expected<TopicConfig, std::string> {
-  if (!v.isObject()) return std::unexpected{"topic must be an object"};
+    -> Result<TopicConfig> {
+  if (!v.isObject()) return std::unexpected{Error{"topic must be an object"}};
   TopicConfig cfg;
   cfg.name = v.getOrString("name");
-  if (cfg.name.empty()) return std::unexpected{"missing topic name"};
+  if (cfg.name.empty()) return std::unexpected{Error{"missing topic name"}};
   cfg.kind = v.getOrString("kind");
-  if (cfg.kind.empty()) return std::unexpected{"missing topic kind"};
+  if (cfg.kind.empty()) return std::unexpected{Error{"missing topic kind"}};
   cfg.max_record_bytes = v.getOrInt("max_record_bytes", 4096);
   cfg.retention_ms = v.getOrInt("retention_ms", 0);
   if (const auto* kc = v.get("kind_config"); kc != nullptr) {
     cfg.kind_config = *kc;
+    if (cfg.kind == kKindAgentInbox) {
+      cfg.parsed_config = AgentInboxConfig{kc->getOrString("agent")};
+    } else if (cfg.kind == kKindTuiCommands) {
+      cfg.parsed_config = TuiCommandsConfig{kc->getOrString("agent")};
+    } else if (cfg.kind == kKindPubsub) {
+      cfg.parsed_config = PubsubConfig{};
+    } else if (cfg.kind == kKindWorkQueue) {
+      cfg.parsed_config = WorkQueueConfig{};
+    } else if (cfg.kind == kKindBlackboard) {
+      cfg.parsed_config = BlackboardConfig{};
+    } else if (cfg.kind == kKindAppendLog) {
+      cfg.parsed_config = AppendLogConfig{};
+    }
   }
   return cfg;
 }
 
 TopicRegistry::TopicRegistry(std::string path) : path_{std::move(path)} {}
 
-auto TopicRegistry::load() -> std::expected<void, std::string> {
+auto TopicRegistry::load() -> Result<void> {
   std::ifstream in{path_};
   if (!in) return {};  // missing file ⇒ empty registry, success
   std::ostringstream buf;
@@ -67,10 +80,10 @@ auto TopicRegistry::load() -> std::expected<void, std::string> {
 
   auto root = json::parse(src);
   if (!root) {
-    return std::unexpected{std::string{"parse topics.json: "} + root.error()};
+    return std::unexpected{Error{std::string{"parse topics.json: "} + root.error()}};
   }
   if (!root->isObject()) {
-    return std::unexpected{"topics.json must be an object"};
+    return std::unexpected{Error{"topics.json must be an object"}};
   }
   const auto* topics = root->get("topics");
   if (topics == nullptr || !topics->isObject()) {
@@ -79,8 +92,8 @@ auto TopicRegistry::load() -> std::expected<void, std::string> {
   for (const auto& [name, val] : topics->asObject()) {
     auto cfg = TopicConfig::fromJson(val);
     if (!cfg) {
-      return std::unexpected{std::string{"topic \""} + name +
-                             "\": " + cfg.error()};
+      return std::unexpected{Error{std::string{"topic \""} + name +
+                             "\": " + cfg.error().message}};
     }
     cfg->name = name;
     topics_.insert_or_assign(name, std::move(*cfg));
@@ -88,7 +101,7 @@ auto TopicRegistry::load() -> std::expected<void, std::string> {
   return {};
 }
 
-auto TopicRegistry::save() const -> std::expected<void, std::string> {
+auto TopicRegistry::save() const -> Result<void> {
   std::error_code ec;
   std::filesystem::create_directories(
       std::filesystem::path{path_}.parent_path(), ec);
@@ -105,29 +118,29 @@ auto TopicRegistry::save() const -> std::expected<void, std::string> {
   const std::string tmp = path_ + ".tmp";
   std::ofstream out{tmp};
   if (!out) {
-    return std::unexpected{std::string{"open "} + tmp + " for write"};
+    return std::unexpected{Error{std::string{"open "} + tmp + " for write"}};
   }
   out << wire;
   out.close();
   if (!out) {
-    return std::unexpected{"write topics.json.tmp failed"};
+    return std::unexpected{Error{"write topics.json.tmp failed"}};
   }
   if (::rename(tmp.c_str(), path_.c_str()) != 0) {
-    return std::unexpected{std::string{"rename: "} + std::strerror(errno)};
+    return std::unexpected{Error{std::string{"rename: "} + std::strerror(errno)}};
   }
   return {};
 }
 
 auto TopicRegistry::create(TopicConfig cfg)
-    -> std::expected<void, std::string> {
+    -> Result<void> {
   if (!isValidTopicName(cfg.name)) {
-    return std::unexpected{std::string{"invalid topic name \""} + cfg.name +
-                           "\" (lowercase + digit + - / _ only)"};
+    return std::unexpected{Error{std::string{"invalid topic name \""} + cfg.name +
+                           "\" (lowercase + digit + - / _ only)"}};
   }
-  if (cfg.kind.empty()) return std::unexpected{"missing topic kind"};
+  if (cfg.kind.empty()) return std::unexpected{Error{"missing topic kind"}};
   if (topics_.contains(cfg.name)) {
-    return std::unexpected{std::string{"topic \""} + cfg.name +
-                           "\" already exists"};
+    return std::unexpected{Error{std::string{"topic \""} + cfg.name +
+                           "\" already exists"}};
   }
   topics_.insert_or_assign(cfg.name, std::move(cfg));
   if (auto r = save(); !r) return std::unexpected{r.error()};
@@ -151,11 +164,11 @@ auto TopicRegistry::list() const -> std::vector<TopicConfig> {
 }
 
 auto TopicRegistry::getOrAutoCreate(std::string_view name)
-    -> std::expected<TopicConfig, std::string> {
+    -> Result<TopicConfig> {
   if (auto* existing = get(name); existing != nullptr) return *existing;
   if (!isValidTopicName(name)) {
-    return std::unexpected{std::string{"invalid topic name \""} +
-                           std::string{name} + "\""};
+    return std::unexpected{Error{std::string{"invalid topic name \""} +
+                           std::string{name} + "\""}};
   }
   TopicConfig cfg;
   cfg.name = std::string{name};
@@ -164,15 +177,17 @@ auto TopicRegistry::getOrAutoCreate(std::string_view name)
     std::map<std::string, json::Value> kc;
     kc.insert({"agent", json::Value::from(std::string{name.substr(6)})});
     cfg.kind_config = json::Value::fromObject(std::move(kc));
+    cfg.parsed_config = AgentInboxConfig{std::string{name.substr(6)}};
   } else if (name.starts_with("commands-")) {
     cfg.kind = std::string{kKindTuiCommands};
     std::map<std::string, json::Value> kc;
     kc.insert({"agent", json::Value::from(std::string{name.substr(9)})});
     cfg.kind_config = json::Value::fromObject(std::move(kc));
+    cfg.parsed_config = TuiCommandsConfig{std::string{name.substr(9)}};
   } else {
-    return std::unexpected{
+    return std::unexpected{Error{
         std::string{"topic \""} + std::string{name} +
-        "\" not declared; create it with `bus topic create`"};
+        "\" not declared; create it with `bus topic create`"}};
   }
   if (auto r = create(cfg); !r) return std::unexpected{r.error()};
   return cfg;

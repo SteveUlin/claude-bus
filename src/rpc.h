@@ -6,6 +6,7 @@
 // the dominant term anyway.
 
 #include "json_min.h"
+#include "types.h"
 
 #include <chrono>
 #include <cstdint>
@@ -71,12 +72,12 @@ class Server {
 // One-shot client. Connect, send `req` as a single JSON line, read the
 // response line, parse it. The socket is closed after.
 auto call(const std::string& socket_path, const json::Value& req)
-    -> std::expected<json::Value, std::string>;
+    -> Result<json::Value>;
 
 // Convenience: read one line ending in '\n' from a connected fd, with
 // an overall byte cap. Returns the line WITHOUT the trailing newline.
 auto readLine(int fd, std::size_t max_bytes = 1 << 20)
-    -> std::expected<std::string, std::string>;
+    -> Result<std::string>;
 
 // Convenience: write `s` followed by '\n', repeating writes until all
 // bytes are sent or an error occurs.

@@ -38,8 +38,7 @@ auto printTopic(const json::Value& v) -> void {
 
 auto subTopic(std::span<const char* const> args) -> int {
   if (args.empty()) {
-    std::println(stderr,
-                 "usage: bus topic <create|list|show> [...]");
+    std::println(stderr, "usage: bus topic <create|list|show|inbox> [...]");
     return 2;
   }
   const std::string_view verb{args[0]};
@@ -51,7 +50,7 @@ auto subTopic(std::span<const char* const> args) -> int {
     auto resp = rpc::call(cfg.socket_path,
                           json::Value::fromObject(std::move(m)));
     if (!resp) {
-      std::println(stderr, "bus topic list: {}", resp.error());
+      std::println(stderr, "bus topic list: {}", resp.error().message);
       return 1;
     }
     if (!resp->getOrBool("ok")) {
@@ -84,7 +83,7 @@ auto subTopic(std::span<const char* const> args) -> int {
     auto resp = rpc::call(cfg.socket_path,
                           json::Value::fromObject(std::move(m)));
     if (!resp) {
-      std::println(stderr, "bus topic show: {}", resp.error());
+      std::println(stderr, "bus topic show: {}", resp.error().message);
       return 1;
     }
     if (!resp->getOrBool("ok")) {
@@ -159,7 +158,7 @@ auto subTopic(std::span<const char* const> args) -> int {
     auto resp = rpc::call(cfg.socket_path,
                           json::Value::fromObject(std::move(m)));
     if (!resp) {
-      std::println(stderr, "bus topic create: {}", resp.error());
+      std::println(stderr, "bus topic create: {}", resp.error().message);
       return 1;
     }
     if (!resp->getOrBool("ok")) {
@@ -171,7 +170,9 @@ auto subTopic(std::span<const char* const> args) -> int {
     return 0;
   }
 
-  std::println(stderr, "bus topic: unknown verb \"{}\"", verb);
+  if (verb == "inbox") return subInbox(args.subspan(1));
+
+  std::println(stderr, "bus topic: unknown command \"{}\"", verb);
   return 2;
 }
 

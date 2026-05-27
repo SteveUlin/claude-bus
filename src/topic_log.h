@@ -31,6 +31,8 @@
 // and we don't depend on PIPE_BUF atomicity. The cap below is a
 // soft runaway-protection limit, not a correctness one.
 
+#include "types.h"
+
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -75,11 +77,6 @@ struct Message {
   std::int64_t next_offset{};
 };
 
-struct Error {
-  std::string what;
-};
-template <typename T>
-using Result = std::expected<T, Error>;
 
 // Open / lazily-create a topic log at the given path. Reads on a fresh
 // path return empty result sets.
@@ -90,15 +87,15 @@ class TopicLog {
   // Append one record. `sender` is stamped on the record (e.g., the
   // agent id of the caller). Returns the record's id.
   auto append(std::string_view sender, std::string_view body,
-              const SendOpts& opts) -> Result<std::string>;
+              const SendOpts& opts) -> bus::Result<std::string>;
 
   // Read all records at or past `start_offset`, optionally capped at
   // `limit`. Cursor not modified.
   auto peek(std::int64_t start_offset, std::size_t limit = SIZE_MAX) const
-      -> Result<std::vector<Message>>;
+      -> bus::Result<std::vector<Message>>;
 
   // Read all records currently in the log.
-  auto dump() const -> Result<std::vector<Message>>;
+  auto dump() const -> bus::Result<std::vector<Message>>;
 
   // Path to the topic log file.
   auto path() const -> const std::string& { return path_; }

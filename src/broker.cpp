@@ -209,7 +209,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   TopicRegistry registry{cfg.state_dir + "/topics.json"};
   if (auto r = registry.load(); !r) {
     logEvent(cfg.state_dir, "ERROR",
-             std::format("registry load failed: {}", r.error()));
+             std::format("registry load failed: {}", r.error().message));
     ::unlink(cfg.pid_path.c_str());
     ::close(pidfd);
     return 1;
@@ -250,7 +250,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       tc.kind_config = *kc;
     }
     if (auto r = registry.create(std::move(tc)); !r) {
-      return json::errorResponse(r.error());
+      return json::errorResponse(r.error().message);
     }
     return json::okResponse();
   });
@@ -297,7 +297,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto name = req.getOrString("topic");
     if (name.empty()) return json::errorResponse("missing topic");
     if (auto r = registry.getOrAutoCreate(name); !r) {
-      return json::errorResponse(r.error());
+      return json::errorResponse(r.error().message);
     }
     const auto sender = req.getOrString("sender", "unknown");
     const auto body = req.getOrString("body");
@@ -310,7 +310,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     auto& log = getOrOpenLog(name);
     auto r = log.append(sender, body, opts);
-    if (!r) return json::errorResponse(r.error().what);
+    if (!r) return json::errorResponse(r.error().message);
 
     const auto* tcfg = registry.get(name);
 
@@ -384,7 +384,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     auto& log = getOrOpenLog(name);
     auto r = log.peek(start,
                       limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX);
-    if (!r) return json::errorResponse(r.error().what);
+    if (!r) return json::errorResponse(r.error().message);
     std::vector<json::Value> arr;
     for (const auto& m : *r) arr.push_back(messageToJson(m));
     std::map<std::string, json::Value> resp;
@@ -500,7 +500,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     auto& log = getOrOpenLog(name);
     auto r = log.peek(start, 1);
-    if (!r) return json::errorResponse(r.error().what);
+    if (!r) return json::errorResponse(r.error().message);
     if (r->empty()) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value::null_()});

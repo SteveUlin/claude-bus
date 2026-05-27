@@ -55,6 +55,9 @@ class Fd {
   int fd_{-1};
 };
 
+using bus::Error;
+using bus::Result;
+
 auto err(std::string what) -> Error { return Error{std::move(what)}; }
 
 auto errFromErrno(int e, std::string_view what) -> Error {

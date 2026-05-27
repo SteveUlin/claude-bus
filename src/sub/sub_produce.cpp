@@ -41,7 +41,7 @@ auto callEnqueue(const std::string& topic, const std::string& body,
   auto resp =
       rpc::call(cfg.socket_path, json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus enqueue: {}", resp.error());
+    std::println(stderr, "bus enqueue: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {

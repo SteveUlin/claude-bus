@@ -51,21 +51,6 @@ auto inflightPath(const BrokerConfig& cfg, std::string_view msg_id)
   return inflightDir(cfg) + "/" + std::string{msg_id} + ".json";
 }
 
-// Naive extractor matching agent_status.cpp's pattern — `"key":"value"`.
-auto extractField(std::string_view line, std::string_view key)
-    -> std::string {
-  std::string pat;
-  pat += '"';
-  pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  const auto start = pos + pat.size();
-  const auto end = line.find('"', start);
-  if (end == std::string_view::npos) return {};
-  return std::string{line.substr(start, end - start)};
-}
-
 auto fileSize(const std::string& path) -> std::int64_t {
   struct stat st;
   if (::stat(path.c_str(), &st) != 0) return 0;
@@ -248,8 +233,11 @@ auto Loop::scanEvents() -> void {
     valid_pos = in.tellg();
 
     if (line.empty()) continue;
-    const auto event = extractField(line, "event");
-    const auto agent = extractField(line, "agent");
+    auto v = json::parse(line);
+    if (!v || !v->isObject()) continue;
+
+    const auto event = v->getOrString("event");
+    const auto agent = v->getOrString("agent");
     if (agent.empty()) continue;
 
     // Blocking-op ACK: either Stop (normal slash completion) or
@@ -261,8 +249,8 @@ auto Loop::scanEvents() -> void {
     const bool is_blocking_op_ack =
         event == "Stop" ||
         (event == "SessionEnd" &&
-         (extractField(line, "reason") == "clear" ||
-          extractField(line, "reason") == "compact"));
+         (v->getOrString("reason") == "clear" ||
+          v->getOrString("reason") == "compact"));
     if (is_blocking_op_ack && blocking_ops_.contains(agent)) {
       // The blocking-op msg_id is also tracked as in-flight (the
       // dispatch wrote it there). Clear both atomically.

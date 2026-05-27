@@ -69,7 +69,7 @@ auto subFetch(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus fetch: {}", resp.error());
+    std::println(stderr, "bus fetch: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
@@ -120,7 +120,7 @@ auto subPeek(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus peek: {}", resp.error());
+    std::println(stderr, "bus peek: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
@@ -148,7 +148,7 @@ auto subBody(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus body: {}", resp.error());
+    std::println(stderr, "bus body: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {

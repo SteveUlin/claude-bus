@@ -189,49 +189,57 @@ auto Server::run(std::chrono::milliseconds tick_interval,
 }
 
 auto Server::serve(int conn_fd) -> void {
-  auto line = readLine(conn_fd);
-  if (!line) {
-    const auto resp = json::serialize(json::errorResponse(line.error()));
-    writeAll(conn_fd, resp);
-    return;
+  while (true) {
+    auto line = readLine(conn_fd);
+    if (!line) {
+      // EOF or read error; client disconnected or socket failed.
+      if (line.error().message != "EOF before newline") {
+        const auto resp = json::serialize(json::errorResponse(line.error().message));
+        writeAll(conn_fd, resp);
+      }
+      return;
+    }
+    auto req = json::parse(*line);
+    if (!req) {
+      const auto resp = json::serialize(json::errorResponse(req.error()));
+      writeAll(conn_fd, resp);
+      continue;
+    }
+    auto handler_name = req->getOrString("op");
+    if (handler_name.empty()) {
+      const auto resp =
+          json::serialize(json::errorResponse("missing \"op\" field"));
+      writeAll(conn_fd, resp);
+      continue;
+    }
+    auto it = handlers_.find(handler_name);
+    if (it == handlers_.end()) {
+      const auto resp = json::serialize(
+          json::errorResponse(std::string{"unknown op: "} + handler_name));
+      writeAll(conn_fd, resp);
+      continue;
+    }
+    auto resp = it->second(*req);
+    const auto resp_str = json::serialize(resp);
+    if (!writeAll(conn_fd, resp_str)) {
+      return;
+    }
   }
-  auto req = json::parse(*line);
-  if (!req) {
-    const auto resp = json::serialize(json::errorResponse(req.error()));
-    writeAll(conn_fd, resp);
-    return;
-  }
-  const auto op = req->getOrString("op");
-  if (op.empty()) {
-    const auto resp =
-        json::serialize(json::errorResponse("missing \"op\" field"));
-    writeAll(conn_fd, resp);
-    return;
-  }
-  auto it = handlers_.find(op);
-  if (it == handlers_.end()) {
-    const auto resp = json::serialize(
-        json::errorResponse(std::string{"unknown op: "} + op));
-    writeAll(conn_fd, resp);
-    return;
-  }
-  const auto out = it->second(*req);
-  writeAll(conn_fd, json::serialize(out));
 }
 
 auto readLine(int fd, std::size_t max_bytes)
-    -> std::expected<std::string, std::string> {
+    -> Result<std::string> {
   std::string out;
   std::array<char, 4096> buf{};
   while (true) {
     const auto n = ::read(fd, buf.data(), buf.size());
     if (n < 0) {
       if (errno == EINTR) continue;
-      return std::unexpected{std::string{"read: "} + std::strerror(errno)};
+      return std::unexpected{Error{std::string{"read: "} + std::strerror(errno)}};
     }
     if (n == 0) {
       if (out.empty()) {
-        return std::unexpected{"connection closed before any data"};
+        return std::unexpected{Error{"EOF before newline"}};
       }
       return out;
     }
@@ -243,7 +251,7 @@ auto readLine(int fd, std::size_t max_bytes)
     }
     out.append(buf.data(), static_cast<std::size_t>(n));
     if (out.size() > max_bytes) {
-      return std::unexpected{"line exceeds max_bytes"};
+      return std::unexpected{Error{"line exceeded max_bytes"}};
     }
   }
 }
@@ -265,16 +273,16 @@ auto writeAll(int fd, std::string_view s) -> bool {
 }
 
 auto call(const std::string& socket_path, const json::Value& req)
-    -> std::expected<json::Value, std::string> {
+    -> Result<json::Value> {
   const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
-    return std::unexpected{std::string{"socket: "} + std::strerror(errno)};
+    return std::unexpected{Error{std::string{"socket: "} + std::strerror(errno)}};
   }
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   if (socket_path.size() >= sizeof(addr.sun_path)) {
     ::close(fd);
-    return std::unexpected{"socket path too long"};
+    return std::unexpected{Error{"socket path too long"}};
   }
   std::strncpy(addr.sun_path, socket_path.c_str(),
                sizeof(addr.sun_path) - 1);
@@ -282,13 +290,13 @@ auto call(const std::string& socket_path, const json::Value& req)
                 sizeof(addr)) < 0) {
     const int e = errno;
     ::close(fd);
-    return std::unexpected{std::string{"connect "} + socket_path + ": " +
-                           std::strerror(e)};
+    return std::unexpected{Error{std::string{"connect "} + socket_path + ": " +
+                           std::strerror(e)}};
   }
   const auto wire = json::serialize(req);
   if (!writeAll(fd, wire)) {
     ::close(fd);
-    return std::unexpected{"writeAll failed"};
+    return std::unexpected{Error{"writeAll failed"}};
   }
   // Half-close write side so the server's readLine returns once we're
   // done sending (otherwise it'd wait for \n we already wrote, but
@@ -299,8 +307,8 @@ auto call(const std::string& socket_path, const json::Value& req)
   ::close(fd);
   if (!line) return std::unexpected{line.error()};
   auto parsed = json::parse(*line);
-  if (!parsed) return std::unexpected{parsed.error()};
-  return parsed;
+  if (!parsed) return std::unexpected{Error{parsed.error()}};
+  return *parsed;
 }
 
 }  // namespace bus::rpc

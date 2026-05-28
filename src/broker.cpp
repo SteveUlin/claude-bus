@@ -118,6 +118,31 @@ auto procStartedMs(long pid) -> std::int64_t {
   return static_cast<std::int64_t>(started_secs) * 1000;
 }
 
+// Broker epoch. A small unsigned counter bumped on every successful
+// boot, persisted to $STATE/broker.epoch. Stamped onto each record at
+// enqueue and checked at dispatch — a record whose epoch doesn't
+// match the current broker's epoch is quarantined (escalated +
+// cursor-advanced) rather than delivered. Survives the wipe-on-boot
+// of volatile state below.
+auto readEpoch(const std::string& path) -> std::uint64_t {
+  std::ifstream in{path, std::ios::binary};
+  if (!in) return 0;
+  std::uint64_t v = 0;
+  in.read(reinterpret_cast<char*>(&v), sizeof(v));
+  return in ? v : 0;
+}
+
+auto writeEpoch(const std::string& path, std::uint64_t v) -> bool {
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    if (!out) return false;
+  }
+  return ::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
 }  // namespace
 
 auto resolveConfig() -> BrokerConfig {
@@ -184,26 +209,45 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // Keep pidfd open for the rest of runBroker — releasing the lock
   // requires closing it.
 
-  // Per design: every broker boot starts from zero for the message
-  // bus. Wipe topics, cursors, in-flight tracking, payload bodies,
-  // and presence sentinels so no stale mail or stuck deliveries leak
-  // across runs. We own the exclusive flock on broker.pid, so no
-  // other broker is reading any of these files.
+  // Surgical wipe: only the per-boot session state. Pre-feature this
+  // block removed everything except broker.pid + events.jsonl, which
+  // re-delivered no records ever — at the cost of throwing away
+  // audit-worthy topic logs on every restart. The epoch quarantine
+  // below replaces that hammer with a scalpel: durable record store
+  // persists, pre-boot records get audited + cursor-skipped on
+  // dispatch.
   //
-  // Preserve: broker.pid (we hold the flock), events.jsonl (the
-  // agent-activity log; broker reads it to compute state — wiping
-  // blinds the broker to alive agents and traps deliver_when=idle
-  // dispatches behind State::Starting).
-  for (const auto& entry :
-       std::filesystem::directory_iterator{cfg.state_dir, ec}) {
-    const auto name = entry.path().filename();
-    if (name == "broker.pid" || name == "events.jsonl") continue;
-    std::filesystem::remove_all(entry.path(), ec);
+  // Wipe:
+  //   - in-flight/   per-dispatch tracker; stale entries point at
+  //                  records that need a fresh dispatch decision
+  //   - presence/    [bus-attach] sentinels; the agents that wrote
+  //                  them are gone or about to re-attach
+  //   - tui-locks/   per-pane flocks; pane lifecycles are session
+  //                  scoped, the inodes are stale anyway
+  //   - broker.sock  rpc::Server::bind unlinks it too, but be explicit
+  //
+  // Preserve: topics/, cursors/, topics.json, agents/, payloads/,
+  // broker.log, broker.epoch (read below), events.jsonl, broker.pid.
+  for (const auto& d : {"in-flight", "presence", "tui-locks"}) {
+    std::filesystem::remove_all(cfg.state_dir + "/" + d, ec);
+  }
+  std::filesystem::remove(cfg.state_dir + "/broker.sock", ec);
+
+  // Bump the broker epoch. The previous run's epoch (or 0 on a
+  // fresh state dir) is the floor; we increment + persist + carry
+  // the new value into the Loop so it can quarantine records still
+  // sitting on disk from before this boot.
+  const std::string epoch_path = cfg.state_dir + "/broker.epoch";
+  const auto current_epoch = readEpoch(epoch_path) + 1;
+  if (!writeEpoch(epoch_path, current_epoch)) {
+    logEvent(cfg.state_dir, "WARN",
+             std::format("epoch write failed (continuing): {}", epoch_path));
   }
 
   const auto started_ms = nowMs();
   logEvent(cfg.state_dir, "START",
-           std::format("pid={} socket={}", ::getpid(), cfg.socket_path));
+           std::format("pid={} socket={} epoch={}", ::getpid(),
+                       cfg.socket_path, current_epoch));
 
   // Topic registry: lives in process memory, persists to topics.json.
   TopicRegistry registry{cfg.state_dir + "/topics.json"};
@@ -307,6 +351,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto dw = req.getOrString("deliver_when", "immediate");
     opts.deliver_when = (dw == "idle") ? 1 : 0;
     opts.protocol = req.getOrString("protocol", "text");
+    // Stamp the broker epoch so dispatch can quarantine records that
+    // outlive a broker restart. Same epoch on the pubsub cascade
+    // below so subscribers all see consistent provenance.
+    delivery::stampEpoch(opts, current_epoch);
 
     auto& log = getOrOpenLog(name);
     auto r = log.append(sender, body, opts);
@@ -551,7 +599,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // with RPC handlers. Same thread → no locking around registry /
   // topic logs / in-flight tracker. Construct before binding the
   // socket so handlers below can capture `dl`.
-  delivery::Loop dl{cfg, registry};
+  delivery::Loop dl{cfg, registry, current_epoch};
   dl.load();
 
   // Drop a record by msg_id without delivering — advance the topic
@@ -619,6 +667,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       auto& audit_log = getOrOpenLog("audit");
       topic::SendOpts opts;
       opts.protocol = "drop";
+      delivery::stampEpoch(opts, current_epoch);
       const auto entry = std::format(
           "drop msg_id={} topic={} next_offset={} caller={}",
           msg_id, found_topic, next_offset,

@@ -116,8 +116,9 @@ auto formatPointerBody(const topic::Message& m) -> std::string {
 
 }  // namespace
 
-Loop::Loop(const BrokerConfig& cfg, TopicRegistry& registry)
-    : cfg_{cfg}, registry_{registry} {}
+Loop::Loop(const BrokerConfig& cfg, TopicRegistry& registry,
+           std::uint64_t current_epoch)
+    : cfg_{cfg}, registry_{registry}, current_epoch_{current_epoch} {}
 
 auto Loop::blockingOpPath(std::string_view agent) const -> std::string {
   return cfg_.state_dir + "/blocking-op/" + std::string{agent};
@@ -394,6 +395,28 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
       topic::writeCursor(cursor_p, m.next_offset);
       continue;
     }
+    // Epoch quarantine. A record stamped with a different epoch
+    // belongs to a previous broker run (or wasn't stamped at all,
+    // i.e. epoch 0 from a legacy producer or a pre-feature record).
+    // Escalate via the audit + inbox-ops trail and advance the cursor
+    // — never deliver. This is the resilience hook that lets the
+    // wipe-on-boot shrink to just session-volatile state without
+    // re-delivering yesterday's mail as new.
+    if (const auto rec_epoch = recordEpoch(m);
+        rec_epoch != current_epoch_) {
+      InFlight fake;
+      fake.msg_id = m.id;
+      fake.topic = cfg.name;
+      fake.agent = agent;
+      fake.cursor_after = m.next_offset;
+      fake.dispatched_at_ms = now;
+      escalate(fake,
+               std::format("stale-epoch (record={}, current={})",
+                           rec_epoch, current_epoch_),
+               m.body);
+      topic::writeCursor(cursor_p, m.next_offset);
+      continue;
+    }
     // Already in-flight? Wait for ack.
     if (in_flight_.contains(m.id)) return;
 
@@ -487,6 +510,22 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
       topic::writeCursor(cursor_p, m.next_offset);
       continue;
     }
+    // Epoch quarantine — see dispatchAgentInbox for the rationale.
+    if (const auto rec_epoch = recordEpoch(m);
+        rec_epoch != current_epoch_) {
+      InFlight fake;
+      fake.msg_id = m.id;
+      fake.topic = cfg.name;
+      fake.agent = agent;
+      fake.cursor_after = m.next_offset;
+      fake.dispatched_at_ms = now;
+      escalate(fake,
+               std::format("stale-epoch (record={}, current={})",
+                           rec_epoch, current_epoch_),
+               m.body);
+      topic::writeCursor(cursor_p, m.next_offset);
+      continue;
+    }
     if (in_flight_.contains(m.id)) return;
 
     // tui-commands records default to deliver_when=idle (set by
@@ -549,6 +588,11 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
   topic::SendOpts opts;
   opts.protocol = "audit";
+  // Stamp the broker's own emissions with the current epoch — without
+  // this, the very next dispatch tick sees the unstamped audit/ops
+  // record as stale, quarantines it, writes another unstamped record,
+  // and the broker dispatches itself into an infinite escalation loop.
+  stampEpoch(opts, current_epoch_);
   const auto entry = std::format(
       "delivery exhausted msg_id={} topic={} agent={} reason={} body={}",
       f.msg_id, f.topic, f.agent, reason, body);
@@ -562,6 +606,7 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   topic::TopicLog ops_log{cfg_.state_dir + "/topics/inbox-ops.log"};
   topic::SendOpts mopts;
   mopts.protocol = "delivery-failure";
+  stampEpoch(mopts, current_epoch_);
   const auto mail = std::format(
       "delivery to {} exhausted ({}): {}", f.agent, reason, body);
   auto _ig2 = ops_log.append("broker", mail, mopts);

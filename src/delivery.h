@@ -26,6 +26,7 @@
 //   - pubsub / blackboard / work-queue (4f)
 
 #include "broker.h"
+#include "topic_log.h"
 #include "topic_registry.h"
 
 #include <cstdint>
@@ -34,6 +35,28 @@
 #include <string>
 
 namespace bus::delivery {
+
+// Broker epoch helpers. The wire format's `correlation` field is
+// declared for RPC pairing but never set today; we repurpose its
+// first 8 bytes (little-endian u64) for the broker's boot-epoch.
+// Records carrying an epoch that doesn't match the running broker's
+// are quarantined on dispatch — see dispatchAgentInbox /
+// dispatchTuiCommands.
+inline auto stampEpoch(topic::SendOpts& opts, std::uint64_t epoch)
+    -> void {
+  for (int i = 0; i < 8; ++i) {
+    opts.correlation[i] =
+        static_cast<std::uint8_t>((epoch >> (i * 8)) & 0xFF);
+  }
+}
+
+inline auto recordEpoch(const topic::Message& m) -> std::uint64_t {
+  std::uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) {
+    v |= static_cast<std::uint64_t>(m.correlation[i]) << (i * 8);
+  }
+  return v;
+}
 
 constexpr std::size_t kInlineMaxBytes = 1024;
 
@@ -54,7 +77,11 @@ constexpr std::int32_t kMaxAttempts = 3;
 
 class Loop {
  public:
-  Loop(const BrokerConfig& cfg, TopicRegistry& registry);
+  // current_epoch is stamped onto records by the enqueue handler and
+  // checked here on dispatch — see broker.cpp's runBroker for how the
+  // counter advances per boot.
+  Loop(const BrokerConfig& cfg, TopicRegistry& registry,
+       std::uint64_t current_epoch);
 
   // Read in-flight files from disk on broker startup. Idempotent.
   auto load() -> void;
@@ -79,6 +106,7 @@ class Loop {
  private:
   const BrokerConfig& cfg_;
   TopicRegistry& registry_;
+  std::uint64_t current_epoch_{0};
   std::map<std::string, InFlight> in_flight_;  // keyed by msg_id
 
   // events.jsonl tail position. Each tick reads from here to EOF and

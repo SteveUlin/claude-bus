@@ -101,5 +101,9 @@
       }
     ]
   },
+  "statusLine": {
+    "type": "command",
+    "command": "$CLAUDE_PROJECT_DIR/settings/statusline-write.sh"
+  },
   "theme": "dark"
 }

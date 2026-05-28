@@ -4,6 +4,12 @@
 // pane-derived TUI fields all come from the same central snapshot the
 // agent-bar uses, so the two surfaces can never disagree on what an
 // agent is doing.
+//
+// The FOCUS column reads events.jsonl directly (in-process, tail-only)
+// for the latest UserPromptSubmit body per agent — the broker doesn't
+// expose prompt bodies through the state RPC, and we'd rather not
+// extend the shared lib for a viewer-only signal. Read is bounded to
+// the last ~64 KiB so even a multi-MB log stays cheap.
 
 #include "../agent_status.h"
 #include "../broker.h"
@@ -12,14 +18,19 @@
 #include "../signals.h"
 #include "../sub.h"
 
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <ios>
 #include <map>
 #include <print>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace bus {
@@ -31,23 +42,10 @@ using namespace bus::ansi;
 volatile std::sig_atomic_t gStopMonitor = 0;
 auto onSignalMonitor(int) -> void { gStopMonitor = 1; }
 
-auto formatMode(std::string_view mode) -> std::string {
-  if (mode == "INSERT" || mode == "unknown" || mode.empty()) return "";
-  return std::string{mode};
-}
-
-constexpr std::size_t kInputColWidth = 28;
-auto formatInput(std::string_view buffer) -> std::string {
-  if (buffer.empty() || buffer == "(empty)") return "·";
-  if (buffer.size() > kInputColWidth) {
-    return std::string{buffer.substr(0, kInputColWidth - 2)} + "…";
-  }
-  return std::string{buffer};
-}
+// ─── data layer ──────────────────────────────────────────────────────
 
 // Convert the wire state label back to the State enum so we can keep
-// using stateName / stateColor / stateGlyph for table rendering. The
-// label set matches stateName 1:1.
+// using stateName / stateColor / stateGlyph for table rendering.
 auto computeStateFromLabel(std::string_view label) -> State {
   if (label == "NEW") return State::New;
   if (label == "STARTING") return State::Starting;
@@ -66,7 +64,6 @@ auto computeStateFromLabel(std::string_view label) -> State {
 // One RPC + a broker-liveness flag. broker_alive=false signals
 // "couldn't reach the broker" — the dashboard renders a banner so a
 // dead broker is visible rather than masquerading as an empty fleet.
-// Mirrors the (broker down) sentinel that sub_agent_bar shows per pane.
 struct Snapshot {
   bool broker_alive{false};
   json::Value state;
@@ -78,9 +75,6 @@ auto fetchAll(const std::string& socket_path,
   snap.state = json::Value::fromObject({});
   std::map<std::string, json::Value> req;
   req.insert({"op", json::Value::from("state")});
-  // No "agent" key when filter is empty — broker returns all agents.
-  // With a single named agent, we batch one call per filter member;
-  // the typical case (filter empty) needs only one round-trip.
   auto resp = rpc::call(socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp || !resp->getOrBool("ok")) return snap;
@@ -99,27 +93,178 @@ auto fetchAll(const std::string& socket_path,
   return snap;
 }
 
+// Honors $CLAUDE_BUS_STATE; same fallback the rest of the code uses.
+auto eventsLogPath() -> const std::string& {
+  static const std::string path = [] {
+    const char* env = std::getenv("CLAUDE_BUS_STATE");
+    return std::string{env ? env : "/tmp/claude-bus"} + "/events.jsonl";
+  }();
+  return path;
+}
+
+// Light JSON string-value extractor. Returns the raw inner-bytes between
+// the matching quotes, no escape handling. Fine for fields we know are
+// plain ASCII (agent, event); the prompt body needs more care — see
+// extractPromptTrimmed.
+auto extractStr(std::string_view line, std::string_view key) -> std::string {
+  std::string pat;
+  pat.reserve(key.size() + 4);
+  pat += '"';
+  pat += key;
+  pat += "\":\"";
+  const auto pos = line.find(pat);
+  if (pos == std::string_view::npos) return {};
+  const auto start = pos + pat.size();
+  const auto end = line.find('"', start);
+  if (end == std::string_view::npos) return {};
+  return std::string(line.substr(start, end - start));
+}
+
+// Pull `"prompt":"..."` and return the first line trimmed to ~max_chars.
+// Handles `\\`, `\"`, `\/` escapes; stops at `\n` `\r` `\t` (we only want
+// the first line). Other escapes are dropped silently. Truncation
+// appends `…`.
+auto extractPromptTrimmed(std::string_view line,
+                          std::size_t max_chars = 28) -> std::string {
+  constexpr std::string_view key = "\"prompt\":\"";
+  const auto pos = line.find(key);
+  if (pos == std::string_view::npos) return {};
+  std::size_t i = pos + key.size();
+  std::string out;
+  out.reserve(max_chars + 8);
+  while (i < line.size()) {
+    const char c = line[i];
+    if (c == '"') break;
+    if (c == '\\' && i + 1 < line.size()) {
+      const char n = line[i + 1];
+      if (n == 'n' || n == 'r' || n == 't') break;  // first line only
+      if (n == '"' || n == '\\' || n == '/') {
+        out += n;
+        i += 2;
+        continue;
+      }
+      // Unknown escape — skip both bytes.
+      i += 2;
+      continue;
+    }
+    out += c;
+    ++i;
+    if (out.size() > max_chars + 4) break;  // cap scan early
+  }
+  // Trim ASCII whitespace.
+  while (!out.empty() &&
+         (out.back() == ' ' || out.back() == '\t')) {
+    out.pop_back();
+  }
+  std::size_t lstrip = 0;
+  while (lstrip < out.size() &&
+         (out[lstrip] == ' ' || out[lstrip] == '\t')) {
+    ++lstrip;
+  }
+  if (lstrip > 0) out.erase(0, lstrip);
+  if (out.size() > max_chars) {
+    out.resize(max_chars - 1);
+    out += "…";
+  }
+  return out;
+}
+
+// Scan the last ~64 KiB of events.jsonl for UserPromptSubmit records;
+// return a map of agent → first-line-trimmed prompt. The scan is
+// sequential so the last occurrence per agent wins, which is what we
+// want for "most recent". Empty map on missing file.
+auto latestPrompts() -> std::map<std::string, std::string> {
+  std::map<std::string, std::string> out;
+  std::ifstream in{eventsLogPath(), std::ios::ate | std::ios::binary};
+  if (!in) return out;
+  const auto end_pos = in.tellg();
+  if (end_pos <= 0) return out;
+  constexpr std::streamoff kTailBytes = 64 * 1024;
+  const std::streamoff end_off = static_cast<std::streamoff>(end_pos);
+  const std::streamoff start = std::max<std::streamoff>(0, end_off - kTailBytes);
+  in.seekg(start);
+  std::string line;
+  // Skip a potentially-partial leading line when we seeked into the
+  // middle of the file.
+  if (start > 0) std::getline(in, line);
+  while (std::getline(in, line)) {
+    if (line.find("\"event\":\"UserPromptSubmit\"") == std::string::npos) {
+      continue;
+    }
+    auto agent = extractStr(line, "agent");
+    if (agent.empty()) continue;
+    auto trimmed = extractPromptTrimmed(line, 28);
+    if (trimmed.empty()) continue;
+    out.insert_or_assign(std::move(agent), std::move(trimmed));
+  }
+  return out;
+}
+
+// ─── rendering ───────────────────────────────────────────────────────
+
+constexpr std::size_t kFocusColWidth = 32;
+
+// FOCUS column: prompt if we have one, else the last tool/event, else
+// a sentinel. `has_input` is whether the agent's TUI buffer is non-
+// empty — we append a draft glyph at the end so the FOCUS column also
+// signals "user has a draft typed."
+auto formatFocus(std::string_view prompt,
+                 std::string_view last_event,
+                 std::string_view last_tool,
+                 std::string_view state_label) -> std::string {
+  std::string body;
+  if (!prompt.empty()) {
+    body = std::string{prompt};
+  } else if (state_label == "STARTING" || state_label == "NEW") {
+    body = "booting";
+  } else if (!last_tool.empty()) {
+    body = std::string{last_event};
+    body += ':';
+    body += last_tool;
+  } else if (!last_event.empty()) {
+    body = std::string{last_event};
+  } else {
+    body = "—";
+  }
+  if (body.size() > kFocusColWidth - 2) {
+    body.resize(kFocusColWidth - 3);
+    body += "…";
+  }
+  return body;
+}
+
+// Mail cell — bare count when zero is dim, > 0 is cyan-emphasized.
+// One column instead of (glyph + count).
+auto formatMail(std::int64_t unread) -> std::string {
+  if (unread <= 0) return "·";
+  return std::to_string(unread);
+}
+
 auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   std::print("{}", kCursorHome);
-  std::println("{}🚌 claude-bus monitor{}   {}refresh: 1s   Ctrl+C to exit{}{}",
+
+  // Title row — compact, no emoji clutter.
+  std::println("{}🚌 claude-bus monitor{}   {}refresh 1s · Ctrl+C exit{}{}",
                kBold, kReset, kDim, kReset, kClearEol);
 
-  // Broker-liveness banner — matches the (broker down) sentinel that
-  // sub_agent_bar uses per pane. The RPC retries every tick, so a
-  // recovered broker flips this back to connected automatically.
+  // Broker liveness — single status row.
   if (snap.broker_alive) {
     std::println("{}🔌 broker connected{}{}", kDim, kReset, kClearEol);
   } else {
-    std::println("{}⛔ broker down — retrying...{}{}", kRed, kReset, kClearEol);
+    std::println("{}⛔ broker down — retrying...{}{}",
+                 kRed, kReset, kClearEol);
   }
 
   std::println("{}", kClearEol);
-  std::println("{}{:<14}     {:<10} {:>5}  {:<22} {:>7}  {:<6} {:<28}{}{}",
-               kBold, "AGENT", "STATE", "MAIL", "LAST EVENT", "AGE", "MODE",
-               "INPUT", kReset, kClearEol);
+
+  // Header — column widths matched 1:1 to the data row below. The
+  // "    " (4-space) slot stands in for the state-glyph (2 chars) +
+  // its trailing space + the space after the agent name.
+  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "FOCUS",
+               kReset, kClearEol);
 
   if (!snap.broker_alive) {
-    // Don't pretend the fleet is empty; the broker just isn't answering.
     std::print("{}", kClearBelow);
     std::fflush(stdout);
     return;
@@ -127,11 +272,14 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
   const auto& state = snap.state;
   if (!state.isObject() || state.asObject().empty()) {
-    std::println("{}(no live agents){}{}", kDim, kReset, kClearEol);
+    std::println("{}  (no live agents){}{}", kDim, kReset, kClearEol);
     std::print("{}", kClearBelow);
     std::fflush(stdout);
     return;
   }
+
+  // Tail-scan events.jsonl once per render for the FOCUS column.
+  const auto prompts = latestPrompts();
 
   std::size_t rendered = 0;
   for (const auto& [name, entry] : state.asObject()) {
@@ -139,46 +287,51 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto state_label = entry.getOrString("state");
     if (state_label == "GONE" || state_label == "ENDED") continue;
 
-    const auto process =
-        processAxisFrom(entry.get("axes") != nullptr
-                            ? entry.get("axes")->getOrString("process")
-                            : "");
-    const auto turn =
-        turnAxisFrom(entry.get("axes") != nullptr
-                         ? entry.get("axes")->getOrString("turn")
-                         : "");
-    const auto st = computeStateFromLabel(state_label);  // see helper below
+    const auto st = computeStateFromLabel(state_label);
     const auto unread = entry.getOrInt("unread");
     const auto age_ms = entry.getOrInt("age_ms", -1);
     const auto age_s = age_ms >= 0 ? age_ms / 1000 : -1;
     const auto last_event = entry.getOrString("last_event");
     const auto last_tool = entry.getOrString("last_tool");
     const auto buffer = entry.getOrString("buffer");
-    const auto mode = entry.getOrString("mode");
+    const auto attached = entry.getOrBool("attached");
+    const bool has_draft = !buffer.empty() && buffer != "(empty)";
 
-    std::string event_label = last_event;
-    if (!last_tool.empty()) event_label += ":" + last_tool;
-    if (event_label.empty()) event_label = "—";
+    std::string prompt;
+    if (auto it = prompts.find(name); it != prompts.end()) {
+      prompt = it->second;
+    }
+    const auto focus = formatFocus(prompt, last_event, last_tool, state_label);
 
-    const auto* mail_glyph = unread > 0 ? "📬" : "📭";
+    // Attach dot — green when attached, dim when not. Same convention as
+    // the per-pane agent-bar.
+    const auto attach_glyph = attached ? "●" : "○";
+    const auto attach_color = attached ? kBrightGreen : kDim;
+
     const auto mail_color = unread > 0 ? kCyan : kDim;
-    const bool has_input = !buffer.empty() && buffer != "(empty)";
+    const auto mail_cell = formatMail(unread);
 
-    (void)process;  // axes are available for future per-axis columns
-    (void)turn;
-
+    // Render the row in one println. Draft glyph is appended after the
+    // FOCUS text so it shifts naturally with the column width.
+    const auto draft_suffix = has_draft
+                                  ? std::string{" "} +
+                                        std::string{kYellow} + "✎" +
+                                        std::string{kReset}
+                                  : std::string{};
     std::println(
-        "{}{:<14}{} {}  {}{:<10}{} {}{} {:>2}{}  {:<22} {:>7}  {:<6} "
-        "{}{:<28}{}{}",
-        agentColor(name), name, kReset, stateGlyph(st),
-        stateColor(st), stateName(st), kReset, mail_color, mail_glyph,
-        unread, kReset, event_label, formatAge(age_s),
-        formatMode(mode), has_input ? kYellow : kDim,
-        formatInput(buffer), kReset, kClearEol);
+        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>5}{} {}{}{}{}{}",
+        attach_color, attach_glyph, kReset,
+        agentColor(name), name, kReset,
+        stateGlyph(st),
+        stateColor(st), stateName(st), kReset,
+        mail_color, mail_cell, kReset,
+        kDim, formatAge(age_s), kReset,
+        prompt.empty() ? kDim : "", focus, kReset,
+        draft_suffix, kClearEol);
     ++rendered;
   }
   if (rendered == 0) {
-    std::println("{}(no live agents){}{}", kDim, kReset, kClearEol);
+    std::println("{}  (no live agents){}{}", kDim, kReset, kClearEol);
   }
   std::print("{}", kClearBelow);
   std::fflush(stdout);

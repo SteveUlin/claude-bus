@@ -15,6 +15,7 @@ const Subcommand kSubcommands[] = {
     {"agent-bar", subAgentBar, "per-tab status strip for an agent"},
     {"agents", subAgents, "list registered agents (--kind/--session/--role, NAME, --json)"},
     {"broker", subBroker, "broker daemon: foreground; flock-singleton"},
+    {"deck", subDeck, "one-sentence-per-agent activity card (NEEDS YOU + FLEET zones)"},
     {"events", subEvents, "tail the bus event log"},
     {"help", subHelp, "list subcommands"},
     {"inflight", subInflight, "broker's in-flight deliveries (debug)"},

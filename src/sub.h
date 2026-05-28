@@ -24,6 +24,9 @@ auto subEvents(std::span<const char* const>) -> int;
 // Lifecycle log (defined in src/sub/sub_log.cpp).
 auto subLog(std::span<const char* const>) -> int;
 
+// Per-agent activity card (defined in src/sub/sub_deck.cpp).
+auto subDeck(std::span<const char* const>) -> int;
+
 // Viewers (defined in src/sub/sub_{monitor,inbox,agent_bar}.cpp).
 auto subMonitor(std::span<const char* const>) -> int;
 auto subInbox(std::span<const char* const>) -> int;

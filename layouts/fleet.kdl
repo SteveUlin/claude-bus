@@ -100,18 +100,16 @@ layout {
                 pane name="comms" size="55%" command="bash" {
                     args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role comms comms"
                 }
-                // Right column: lifecycle log + jj-log stacked. alt+↑/↓
-                // toggles between them; only one is expanded at a time.
-                // bus-log is the active surface — colored lifecycle
-                // transitions tailed from events.jsonl (started /
-                // working / finished / needs-input / idle / ended). The
-                // inbox-ops topic still exists for broker
-                // delivery-failure escalation as audit-as-data, but the
-                // cockpit pane no longer renders it. See
-                // docs/ops-inbox-redesign.md.
+                // Right column: deck + jj-log stacked. alt+↑/↓ toggles
+                // between them; only one is expanded at a time.
+                // bus deck is the active surface — one-sentence-per-
+                // agent activity card with ⚠ NEEDS YOU pinned and
+                // ✓ FLEET sorted by recency. `bus log` keeps its verb
+                // for debugging but isn't pinned to the cockpit. See
+                // docs/comms-ui.md.
                 pane stacked=true {
-                    pane name="bus-log" command="bash" {
-                        args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" log --since 30m; rc=$?; printf '\\n\\033[1;31m[bus-log exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                    pane name="bus-deck" command="bash" {
+                        args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" deck; rc=$?; printf '\\n\\033[1;31m[bus-deck exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
                     }
                     // watch refreshes every 2 s; `-c` interprets ANSI
                     // colors from jj. The bash restart loop is a safety

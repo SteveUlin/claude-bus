@@ -247,7 +247,7 @@ auto latestAgentTails() -> std::map<std::string, AgentTail> {
 
 constexpr std::size_t kFocusColWidth = 32;
 constexpr std::size_t kProjectColWidth = 12;
-constexpr std::size_t kTitleColWidth = 14;
+constexpr std::size_t kTitleColWidth = 32;
 
 // TITLE column source — $STATE/title/<agent>, set by `bus msg mail
 // --title TITLE`. Truncates to the column width.
@@ -346,7 +346,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<12} {:<14} {}{}{}",
+  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<12} {:<32} {}{}{}",
                kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "TITLE",
                "FOCUS", kReset, kClearEol);
 
@@ -417,7 +417,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
     std::println(
         "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
-        "{}{:<12}{} {}{:<14}{} {}{}{}{}{}",
+        "{}{:<12}{} {}{:<32}{} {}{}{}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),

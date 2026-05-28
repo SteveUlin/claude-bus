@@ -119,6 +119,18 @@ auto focusFromFile(std::string_view name) -> std::string {
   return content;
 }
 
+// Read $STATE/title/<name> — set by `bus msg mail --title`. The TITLE
+// column's source. Empty string when no title has been set (or it was
+// explicitly cleared).
+auto titleFromFile(std::string_view name) -> std::string {
+  std::string path = stateDir() + "/title/" + std::string{name};
+  std::ifstream in{path};
+  if (!in) return {};
+  std::string content;
+  std::getline(in, content);
+  return content;
+}
+
 // Basename of a slash-separated path. Drops trailing slashes first.
 // Empty input → empty output.
 auto pathBasename(std::string_view path) -> std::string {
@@ -235,6 +247,19 @@ auto latestAgentTails() -> std::map<std::string, AgentTail> {
 
 constexpr std::size_t kFocusColWidth = 32;
 constexpr std::size_t kProjectColWidth = 12;
+constexpr std::size_t kTitleColWidth = 14;
+
+// TITLE column source — $STATE/title/<agent>, set by `bus msg mail
+// --title TITLE`. Truncates to the column width.
+auto formatTitle(std::string_view title) -> std::string {
+  if (title.empty()) return "—";
+  std::string out{title};
+  if (out.size() > kTitleColWidth - 1) {
+    out.resize(kTitleColWidth - 2);
+    out += "…";
+  }
+  return out;
+}
 
 // FOCUS column priority chain:
 //   1. focusFromFile — set by settings/hooks/focus-write.sh from the
@@ -321,9 +346,9 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {:<12} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "FOCUS",
-               kReset, kClearEol);
+  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {:<12} {:<14} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "TITLE",
+               "FOCUS", kReset, kClearEol);
 
   if (!snap.broker_alive) {
     std::print("{}", kClearBelow);
@@ -368,6 +393,8 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto focus = formatFocus(file_focus, prompt, last_event,
                                    last_tool, state_label);
     const auto project = formatProject(cwd);
+    const auto file_title = titleFromFile(name);
+    const auto title = formatTitle(file_title);
 
     // Attach dot — green when attached, dim when not.
     const auto attach_glyph = attached ? "●" : "○";
@@ -390,7 +417,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
     std::println(
         "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>5}{} "
-        "{}{:<12}{} {}{}{}{}{}",
+        "{}{:<12}{} {}{:<14}{} {}{}{}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
@@ -398,6 +425,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
         cwd.empty() ? kDim : "", project, kReset,
+        file_title.empty() ? kDim : "", title, kReset,
         focus_color, focus.text, kReset,
         draft_suffix, kClearEol);
     ++rendered;

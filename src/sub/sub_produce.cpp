@@ -8,11 +8,14 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <print>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace bus {
 
@@ -86,14 +89,65 @@ auto subEnqueue(std::span<const char* const> args) -> int {
   return callEnqueue(topic, body, protocol, deliver_when, ttl_ms);
 }
 
-// `bus msg mail AGENT BODY` — enqueue to inbox-AGENT (auto-created agent-inbox).
+// `bus msg mail AGENT BODY [--title TITLE]` — enqueue to inbox-AGENT
+// (auto-created agent-inbox). When --title is set, also write the
+// title to $STATE/title/AGENT so `bus monitor` can render it as the
+// recipient's current "what is this context window about?" tag.
+// Empty --title clears the existing file. Mails without --title leave
+// any existing title in place — titles persist across follow-up
+// dispatches until the sender explicitly updates them.
 auto subMail(std::span<const char* const> args) -> int {
-  if (args.size() != 2) {
-    std::println(stderr, "usage: bus msg mail AGENT BODY");
+  std::string title;
+  bool title_set = false;
+  std::vector<std::string_view> positional;
+  positional.reserve(args.size());
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a{args[i]};
+    if (a == "--title") {
+      if (++i >= args.size()) {
+        std::println(stderr,
+                     "usage: bus msg mail AGENT BODY [--title TITLE]");
+        return 2;
+      }
+      title = args[i];
+      title_set = true;
+    } else if (a == "--") {
+      while (++i < args.size()) positional.emplace_back(args[i]);
+      break;
+    } else if (a.starts_with("--")) {
+      std::println(stderr, "bus msg mail: unknown flag \"{}\"", a);
+      return 2;
+    } else {
+      positional.emplace_back(a);
+    }
+  }
+  if (positional.size() != 2) {
+    std::println(stderr, "usage: bus msg mail AGENT BODY [--title TITLE]");
     return 2;
   }
-  const std::string topic = std::string{"inbox-"} + args[0];
-  return callEnqueue(topic, args[1], "text", "immediate", 0);
+  const std::string agent{positional[0]};
+  const std::string body{positional[1]};
+  const std::string topic = std::string{"inbox-"} + agent;
+
+  // Write/clear the title file before the enqueue call so the next
+  // monitor tick picks it up promptly. Enqueue failures don't roll
+  // back the title — that's the sender's last intent regardless.
+  if (title_set) {
+    const char* env = std::getenv("CLAUDE_BUS_STATE");
+    const std::string state_dir = env ? env : "/tmp/claude-bus";
+    const std::string dir = state_dir + "/title";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::string path = dir + "/" + agent;
+    if (title.empty()) {
+      std::filesystem::remove(path, ec);
+    } else {
+      std::ofstream out{path};
+      if (out) out << title << '\n';
+    }
+  }
+
+  return callEnqueue(topic, body, "text", "immediate", 0);
 }
 
 // `bus msg broadcast TAG BODY --to AGENTS` — fan out one body into each

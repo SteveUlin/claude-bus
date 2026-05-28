@@ -23,7 +23,7 @@ auto sleepFor(std::chrono::milliseconds d) -> void {
 }
 
 // Acquire the per-pane TTY flock. The lock is the same one
-// `bus send NAME ...` uses, so concurrent writers serialize byte-for-
+// `bus msg send NAME ...` uses, so concurrent writers serialize byte-for-
 // byte at the TTY (no [bus-wak[bus-wake]e] interleaves).
 class FlockGuard {
  public:

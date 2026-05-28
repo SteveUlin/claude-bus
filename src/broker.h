@@ -2,7 +2,7 @@
 
 // claude-bus broker — single daemon process per session that owns
 // the topic registry, topic logs, in-flight tracker, and the
-// delivery loop. CLI tools (bus enqueue / fetch / peek / topic / …)
+// delivery loop. CLI tools (bus msg enqueue / bus msg fetch / bus msg peek / topic / …)
 // reach it via JSON-RPC over a Unix socket; hooks reach it indirectly
 // through events.jsonl (the broker tails it).
 //

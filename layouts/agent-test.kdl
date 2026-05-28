@@ -52,7 +52,7 @@ layout {
         }
         pane split_direction="horizontal" {
             pane name="human-inbox" size="67%" command="bash" {
-                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" inbox human"
+                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" topic inbox human"
             }
             pane name="monitor" command="bash" {
                 args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" monitor"

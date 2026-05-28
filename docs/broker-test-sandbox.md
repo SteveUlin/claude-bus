@@ -25,7 +25,7 @@ Three surfaces, each with a different fidelity demand:
    250 ms delivery loop, `events.jsonl` consumption for ACKs,
    presence-sentinel and `/clear` deferral. Real broker process, but
    the "write to pane" leg is stubbed or absent.
-3. **Dispatch into a real TTY** — `bus pane-send`/`bus send`, the
+3. **Dispatch into a real TTY** — `bus pane-send`/`bus msg send`, the
    `pane-state` READY check (zellij mode + scroll + modal queries),
    the dispatch state machine's normalize/retry. Needs real PTYs and,
    for the queries to mean anything, real zellij.
@@ -58,7 +58,7 @@ export CLAUDE_BUS_STATE=$(mktemp -d)
 bin/bus broker run &
 broker_pid=$!
 trap 'kill "$broker_pid" 2>/dev/null; wait "$broker_pid" 2>/dev/null; rm -rf "$CLAUDE_BUS_STATE"' EXIT
-# … exercise via bin/bus enqueue / fetch / topic show
+# … exercise via bin/bus msg enqueue / bus msg fetch / topic show
 # … inject ACKs by appending to $CLAUDE_BUS_STATE/events.jsonl
 ```
 

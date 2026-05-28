@@ -386,7 +386,13 @@ auto runBroker(const BrokerConfig& cfg) -> int {
                       limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX);
     if (!r) return json::errorResponse(r.error().message);
     std::vector<json::Value> arr;
-    for (const auto& m : *r) arr.push_back(messageToJson(m));
+    const auto now = nowMs();
+    for (const auto& m : *r) {
+      if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now) {
+        continue;
+      }
+      arr.push_back(messageToJson(m));
+    }
     std::map<std::string, json::Value> resp;
     resp.insert({"messages", json::Value::fromArray(std::move(arr))});
     return json::okResponse(std::move(resp));

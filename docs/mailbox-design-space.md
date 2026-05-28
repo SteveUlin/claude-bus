@@ -168,7 +168,7 @@ decision reads one operational flag.
 
 ## Reliability layer: state-aware dispatch (replacing "send keys")
 
-`bus send` is a blind PTY write. Two ways it fails silently:
+`bus msg send` is a blind PTY write. Two ways it fails silently:
 
 1. **Wrong mode**: claude TUI is in scrollback, a modal y/n confirmation,
    the autocomplete popover, or compaction. Bytes typed at the prompt
@@ -180,7 +180,7 @@ decision reads one operational flag.
    [#33987](https://github.com/anthropics/claude-code/issues/33987),
    [#42391](https://github.com/anthropics/claude-code/issues/42391)).
 2. **Contention**: human keystrokes, watcher nudges, and a peer's
-   `bus send` interleave at the PTY in any order; the input field
+   `bus msg send` interleave at the PTY in any order; the input field
    becomes garbage.
 
 The single-writer principle from the previous round addresses (2): one
@@ -388,7 +388,7 @@ end-to-end at each step.
   No type peek. No override clause.
 
 After Phase 1, slash records still dispatch *via the drain hook
-calling `bus send` directly* (the existing path) — the per-pane
+calling `bus msg send` directly* (the existing path) — the per-pane
 serializer doesn't exist yet. This is identical behavior to today but
 on the new wire; it's the safe migration point.
 

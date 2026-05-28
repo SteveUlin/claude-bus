@@ -6,6 +6,8 @@
 // right there for anyone wanting machine-parseable bytes.
 
 #include "../bus.h"
+#include "../broker.h"
+#include "../topic_log.h"
 #include "../signals.h"
 #include "../sub.h"
 
@@ -20,6 +22,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <print>
 #include <span>
@@ -29,8 +32,6 @@
 namespace bus {
 
 namespace {
-
-constexpr const char* kEventsLog = "/tmp/claude-bus/events.jsonl";
 
 volatile std::sig_atomic_t gStopEvents = 0;
 auto onSignalEvents(int) -> void { gStopEvents = 1; }
@@ -113,12 +114,6 @@ auto formatLine(std::string_view jsonl) -> std::string {
   return out;
 }
 
-auto ensureFileExists() -> void {
-  ::mkdir("/tmp/claude-bus", 0777);
-  const int fd = ::open(kEventsLog, O_WRONLY | O_CREAT | O_APPEND, 0644);
-  if (fd >= 0) ::close(fd);
-}
-
 // Read whatever new lines are available in `in`, applying filters,
 // printing matches. Caller is responsible for restoring stream state
 // before next call (via in.clear()).
@@ -175,11 +170,19 @@ auto subEvents(std::span<const char* const> args) -> int {
   installInterruptHandlers(onSignalEvents);
   std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
-  ensureFileExists();
+  const auto cfg = resolveConfig();
+  const std::string events_log = cfg.state_dir + "/events.jsonl";
 
-  std::ifstream in{kEventsLog};
+  // Make sure state dir and file exist before trying to read/watch them
+  std::error_code ec;
+  std::filesystem::create_directories(cfg.state_dir, ec);
+  {
+    std::ofstream init_file(events_log, std::ios::app);
+  }
+
+  std::ifstream in{events_log};
   if (!in) {
-    std::println(stderr, "bus events: cannot open {}", kEventsLog);
+    std::println(stderr, "bus events: cannot open {}", events_log);
     return 1;
   }
 
@@ -192,7 +195,7 @@ auto subEvents(std::span<const char* const> args) -> int {
     std::println(stderr, "bus events: inotify_init1: {}", std::strerror(errno));
     return 1;
   }
-  const int wd = ::inotify_add_watch(infd, kEventsLog, IN_MODIFY);
+  const int wd = ::inotify_add_watch(infd, events_log.c_str(), IN_MODIFY);
   if (wd < 0) {
     std::println(stderr, "bus events: add_watch: {}", std::strerror(errno));
     ::close(infd);

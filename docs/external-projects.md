@@ -15,8 +15,8 @@ unchanged.
 
 **Unchanged.** One broker per laptop, state at `/tmp/claude-bus`, topics in
 the same registry, agent names in the same flat namespace. Hooks still resolve
-absolute to `/home/sulin/claude-bus/settings/hooks/`. `bus send`, `bus mail`,
-`bus slash`, the broker daemon — none of this needs to know that a target
+absolute to `/home/sulin/claude-bus/settings/hooks/`. `bus msg send`, `bus msg mail`,
+`bus msg slash`, the broker daemon — none of this needs to know that a target
 project exists.
 
 **New.** A *session* describes a fleet pointed at a target project. Sessions
@@ -64,7 +64,7 @@ work.
 | ------------- | ---------------------------- | ------------------ | -------------------------------- |
 | `coordinator` | `/home/sulin/claude-bus`     | no                 | `claude` via `agent-launch`      |
 | `coder`       | `<workspace>`                | yes (per-agent)    | `claude` via `agent-launch`      |
-| `observer`    | n/a                          | no                 | `bus inbox NAME` / `bus monitor` |
+| `observer`    | n/a                          | no                 | `bus topic inbox NAME` / `bus monitor` |
 
 - **`coordinator`** is a claude pane with no workspace. Accepts a `role`
   augmentation (see `docs/comms.md`). The canonical use is
@@ -194,7 +194,7 @@ options:
    as `tempura-alice`, `claude-bus-primary`, etc. The bus stays unchanged;
    collisions become a session-config lint problem ("name already in use by
    another running session"). Simplest. Mild ergonomic cost when typing
-   `bus send tempura-alice "..."`.
+   `bus msg send tempura-alice "..."`.
 2. **Broker-side topic namespacing.** Topics become `tempura/inbox-alice`,
    agent ids stay short. Bigger broker change (parser, registry, cursor
    layout). Defer until option 1's ergonomic cost actually bites.
@@ -281,7 +281,7 @@ The human's tab-switching pattern, mediated by comms:
   > [comms] sulin's request: extract the AST-printing helpers from
   > `eval.h` into a new `ast_print.h`. Keep the constexpr boundary.
 
-  comms shows the draft, awaits "yes", then `bus mail tempura-alice
+  comms shows the draft, awaits "yes", then `bus msg mail tempura-alice
   "..."`. Reports: queued, alice currently idle.
 
 - **Bob in parallel.** "Also ask tempura-bob to scan the call sites in
@@ -293,7 +293,7 @@ The human's tab-switching pattern, mediated by comms:
   just want eyes on it. Detach back to comms when done.
 
 - **Reply lands.** alice mails comms when done:
-  `bus mail comms "[tempura-alice] AST extracted, jj log -r @"`. The
+  `bus msg mail comms "[tempura-alice] AST extracted, jj log -r @"`. The
   broker pushes the record into the comms pane; comms's
   `UserPromptSubmit` fires; comms surfaces: "alice finished.
   Spot-check the diff or move on?"

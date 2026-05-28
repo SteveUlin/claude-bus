@@ -4,7 +4,7 @@
 // src/rpc.{h,cpp}'s server. Walks every agent-inbox topic, evaluates
 // gates against the current agent state + presence + in-flight set,
 // and dispatches matching records to recipient panes via the same
-// per-pane flock the manual `bus send` uses.
+// per-pane flock the manual `bus msg send` uses.
 //
 // In-flight records live at $STATE/in-flight/<msg_id>.json. The
 // cursor for an agent-inbox topic ONLY advances when the recipient
@@ -14,7 +14,7 @@
 //
 // Phase 4c.2 ships:
 //   - DIRECT inline writes (body ≤ kInlineMaxBytes formatted as
-//     "## bus mail from <sender> [<protocol>]\n<body>")
+//     "## bus msg mail from <sender> [<protocol>]\n<body>")
 //   - Large bodies materialized to $STATE/payloads/<id>.body with
 //     a pointer line into the pane
 //   - Gates: TTL, attached, deliver_when=idle, in-flight

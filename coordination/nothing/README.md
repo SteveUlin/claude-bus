@@ -1,6 +1,6 @@
 # nothing — the Cockpit baseline
 
-No coordination beyond the bus itself. Agents have no shared state, no idle behavior, no protocol for talking to each other except by direct `bin/bus send` calls. They sit at their prompts until a message arrives (from sulin or another agent); they respond; they wait again.
+No coordination beyond the bus itself. Agents have no shared state, no idle behavior, no protocol for talking to each other except by direct `bin/bus msg send` calls. They sit at their prompts until a message arrives (from sulin or another agent); they respond; they wait again.
 
 This is the implicit pattern of the bus as built in steps 1-8. It exists as a named pattern so other patterns have a baseline to be compared with and so the framework documents the "zero" case explicitly.
 

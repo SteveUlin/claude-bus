@@ -1,4 +1,4 @@
-// `bus inbox NAME` — tail-follow an agent's broker-managed inbox.
+// `bus topic inbox NAME` — tail-follow an agent's broker-managed inbox.
 //
 // Reads /tmp/claude-bus/topics/inbox-NAME.log (the agent-inbox topic)
 // via the in-process topic_log layer. inotify-watches for appends and
@@ -76,7 +76,7 @@ auto printMessage(const topic::Message& m) -> void {
 
 auto subInbox(std::span<const char* const> args) -> int {
   if (args.size() != 1) {
-    std::println(stderr, "usage: bus inbox NAME");
+    std::println(stderr, "usage: bus topic inbox NAME");
     return 2;
   }
   const std::string name{args[0]};

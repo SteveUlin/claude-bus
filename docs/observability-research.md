@@ -180,7 +180,7 @@ hit:
 
 | Need | Covered today? |
 |------|---------------|
-| Approval gate around `bus mail` | yes, explicit |
+| Approval gate around `bus msg mail` | yes, explicit |
 | Discovery verbs (`bus agents`, `introduce`) | yes |
 | Receive-then-summarize loop | yes |
 | What NOT to do (no edits, no autonomous sends) | yes |
@@ -231,7 +231,7 @@ slugs rather than restating):
   action per symptom.
 - **Multi-recipient dispatch** — broadcast vs. individual; convergence
   pattern (ask each agent to mail back; comms summarizes).
-- **Task tracking** — TaskCreate in-conversation; bus mail across
+- **Task tracking** — TaskCreate in-conversation; bus msg mail across
   agents; memory for cross-session lessons only.
 - **Interrupt vs. defer sulin** — interrupt on ambiguous intent /
   irreversible action / agent-only-sulin-can-answer; defer otherwise.

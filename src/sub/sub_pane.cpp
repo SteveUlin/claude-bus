@@ -1,4 +1,4 @@
-// Subcommands `bus pane-id`, `bus pane-state`, `bus send`.
+// Subcommands `bus pane-id`, `bus pane-state`, `bus msg send`.
 //
 // Thin CLI wrappers over the in-process helpers in src/pane.{h,cpp}.
 // Output matches the old bin/pane-id / bin/pane-state / bin/send shell
@@ -75,12 +75,12 @@ auto subPaneState(std::span<const char* const> args) -> int {
   return 0;
 }
 
-// `bus send NAME TEXT` — resolve name to pane, hold the per-pane TTY
-// flock, write. Replaces the old shell `bin/bus send`: same single-
+// `bus msg send NAME TEXT` — resolve name to pane, hold the per-pane TTY
+// flock, write. Replaces the old shell `bin/bus msg send`: same single-
 // writer guarantee for TTY-writes the broker / dispatch-tui rely on.
 auto subSend(std::span<const char* const> args) -> int {
   if (args.size() != 2) {
-    std::println(stderr, "usage: bus send NAME TEXT");
+    std::println(stderr, "usage: bus msg send NAME TEXT");
     return 2;
   }
   const std::string name{args[0]};
@@ -88,7 +88,7 @@ auto subSend(std::span<const char* const> args) -> int {
 
   const auto pane = paneId(name);
   if (pane.empty()) {
-    std::println(stderr, "bus send: no pane titled \"{}\"", name);
+    std::println(stderr, "bus msg send: no pane titled \"{}\"", name);
     return 1;
   }
 
@@ -107,13 +107,13 @@ auto subSend(std::span<const char* const> args) -> int {
   const int fd = ::open(lockfile.c_str(),
                         O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (fd < 0) {
-    std::println(stderr, "bus send: open lockfile {}: {}", lockfile,
+    std::println(stderr, "bus msg send: open lockfile {}: {}", lockfile,
                  std::strerror(errno));
     return 1;
   }
   while (::flock(fd, LOCK_EX) < 0) {
     if (errno != EINTR) {
-      std::println(stderr, "bus send: flock {}: {}", lockfile,
+      std::println(stderr, "bus msg send: flock {}: {}", lockfile,
                    std::strerror(errno));
       ::close(fd);
       return 1;
@@ -126,7 +126,7 @@ auto subSend(std::span<const char* const> args) -> int {
   ::close(fd);
 
   if (!ok) {
-    std::println(stderr, "bus send: write to {} ({}) failed or pane "
+    std::println(stderr, "bus msg send: write to {} ({}) failed or pane "
                          "not ready (scrolled / LOCKED)", name, pane);
     return 1;
   }

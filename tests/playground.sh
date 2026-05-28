@@ -43,7 +43,7 @@ run "$BUS" topic show build-tasks
 step "3. publish + consume a work queue"
 ID_A=$("$BUS" enqueue build-tasks "build the thing")
 ID_B=$("$BUS" enqueue build-tasks "test the thing")
-# Flags come AFTER body: `bus enqueue TOPIC BODY [--flag VALUE]...`
+# Flags come AFTER body: `bus msg enqueue TOPIC BODY [--flag VALUE]...`
 ID_C=$("$BUS" enqueue build-tasks "ship the thing" --protocol task --ttl 60000)
 printf "ids: %s  %s  %s\n" "$ID_A" "$ID_B" "$ID_C"
 
@@ -56,7 +56,7 @@ echo "(cursor moved; next fetch returns task #2)"
 run "$BUS" fetch build-tasks
 
 # ── 4. auto-created agent inboxes ─────────────────────────────────
-step "4. bus mail / bus slash auto-create per-agent topics"
+step "4. bus msg mail / bus msg slash auto-create per-agent topics"
 run "$BUS" mail  bast    "hello bast — from the playground"
 run "$BUS" slash kvothe  "/clear"
 run "$BUS" topic list

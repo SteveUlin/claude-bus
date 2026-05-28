@@ -1,4 +1,4 @@
-// `bus fetch TOPIC` / `bus peek TOPIC` / `bus body MSG_ID` — consume /
+// `bus msg fetch TOPIC` / `bus msg peek TOPIC` / `bus msg body MSG_ID` — consume /
 // inspect topic records via broker RPC.
 
 #include "../broker.h"
@@ -43,7 +43,7 @@ auto printMessage(const json::Value& m) -> void {
 auto subFetch(std::span<const char* const> args) -> int {
   if (args.empty()) {
     std::println(stderr,
-                 "usage: bus fetch TOPIC [--consumer ID]");
+                 "usage: bus msg fetch TOPIC [--consumer ID]");
     return 2;
   }
   const std::string topic{args[0]};
@@ -54,7 +54,7 @@ auto subFetch(std::span<const char* const> args) -> int {
       if (++i >= args.size()) return 2;
       consumer = args[i];
     } else {
-      std::println(stderr, "bus fetch: unknown flag \"{}\"", a);
+      std::println(stderr, "bus msg fetch: unknown flag \"{}\"", a);
       return 2;
     }
   }
@@ -69,16 +69,16 @@ auto subFetch(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus fetch: {}", resp.error().message);
+    std::println(stderr, "bus msg fetch: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
-    std::println(stderr, "bus fetch: {}", resp->getOrString("error"));
+    std::println(stderr, "bus msg fetch: {}", resp->getOrString("error"));
     return 1;
   }
   const auto* m = resp->get("message");
   if (m == nullptr || m->isNull()) {
-    // Nothing to fetch — clean exit so callers can `while bus fetch …`.
+    // Nothing to fetch — clean exit so callers can `while bus msg fetch …`.
     return 0;
   }
   printMessage(*m);
@@ -88,7 +88,7 @@ auto subFetch(std::span<const char* const> args) -> int {
 auto subPeek(std::span<const char* const> args) -> int {
   if (args.empty()) {
     std::println(stderr,
-                 "usage: bus peek TOPIC [--consumer ID] [--limit N]");
+                 "usage: bus msg peek TOPIC [--consumer ID] [--limit N]");
     return 2;
   }
   const std::string topic{args[0]};
@@ -103,7 +103,7 @@ auto subPeek(std::span<const char* const> args) -> int {
       if (++i >= args.size()) return 2;
       limit = std::atoll(args[i]);
     } else {
-      std::println(stderr, "bus peek: unknown flag \"{}\"", a);
+      std::println(stderr, "bus msg peek: unknown flag \"{}\"", a);
       return 2;
     }
   }
@@ -120,11 +120,11 @@ auto subPeek(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus peek: {}", resp.error().message);
+    std::println(stderr, "bus msg peek: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
-    std::println(stderr, "bus peek: {}", resp->getOrString("error"));
+    std::println(stderr, "bus msg peek: {}", resp->getOrString("error"));
     return 1;
   }
   if (const auto* msgs = resp->get("messages");
@@ -136,7 +136,7 @@ auto subPeek(std::span<const char* const> args) -> int {
 
 auto subBody(std::span<const char* const> args) -> int {
   if (args.empty()) {
-    std::println(stderr, "usage: bus body MSG_ID");
+    std::println(stderr, "usage: bus msg body MSG_ID");
     return 2;
   }
   const std::string msg_id{args[0]};
@@ -148,16 +148,16 @@ auto subBody(std::span<const char* const> args) -> int {
   auto resp = rpc::call(cfg.socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus body: {}", resp.error().message);
+    std::println(stderr, "bus msg body: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
-    std::println(stderr, "bus body: {}", resp->getOrString("error"));
+    std::println(stderr, "bus msg body: {}", resp->getOrString("error"));
     return 1;
   }
   const auto* m = resp->get("message");
   if (m == nullptr || !m->isObject()) {
-    std::println(stderr, "bus body: malformed response");
+    std::println(stderr, "bus msg body: malformed response");
     return 1;
   }
   std::fputs(m->getOrString("body").c_str(), stdout);

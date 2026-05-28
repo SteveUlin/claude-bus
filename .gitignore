@@ -13,6 +13,9 @@
 # claude-code local notes (per-clone, not for the public repo)
 /CLAUDE.local.md
 
+# ad-hoc debugging artifacts — per CLAUDE.local.md, scratch lives outside the repo
+/scratch/
+
 # editor cruft
 *.swp
 *.swo

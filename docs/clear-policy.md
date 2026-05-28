@@ -86,7 +86,7 @@ How does the policy actually get followed? Options span automation-vs-judgment.
    - Pros: consistent, no human attention required.
    - Cons: the "is this agent done?" heuristic is hard. False positives clear mid-task. The 5-minute cache window adds another threshold. **Strongly not recommended** at current maturity.
 
-2. **Manual.** Human runs `bus slash <agent> /clear` when they judge it. Backed by occasional dashboard prompts ("kvothe IDLE 20 min, last 3 commits unrelated — clear?").
+2. **Manual.** Human runs `bus msg slash <agent> /clear` when they judge it. Backed by occasional dashboard prompts ("kvothe IDLE 20 min, last 3 commits unrelated — clear?").
    - Pros: human judgment is the most accurate.
    - Cons: requires attention, easy to forget.
    - Recommendation: **the baseline.**

@@ -39,19 +39,19 @@ If a future feature needs out-of-band steering (inject a message without stealin
 If you're an agent running inside a bus pane, your `$CLAUDE_BUS_AGENT_ID` is set. You can message peer agents in the session by running:
 
 ```
-bin/bus send <peer-name> "<message>"
+bin/bus msg send <peer-name> "<message>"
 ```
 
 The message lands in the peer's prompt buffer and submits. The peer receives it as a fresh user turn, indistinguishable from a human-typed message.
 
 - **Discover peers.** `zellij action list-panes` shows every pane and its title. Bus agents have titles set by the launching layout (e.g., `alice`, `bob`). `bus pane-id NAME` resolves a name to its `terminal_N` id; exits non-zero if absent.
 - **No reply channel.** The bus is fire-and-forget. To see how a peer responded, dump their screen: `zellij action dump-screen --pane-id "$(bus pane-id NAME)"`. To get a reply routed back to you, either the human relays it or the peer sends back through the bus.
-- **Sign your messages** when the recipient needs to know who's talking. Convention: lead with `[your-name]`. Example: `bin/bus send bob "[alice] need your take on the cache invalidation idea"`.
+- **Sign your messages** when the recipient needs to know who's talking. Convention: lead with `[your-name]`. Example: `bin/bus msg send bob "[alice] need your take on the cache invalidation idea"`.
 - **One human gate.** The bus is the same bus the human uses. Sending to a peer doesn't bypass them — they're watching every pane and can interject.
 
 ### The broker (async queued delivery)
 
-`bus send` writes into a pane's TUI buffer and submits immediately —
+`bus msg send` writes into a pane's TUI buffer and submits immediately —
 useful for urgent direct messages but contends with the human keyboard
 and can interleave with other senders. For queued / async / typed
 delivery, go through the **broker daemon**.
@@ -78,7 +78,7 @@ slashes — the broker decides when to push.
 |---|---|
 | `agent-inbox` | Single recipient. Broker pushes records into the recipient's pane (inline if body ≤ 1024 bytes; pointer + payload file if larger). Auto-created as `inbox-<name>`. |
 | `tui-commands` | Single recipient. Broker pushes via the dispatch state machine (`pane-state` READY check, normalize, retry). `/clear` and `/compact` mark the agent as having a blocking-op; subsequent delivery defers until the next `Stop` event. Auto-created as `commands-<name>`. |
-| `work-queue` | Multi-consumer pull. Producers `bus enqueue`; consumers `bus fetch` (each fetch advances the cursor). |
+| `work-queue` | Multi-consumer pull. Producers `bus msg enqueue`; consumers `bus msg fetch` (each fetch advances the cursor). |
 | `pubsub` | Declared subscribers. On enqueue, broker cascades the record into each subscriber's `inbox-<name>` (canonical record stays on the pubsub topic for audit / replay). |
 | `blackboard` | Last-value-wins. New writes fast-forward the cursor; readers `fetch` non-destructively. |
 | `append-log` | Write-only audit. The broker uses `audit` itself for delivery-failure records. |
@@ -94,7 +94,7 @@ fresh. The cursor advances in FIFO order with no per-record bypass.
   the oldest pending inbox record for that agent; `Stop` acks a
   blocking-op slash. Until ACK, the record sits at the head and the
   in-flight gate prevents re-dispatch.
-- `work-queue`: cursor advances on `bus fetch` (pull). Multiple
+- `work-queue`: cursor advances on `bus msg fetch` (pull). Multiple
   consumers each get distinct records.
 - `blackboard`: cursor stays at the latest record; `fetch` is
   non-destructive.
@@ -142,18 +142,19 @@ Topic registry:
   enqueue.
 
 Produce / consume:
-- `bus enqueue TOPIC body [--protocol] [--deliver-when] [--ttl]`.
-- `bus mail AGENT body` — sugar: enqueue → inbox-AGENT.
-- `bus slash AGENT /command` — sugar: enqueue → commands-AGENT with
+- `bus msg enqueue TOPIC body [--protocol] [--deliver-when] [--ttl]`.
+- `bus msg mail AGENT body` — sugar: enqueue → inbox-AGENT.
+- `bus msg slash AGENT /command` — sugar: enqueue → commands-AGENT with
   deliver_when=idle.
-- `bus broadcast TAG body --to AGENTS` — sender-side fan-out to each
+- `bus msg broadcast TAG body --to AGENTS` — sender-side fan-out to each
   agent's inbox.
-- `bus fetch TOPIC [--consumer ID]` — pop (non-destructive on
+- `bus msg fetch TOPIC [--consumer ID]` — pop (non-destructive on
   blackboard).
-- `bus peek TOPIC [--consumer ID] [--limit N]`.
+- `bus msg peek TOPIC [--consumer ID] [--limit N]`.
+- `bus msg body MSG_ID` — side-effect-free read by id.
 
 Direct + low-level (bypass broker):
-- `bus send NAME TEXT` — type TEXT + Enter into the named pane,
+- `bus msg send NAME TEXT` — type TEXT + Enter into the named pane,
   holding the per-pane TTY flock (single-writer guarantee).
 - `bus pane-send PANE_ID TEXT` — raw write to a pane id, no flock.
   Used internally by the broker delivery + dispatch state machine.
@@ -161,7 +162,7 @@ Direct + low-level (bypass broker):
 
 Viewers + introspection:
 - `bus monitor` — colored dashboard, 1-Hz refresh.
-- `bus inbox NAME` — tail-follow an agent's `inbox-NAME` topic.
+- `bus topic inbox NAME` — tail-follow an agent's `inbox-NAME` topic.
 - `bus agent-bar NAME` — per-tab status strip.
 - `bus events [--since TS] [--agent NAME]` — events.jsonl tail.
 - `bus state [AGENT]` — broker's view of agent lifecycle.

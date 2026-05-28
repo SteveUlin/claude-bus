@@ -7,7 +7,7 @@
 //
 // Everything that previously shelled out to those binaries now calls
 // these functions directly. The corresponding `bus pane-id`,
-// `bus pane-state`, `bus send` subcommands are thin CLI shells around
+// `bus pane-state`, `bus msg send` subcommands are thin CLI shells around
 // these.
 
 #include <string>

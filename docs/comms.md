@@ -212,7 +212,7 @@ bus features required.
 - **Brief-and-dispatch (comms → coder)** — the core US-2 pattern.
 - **Reply surfacing (coder → comms → human)** — `[sender]`-prefixed
   mail to `inbox-comms`; comms surfaces with context.
-- **Broadcast (comms → many)** — via `bus broadcast`.
+- **Broadcast (comms → many)** — via `bus msg broadcast`.
 - **Standup (comms → many → aggregate → human)** — comms broadcasts
   "status?", collects replies into `inbox-comms`, summarizes once.
 - **Pipeline (comms → A → comms → B)** — comms tells A "mail me when
@@ -249,7 +249,7 @@ The human reads, says "yes." comms sends, reports: "queued to
 tempura-alice; she's mid-Bash, lands at next prompt."
 
 An hour later alice mails comms back:
-`bus mail comms "[tempura-alice] AST extracted, jj log -r @, ready
+`bus msg mail comms "[tempura-alice] AST extracted, jj log -r @, ready
 for review"`. The broker pushes the record into the comms pane.
 comms's `UserPromptSubmit` fires and surfaces:
 

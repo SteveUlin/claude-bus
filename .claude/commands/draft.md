@@ -13,7 +13,7 @@ Workflow:
    already knows. Be concise — coders don't need ceremony.
 3. Show sulin the draft.
 4. Ask explicitly: "send it?"
-5. ONLY on a clear "yes" run `bus mail <agent> "<draft>"`.
+5. ONLY on a clear "yes" run `bus msg mail <agent> "<draft>"`.
 6. Report what was sent + the recipient's current state.
 
 If sulin rejects or asks for changes, redraft and ask again. Never

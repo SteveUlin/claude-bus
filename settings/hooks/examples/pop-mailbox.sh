@@ -6,7 +6,7 @@
 #
 # To use: in .claude/settings.json, swap drain-mailbox.sh's UserPromptSubmit
 # entry for nothing (so prompts aren't auto-drained), and register THIS
-# script as a Stop hook. Then `bus send <agent> "[bus-wake]"` (or the
+# script as a Stop hook. Then `bus msg send <agent> "[bus-wake]"` (or the
 # watcher's nudge) triggers the first turn; this hook pops one mail per
 # subsequent turn until the box is empty.
 set -euo pipefail

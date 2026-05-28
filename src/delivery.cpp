@@ -58,7 +58,7 @@ auto fileSize(const std::string& path) -> std::int64_t {
 }
 
 // Write a small body to a pane, holding the per-pane flock. Returns
-// true on success (mirrors what `bus send NAME TEXT` does).
+// true on success (mirrors what `bus msg send NAME TEXT` does).
 auto deliverInline(const BrokerConfig& cfg, std::string_view agent,
                    std::string_view payload) -> bool {
   const auto pane = paneId(agent);
@@ -91,7 +91,7 @@ auto deliverInline(const BrokerConfig& cfg, std::string_view agent,
 // Build the inline delivery payload for the recipient pane.
 auto formatInlineBody(const topic::Message& m) -> std::string {
   std::string out;
-  out += "## bus mail from ";
+  out += "## bus msg mail from ";
   out += m.sender;
   out += " [";
   out += m.protocol;
@@ -105,12 +105,12 @@ auto formatInlineBody(const topic::Message& m) -> std::string {
 
 // Build the pointer payload for large bodies. The recipient pulls the
 // body through the bus API rather than slurping it into context. Use
-// `bus body MSG_ID` (side-effect-free) instead of `bus fetch` so the
+// `bus msg body MSG_ID` (side-effect-free) instead of `bus msg fetch` so the
 // read doesn't self-ack and bypass the broker's retry/escalation
 // safety net.
 auto formatPointerBody(const topic::Message& m) -> std::string {
   return std::format(
-      "## bus mail from {} [{}] — large; read with: bus body {}",
+      "## bus msg mail from {} [{}] — large; read with: bus msg body {}",
       m.sender, m.protocol, m.id);
 }
 
@@ -473,7 +473,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     if (in_flight_.contains(m.id)) return;
 
     // tui-commands records default to deliver_when=idle (set by
-    // `bus slash`). Same gate as dispatchAgentInbox: Idle, or
+    // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or
     // Starting+INSERT for post-wipe boots with no event history.
     if (m.deliver_when == 1) {
       const std::string events_log = "/tmp/claude-bus/events.jsonl";

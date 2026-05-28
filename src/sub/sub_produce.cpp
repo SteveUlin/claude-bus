@@ -1,4 +1,4 @@
-// `bus enqueue TOPIC body [...]` — and sugar verbs `bus mail`, `bus slash`.
+// `bus msg enqueue TOPIC body [...]` — and sugar verbs `bus msg mail`, `bus msg slash`.
 
 #include "../broker.h"
 #include "../bus.h"
@@ -41,11 +41,11 @@ auto callEnqueue(const std::string& topic, const std::string& body,
   auto resp =
       rpc::call(cfg.socket_path, json::Value::fromObject(std::move(req)));
   if (!resp) {
-    std::println(stderr, "bus enqueue: {}", resp.error().message);
+    std::println(stderr, "bus msg enqueue: {}", resp.error().message);
     return 1;
   }
   if (!resp->getOrBool("ok")) {
-    std::println(stderr, "bus enqueue: {}", resp->getOrString("error"));
+    std::println(stderr, "bus msg enqueue: {}", resp->getOrString("error"));
     return 1;
   }
   std::println("{}", resp->getOrString("id"));
@@ -54,11 +54,11 @@ auto callEnqueue(const std::string& topic, const std::string& body,
 
 }  // namespace
 
-// `bus enqueue TOPIC BODY [--protocol TAG] [--deliver-when WHEN] [--ttl MS]`
+// `bus msg enqueue TOPIC BODY [--protocol TAG] [--deliver-when WHEN] [--ttl MS]`
 auto subEnqueue(std::span<const char* const> args) -> int {
   if (args.size() < 2) {
     std::println(stderr,
-                 "usage: bus enqueue TOPIC BODY "
+                 "usage: bus msg enqueue TOPIC BODY "
                  "[--protocol TAG] [--deliver-when immediate|idle] [--ttl MS]");
     return 2;
   }
@@ -79,31 +79,31 @@ auto subEnqueue(std::span<const char* const> args) -> int {
       if (++i >= args.size()) return 2;
       ttl_ms = std::atoll(args[i]);
     } else {
-      std::println(stderr, "bus enqueue: unknown flag \"{}\"", a);
+      std::println(stderr, "bus msg enqueue: unknown flag \"{}\"", a);
       return 2;
     }
   }
   return callEnqueue(topic, body, protocol, deliver_when, ttl_ms);
 }
 
-// `bus mail AGENT BODY` — enqueue to inbox-AGENT (auto-created agent-inbox).
+// `bus msg mail AGENT BODY` — enqueue to inbox-AGENT (auto-created agent-inbox).
 auto subMail(std::span<const char* const> args) -> int {
   if (args.size() != 2) {
-    std::println(stderr, "usage: bus mail AGENT BODY");
+    std::println(stderr, "usage: bus msg mail AGENT BODY");
     return 2;
   }
   const std::string topic = std::string{"inbox-"} + args[0];
   return callEnqueue(topic, args[1], "text", "immediate", 0);
 }
 
-// `bus broadcast TAG BODY --to AGENTS` — fan out one body into each
+// `bus msg broadcast TAG BODY --to AGENTS` — fan out one body into each
 // agent's inbox. Doesn't go through a pubsub topic; this is a
 // sender-side helper that just enqueues N times. TAG becomes the
 // `protocol` field on every fanned-out record so recipients can
 // distinguish broadcasts from direct mail.
 //
 // Example:
-//   bus broadcast deploy "starting" --to primary,elodin,bast
+//   bus msg broadcast deploy "starting" --to primary,elodin,bast
 //
 // Sends three records:
 //   inbox-primary  protocol=deploy body="starting"
@@ -112,7 +112,7 @@ auto subMail(std::span<const char* const> args) -> int {
 auto subBroadcast(std::span<const char* const> args) -> int {
   if (args.size() < 2) {
     std::println(stderr,
-                 "usage: bus broadcast TAG BODY --to AGENTS  "
+                 "usage: bus msg broadcast TAG BODY --to AGENTS  "
                  "(AGENTS comma-separated)");
     return 2;
   }
@@ -125,12 +125,12 @@ auto subBroadcast(std::span<const char* const> args) -> int {
       if (++i >= args.size()) return 2;
       to_csv = args[i];
     } else {
-      std::println(stderr, "bus broadcast: unknown flag \"{}\"", a);
+      std::println(stderr, "bus msg broadcast: unknown flag \"{}\"", a);
       return 2;
     }
   }
   if (to_csv.empty()) {
-    std::println(stderr, "bus broadcast: --to AGENTS is required");
+    std::println(stderr, "bus msg broadcast: --to AGENTS is required");
     return 2;
   }
 
@@ -147,7 +147,7 @@ auto subBroadcast(std::span<const char* const> args) -> int {
   }
   if (!cur.empty()) agents.push_back(std::move(cur));
   if (agents.empty()) {
-    std::println(stderr, "bus broadcast: --to AGENTS resolved to empty list");
+    std::println(stderr, "bus msg broadcast: --to AGENTS resolved to empty list");
     return 2;
   }
 
@@ -159,16 +159,16 @@ auto subBroadcast(std::span<const char* const> args) -> int {
   return rc;
 }
 
-// `bus slash AGENT /command` — enqueue to commands-AGENT (auto-created
+// `bus msg slash AGENT /command` — enqueue to commands-AGENT (auto-created
 // tui-commands). Default delivery is `idle` to avoid mid-response races.
 auto subSlash(std::span<const char* const> args) -> int {
   if (args.size() != 2) {
-    std::println(stderr, "usage: bus slash AGENT /command");
+    std::println(stderr, "usage: bus msg slash AGENT /command");
     return 2;
   }
   const std::string body{args[1]};
   if (body.empty() || body[0] != '/') {
-    std::println(stderr, "bus slash: body must start with '/' (got \"{}\")",
+    std::println(stderr, "bus msg slash: body must start with '/' (got \"{}\")",
                  body);
     return 2;
   }

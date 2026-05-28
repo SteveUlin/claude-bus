@@ -98,7 +98,7 @@ layout {
             }
             pane split_direction="horizontal" {
                 pane name="ops-inbox" command="bash" {
-                    args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                    args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" topic inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
                 }
                 pane name="monitor" command="bash" {
                     args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" monitor; rc=$?; printf '\\n\\033[1;31m[monitor exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"

@@ -346,7 +346,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {:<12} {:<14} {}{}{}",
+  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<12} {:<14} {}{}{}",
                kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "TITLE",
                "FOCUS", kReset, kClearEol);
 
@@ -416,7 +416,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
                                  : std::string_view{kDim};
 
     std::println(
-        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>5}{} "
+        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
         "{}{:<12}{} {}{:<14}{} {}{}{}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,

@@ -169,4 +169,44 @@ export CLAUDE_BUS_AGENT_KIND="${CLAUDE_BUS_AGENT_KIND:-}"
 export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-}"
 export CLAUDE_BUS_AGENT_PROJECT="${CLAUDE_BUS_AGENT_PROJECT:-}"
 export CLAUDE_BUS_AGENT_SESSION="${CLAUDE_BUS_AGENT_SESSION:-}"
+
+# Per-agent jj workspace. Each agent operates on its own working copy
+# under $BUS_ROOT/.workspaces/$name, all backed by the shared
+# .jj/repo (commits, branches, op log). Removes the "scoop-bundle"
+# pattern where one agent's `jj describe` swept up another agent's
+# uncommitted edits. See docs/jj-workspace-workaround.md for the
+# constraint analysis and why we're using pure-jj workspaces
+# (jj-vcs/jj#8052's colocated-workspaces feature isn't released yet;
+# native `git` commands only work in the main $BUS_ROOT workspace).
+#
+# Auto-create on first launch per sulin's call. Idempotent — repeat
+# launches just cd into the existing workspace. If `jj workspace
+# add` fails for any reason (jj missing, repo state weird), log and
+# fall through to launching in $BUS_ROOT itself; that degrades to
+# pre-isolation behaviour rather than blocking the agent.
+workspace_dir="$BUS_ROOT/.workspaces/$name"
+if [ ! -d "$workspace_dir" ]; then
+    mkdir -p "$BUS_ROOT/.workspaces"
+    if (cd "$BUS_ROOT" && jj workspace add ".workspaces/$name" 2>&1); then
+        :
+    else
+        echo "agent-launch: jj workspace add failed; launching in \$BUS_ROOT" >&2
+    fi
+fi
+if [ -d "$workspace_dir" ]; then
+    cd "$workspace_dir"
+    export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-$workspace_dir}"
+fi
+
+# After cd'ing into the workspace, `bin/bus` (relative) no longer
+# resolves — the binary lives in the main $BUS_ROOT/bin and is
+# gitignored, so agent workspaces don't carry it. Export CLAUDE_BUS_ROOT
+# + put $BUS_ROOT/bin on PATH so `bus ...` works as a bare command and
+# hooks can locate the binary absolutely.
+export CLAUDE_BUS_ROOT="$BUS_ROOT"
+case ":$PATH:" in
+    *:"$BUS_ROOT/bin":*) ;;
+    *) export PATH="$BUS_ROOT/bin:$PATH" ;;
+esac
+
 exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" --dangerously-skip-permissions

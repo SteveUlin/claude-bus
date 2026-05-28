@@ -16,6 +16,11 @@
 # ad-hoc debugging artifacts — per CLAUDE.local.md, scratch lives outside the repo
 /scratch/
 
+# per-agent jj workspaces (auto-created by bin/agent-launch). One working
+# copy per agent under .workspaces/<agent>; the shared .jj/repo collects
+# commits. See docs/jj-workspace-workaround.md.
+/.workspaces/
+
 # editor cruft
 *.swp
 *.swo

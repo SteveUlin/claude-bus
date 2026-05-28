@@ -78,15 +78,11 @@ auto durationToMs(std::string_view s) -> std::int64_t {
   }
 }
 
-// Threshold timestamp = (now - dur_ms) formatted as the same ISO shape
-// log-event.sh writes — lexicographic string comparison against the
-// `ts` field works because both use 23-char UTC ISO.
-auto thresholdIso(std::int64_t dur_ms) -> std::string {
+auto formatIso(std::chrono::system_clock::time_point tp) -> std::string {
   using namespace std::chrono;
-  const auto threshold = system_clock::now() - milliseconds{dur_ms};
-  const auto secs = duration_cast<seconds>(threshold.time_since_epoch()).count();
-  const auto ms = duration_cast<milliseconds>(threshold.time_since_epoch())
-                      .count() % 1000;
+  const auto secs = duration_cast<seconds>(tp.time_since_epoch()).count();
+  const auto ms =
+      duration_cast<milliseconds>(tp.time_since_epoch()).count() % 1000;
   std::time_t t = static_cast<std::time_t>(secs);
   std::tm tm;
   ::gmtime_r(&t, &tm);
@@ -97,6 +93,75 @@ auto thresholdIso(std::int64_t dur_ms) -> std::string {
                 tm.tm_hour, tm.tm_min, tm.tm_sec,
                 static_cast<long long>(ms));
   return std::string{buf};
+}
+
+// Threshold timestamp = (now - dur_ms) formatted as the same ISO shape
+// log-event.sh writes — lexicographic string comparison against the
+// `ts` field works because both use 23-char UTC ISO.
+auto thresholdIso(std::int64_t dur_ms) -> std::string {
+  return formatIso(std::chrono::system_clock::now() -
+                   std::chrono::milliseconds{dur_ms});
+}
+
+// Accept either a full 23-char UTC ISO timestamp (paste from
+// events.jsonl) or a short HH:MM:SS / HH:MM:SS.mmm (paste from a
+// `bus log` row). Short forms are completed with today's UTC date.
+// Returns empty string on unrecognized input.
+auto expandToIso(std::string_view input) -> std::string {
+  if (input.size() >= 20 && input.find('T') != std::string_view::npos) {
+    // Already a full ISO. Pad with ".000Z" if the user omitted the
+    // millis (some sources strip them).
+    std::string out{input};
+    if (out.find('.') == std::string::npos &&
+        out.back() == 'Z') {
+      out.insert(out.size() - 1, ".000");
+    }
+    return out;
+  }
+  // Short form: 8 chars (HH:MM:SS) or 12 chars (HH:MM:SS.mmm).
+  if (input.size() == 8 || input.size() == 12) {
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
+    std::time_t t = static_cast<std::time_t>(secs);
+    std::tm tm;
+    ::gmtime_r(&t, &tm);
+    char date_buf[16];
+    std::snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    std::string out{date_buf};
+    out += 'T';
+    out += input;
+    if (input.size() == 8) out += ".000";
+    out += 'Z';
+    return out;
+  }
+  return {};
+}
+
+// at_iso + dur_ms → upper-bound ISO. Uses an integer ms parse on the
+// fractional + seconds + minute + hour fields rather than re-going
+// through chrono — the input shape is fixed.
+auto shiftIso(std::string_view at_iso, std::int64_t dur_ms) -> std::string {
+  // Parse "YYYY-MM-DDTHH:MM:SS.mmmZ".
+  if (at_iso.size() < 24) return {};
+  int y, mo, d, h, mi, s, ms_val;
+  if (std::sscanf(std::string{at_iso}.c_str(),
+                  "%d-%d-%dT%d:%d:%d.%dZ",
+                  &y, &mo, &d, &h, &mi, &s, &ms_val) != 7) {
+    return {};
+  }
+  std::tm tm{};
+  tm.tm_year = y - 1900;
+  tm.tm_mon = mo - 1;
+  tm.tm_mday = d;
+  tm.tm_hour = h;
+  tm.tm_min = mi;
+  tm.tm_sec = s;
+  const std::time_t base = ::timegm(&tm);
+  using namespace std::chrono;
+  return formatIso(system_clock::from_time_t(base) +
+                   milliseconds{ms_val + dur_ms});
 }
 
 // JSON string-value extractor with the common-escape unescape pass.
@@ -301,7 +366,8 @@ auto printLine(const LogLine& ll) -> void {
 // ─── drain loop ─────────────────────────────────────────────────────
 
 auto drainStream(std::ifstream& in, std::string_view filter_agent,
-                 std::string_view since_iso) -> void {
+                 std::string_view since_iso,
+                 std::string_view until_iso) -> void {
   std::string line;
   auto pos = in.tellg();
   while (std::getline(in, line)) {
@@ -315,10 +381,9 @@ auto drainStream(std::ifstream& in, std::string_view filter_agent,
     if (!filter_agent.empty()) {
       if (extractStr(line, "agent") != filter_agent) continue;
     }
-    if (!since_iso.empty()) {
-      const auto ts = extractStr(line, "ts");
-      if (!ts.empty() && ts < since_iso) continue;
-    }
+    const auto ts = extractStr(line, "ts");
+    if (!since_iso.empty() && !ts.empty() && ts < since_iso) continue;
+    if (!until_iso.empty() && !ts.empty() && ts > until_iso) continue;
     auto built = buildLine(line);
     if (!built) continue;
     printLine(*built);
@@ -331,36 +396,86 @@ auto drainStream(std::ifstream& in, std::string_view filter_agent,
 auto subLog(std::span<const char* const> args) -> int {
   std::string filter_agent;
   std::string since_dur = "5m";
+  std::string at_in;
+  std::string window_dur;
+
+  constexpr std::string_view kUsage =
+      "usage: bus log [--since DUR] [--agent NAME] "
+      "[--at TIMESTAMP] [--window DUR]";
 
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string_view a{args[i]};
     if (a == "--agent") {
       if (++i >= args.size()) {
-        std::println(stderr, "usage: bus log [--since DUR] [--agent NAME]");
+        std::println(stderr, "{}", kUsage);
         return 2;
       }
       filter_agent = args[i];
     } else if (a == "--since") {
       if (++i >= args.size()) {
-        std::println(stderr, "usage: bus log [--since DUR] [--agent NAME]");
+        std::println(stderr, "{}", kUsage);
         return 2;
       }
       since_dur = args[i];
+    } else if (a == "--at") {
+      if (++i >= args.size()) {
+        std::println(stderr, "{}", kUsage);
+        return 2;
+      }
+      at_in = args[i];
+    } else if (a == "--window") {
+      if (++i >= args.size()) {
+        std::println(stderr, "{}", kUsage);
+        return 2;
+      }
+      window_dur = args[i];
     } else {
       std::println(stderr, "bus log: unknown flag \"{}\"", a);
       return 2;
     }
   }
 
+  // Postmortem mode: --at sets an explicit start timestamp instead
+  // of computing one from --since. --window narrows the upper bound;
+  // without --window, render through to end-of-file (no live tail).
+  const bool postmortem = !at_in.empty();
+
   std::string since_iso;
-  if (!since_dur.empty()) {
-    const auto ms = durationToMs(since_dur);
-    if (ms <= 0) {
+  std::string until_iso;
+  if (postmortem) {
+    since_iso = expandToIso(at_in);
+    if (since_iso.empty()) {
       std::println(stderr,
-                   "bus log: --since wants Ns/m/h/d (got \"{}\")", since_dur);
+                   "bus log: --at wants HH:MM:SS or ISO 8601 (got \"{}\")",
+                   at_in);
       return 2;
     }
-    since_iso = thresholdIso(ms);
+    if (!window_dur.empty()) {
+      const auto ms = durationToMs(window_dur);
+      if (ms <= 0) {
+        std::println(stderr,
+                     "bus log: --window wants Ns/m/h/d (got \"{}\")",
+                     window_dur);
+        return 2;
+      }
+      until_iso = shiftIso(since_iso, ms);
+    }
+  } else {
+    if (!window_dur.empty()) {
+      std::println(stderr,
+                   "bus log: --window only meaningful with --at");
+      return 2;
+    }
+    if (!since_dur.empty()) {
+      const auto ms = durationToMs(since_dur);
+      if (ms <= 0) {
+        std::println(stderr,
+                     "bus log: --since wants Ns/m/h/d (got \"{}\")",
+                     since_dur);
+        return 2;
+      }
+      since_iso = thresholdIso(ms);
+    }
   }
 
   installInterruptHandlers(onSignalLog);
@@ -380,10 +495,24 @@ auto subLog(std::span<const char* const> args) -> int {
   }
 
   // Header banner — minimal; the rows speak for themselves.
-  std::println("{}🚌 bus log{}  {}since {} · Ctrl+C exit{}",
-               kBold, kReset, kDim, since_dur, kReset);
+  if (postmortem) {
+    std::println("{}🚌 bus log{}  {}replay from {}{}{}{}",
+                 kBold, kReset, kDim, since_iso,
+                 until_iso.empty() ? "" : std::format(" through {}",
+                                                       until_iso).c_str(),
+                 kReset, "");
+  } else {
+    std::println("{}🚌 bus log{}  {}since {} · Ctrl+C exit{}",
+                 kBold, kReset, kDim, since_dur, kReset);
+  }
 
-  drainStream(in, filter_agent, since_iso);
+  drainStream(in, filter_agent, since_iso, until_iso);
+
+  if (postmortem) {
+    // Postmortem: render the slice and exit. No inotify, no waiting
+    // for new events to arrive after the window ends.
+    return 0;
+  }
 
   const int infd = ::inotify_init1(IN_CLOEXEC);
   if (infd < 0) {
@@ -411,7 +540,7 @@ auto subLog(std::span<const char* const> args) -> int {
       break;
     }
     in.clear();
-    drainStream(in, filter_agent, since_iso);
+    drainStream(in, filter_agent, since_iso, until_iso);
   }
 
   ::inotify_rm_watch(infd, wd);

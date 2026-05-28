@@ -559,42 +559,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     return json::okResponse(std::move(resp));
   });
 
-  server.on("fetch", [&, messageToJson](const json::Value& req) {
-    const auto name = req.getOrString("topic");
-    if (name.empty()) return json::errorResponse("missing topic");
-    if (!registry.contains(name)) {
-      return json::errorResponse(std::string{"no such topic: "} + name);
-    }
-    const auto consumer = req.getOrString("consumer");
-    const auto* tcfg = registry.get(name);
-    const bool is_blackboard =
-        tcfg != nullptr && tcfg->kind == std::string{kKindBlackboard};
-
-    const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start =
-        cursor > 0 ? cursor : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-
-    auto& log = getOrOpenLog(name);
-    auto r = log.peek(start, 1);
-    if (!r) return json::errorResponse(r.error().message);
-    if (r->empty()) {
-      std::map<std::string, json::Value> resp;
-      resp.insert({"message", json::Value::null_()});
-      return json::okResponse(std::move(resp));
-    }
-    const auto& m = r->front();
-    // blackboard: fetch is a non-destructive read — repeated calls
-    // return the same value. For all other kinds, advance the cursor.
-    if (!is_blackboard) {
-      if (!topic::writeCursor(cursor_p, m.next_offset)) {
-        return json::errorResponse("cursor write failed");
-      }
-    }
-    std::map<std::string, json::Value> resp;
-    resp.insert({"message", messageToJson(m)});
-    return json::okResponse(std::move(resp));
-  });
+  // fetch handler is registered AFTER `dl` is constructed below so it
+  // can capture the in-flight tracker — needed for the agent-inbox
+  // fetch-skips-in-flight rule (hybrid delivery, docs/delivery-
+  // alternatives.md). See the registration after dl.load().
 
   // Resolve a msg_id to its body across all topics. Pure read — no
   // cursor advancement, no ack, no in-flight changes. Spilled bodies
@@ -624,6 +592,70 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // socket so handlers below can capture `dl`.
   delivery::Loop dl{cfg, registry, current_epoch};
   dl.load();
+
+  // fetch handler — registered AFTER dl so it can check the in-flight
+  // tracker. On agent-inbox topics, if the head record is currently
+  // being delivered by the broker's push path (in_flight), fetch
+  // returns null instead of consuming the record. Without this rule,
+  // a /loop NN bus msg fetch inbox-<self> fallback (per the hybrid
+  // delivery design) races with push and double-delivers: push types
+  // the record into the pane, fetch then advances the cursor and
+  // serves the same record to the agent's /loop tick. The agent gets
+  // it twice.
+  //
+  // Other topic kinds (work-queue, pubsub, blackboard, append-log,
+  // tui-commands) bypass the check — work-queue is multi-consumer by
+  // design, the others don't go through dispatch + ack at all.
+  server.on("fetch", [&, messageToJson, &dl_ref = dl](const json::Value& req) {
+    const auto name = req.getOrString("topic");
+    if (name.empty()) return json::errorResponse("missing topic");
+    if (!registry.contains(name)) {
+      return json::errorResponse(std::string{"no such topic: "} + name);
+    }
+    const auto consumer = req.getOrString("consumer");
+    const auto* tcfg = registry.get(name);
+    const bool is_blackboard =
+        tcfg != nullptr && tcfg->kind == std::string{kKindBlackboard};
+    const bool is_agent_inbox =
+        tcfg != nullptr && tcfg->kind == std::string{kKindAgentInbox};
+
+    const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
+    const auto cursor = topic::readCursor(cursor_p);
+    const auto start =
+        cursor > 0 ? cursor : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+
+    auto& log = getOrOpenLog(name);
+    auto r = log.peek(start, 1);
+    if (!r) return json::errorResponse(r.error().message);
+    if (r->empty()) {
+      std::map<std::string, json::Value> resp;
+      resp.insert({"message", json::Value::null_()});
+      return json::okResponse(std::move(resp));
+    }
+    const auto& m = r->front();
+
+    // Hybrid-delivery race-prevention: skip records the push path is
+    // mid-dispatch on. The /loop fallback will see them on the next
+    // tick once push either acks (advancing the cursor past) or fails
+    // (releasing the in-flight, leaving the record at the head for
+    // re-dispatch).
+    if (is_agent_inbox && dl_ref.inFlight().contains(m.id)) {
+      std::map<std::string, json::Value> resp;
+      resp.insert({"message", json::Value::null_()});
+      return json::okResponse(std::move(resp));
+    }
+
+    // blackboard: fetch is a non-destructive read — repeated calls
+    // return the same value. For all other kinds, advance the cursor.
+    if (!is_blackboard) {
+      if (!topic::writeCursor(cursor_p, m.next_offset)) {
+        return json::errorResponse("cursor write failed");
+      }
+    }
+    std::map<std::string, json::Value> resp;
+    resp.insert({"message", messageToJson(m)});
+    return json::okResponse(std::move(resp));
+  });
 
   // Drop a record by msg_id without delivering — advance the topic
   // cursor past it, forget any in-flight entry, and append an audit

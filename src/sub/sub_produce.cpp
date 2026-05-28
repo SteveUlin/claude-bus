@@ -26,6 +26,15 @@ auto senderFromEnv() -> std::string {
   return "unknown";
 }
 
+// Default TTL for kinds whose records go stale fast in practice.
+// 1 hour gives plenty of headroom for legitimate delays (broker
+// restart, idle agent, busy queue) while keeping the long-tail of
+// truly-stale mail self-pruning. Producers can override via --ttl.
+// See docs/elodin-ideation.md §3 + docs/context-budget.md for the
+// reasoning.
+constexpr std::int64_t kDefaultMailTtlMs = 60 * 60 * 1000;    // 1 hour
+constexpr std::int64_t kDefaultSlashTtlMs = 60 * 60 * 1000;   // 1 hour
+
 // Common publish path: build a JSON request, send to broker, print
 // the resulting record id on stdout.
 auto callEnqueue(const std::string& topic, const std::string& body,
@@ -99,6 +108,7 @@ auto subEnqueue(std::span<const char* const> args) -> int {
 auto subMail(std::span<const char* const> args) -> int {
   std::string title;
   bool title_set = false;
+  std::int64_t ttl_ms = kDefaultMailTtlMs;
   std::vector<std::string_view> positional;
   positional.reserve(args.size());
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -106,11 +116,14 @@ auto subMail(std::span<const char* const> args) -> int {
     if (a == "--title") {
       if (++i >= args.size()) {
         std::println(stderr,
-                     "usage: bus msg mail AGENT BODY [--title TITLE]");
+                     "usage: bus msg mail AGENT BODY [--title TITLE] [--ttl MS]");
         return 2;
       }
       title = args[i];
       title_set = true;
+    } else if (a == "--ttl") {
+      if (++i >= args.size()) return 2;
+      ttl_ms = std::atoll(args[i]);
     } else if (a == "--") {
       while (++i < args.size()) positional.emplace_back(args[i]);
       break;
@@ -122,7 +135,8 @@ auto subMail(std::span<const char* const> args) -> int {
     }
   }
   if (positional.size() != 2) {
-    std::println(stderr, "usage: bus msg mail AGENT BODY [--title TITLE]");
+    std::println(stderr,
+                 "usage: bus msg mail AGENT BODY [--title TITLE] [--ttl MS]");
     return 2;
   }
   const std::string agent{positional[0]};
@@ -147,7 +161,7 @@ auto subMail(std::span<const char* const> args) -> int {
     }
   }
 
-  return callEnqueue(topic, body, "text", "immediate", 0);
+  return callEnqueue(topic, body, "text", "immediate", ttl_ms);
 }
 
 // `bus msg broadcast TAG BODY --to AGENTS` — fan out one body into each
@@ -167,17 +181,21 @@ auto subBroadcast(std::span<const char* const> args) -> int {
   if (args.size() < 2) {
     std::println(stderr,
                  "usage: bus msg broadcast TAG BODY --to AGENTS  "
-                 "(AGENTS comma-separated)");
+                 "[--ttl MS]  (AGENTS comma-separated)");
     return 2;
   }
   const std::string tag{args[0]};
   const std::string body{args[1]};
   std::string to_csv;
+  std::int64_t ttl_ms = kDefaultMailTtlMs;
   for (std::size_t i = 2; i < args.size(); ++i) {
     const std::string_view a{args[i]};
     if (a == "--to") {
       if (++i >= args.size()) return 2;
       to_csv = args[i];
+    } else if (a == "--ttl") {
+      if (++i >= args.size()) return 2;
+      ttl_ms = std::atoll(args[i]);
     } else {
       std::println(stderr, "bus msg broadcast: unknown flag \"{}\"", a);
       return 2;
@@ -208,7 +226,7 @@ auto subBroadcast(std::span<const char* const> args) -> int {
   int rc = 0;
   for (const auto& agent : agents) {
     const std::string topic = std::string{"inbox-"} + agent;
-    if (callEnqueue(topic, body, tag, "immediate", 0) != 0) rc = 1;
+    if (callEnqueue(topic, body, tag, "immediate", ttl_ms) != 0) rc = 1;
   }
   return rc;
 }
@@ -216,18 +234,33 @@ auto subBroadcast(std::span<const char* const> args) -> int {
 // `bus msg slash AGENT /command` — enqueue to commands-AGENT (auto-created
 // tui-commands). Default delivery is `idle` to avoid mid-response races.
 auto subSlash(std::span<const char* const> args) -> int {
-  if (args.size() != 2) {
-    std::println(stderr, "usage: bus msg slash AGENT /command");
+  std::vector<std::string_view> positional;
+  positional.reserve(args.size());
+  std::int64_t ttl_ms = kDefaultSlashTtlMs;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a{args[i]};
+    if (a == "--ttl") {
+      if (++i >= args.size()) return 2;
+      ttl_ms = std::atoll(args[i]);
+    } else if (a.starts_with("--")) {
+      std::println(stderr, "bus msg slash: unknown flag \"{}\"", a);
+      return 2;
+    } else {
+      positional.emplace_back(a);
+    }
+  }
+  if (positional.size() != 2) {
+    std::println(stderr, "usage: bus msg slash AGENT /command [--ttl MS]");
     return 2;
   }
-  const std::string body{args[1]};
+  const std::string body{positional[1]};
   if (body.empty() || body[0] != '/') {
     std::println(stderr, "bus msg slash: body must start with '/' (got \"{}\")",
                  body);
     return 2;
   }
-  const std::string topic = std::string{"commands-"} + args[0];
-  return callEnqueue(topic, body, "slash", "idle", 0);
+  const std::string topic = std::string{"commands-"} + std::string{positional[0]};
+  return callEnqueue(topic, body, "slash", "idle", ttl_ms);
 }
 
 }  // namespace bus

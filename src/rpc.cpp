@@ -150,7 +150,20 @@ auto Server::run(std::chrono::milliseconds tick_interval,
         on_tick();
         continue;
       }
-      // r > 0: connection ready. Drain a backlog before the next tick.
+      // r > 0: connection ready. Drain a backlog before the next tick,
+      // but cap the inner-loop duration so on_tick is guaranteed to
+      // fire at least every kInnerBudget regardless of RPC volume.
+      //
+      // History: without this cap, sustained 1-Hz polling from viewer
+      // panes (monitor + per-agent agent-bar) combined with slow
+      // per-RPC paneState calls (zellij dump-screen sometimes blocks
+      // for seconds) kept the inner loop indefinitely topped up. The
+      // broker stayed alive, RPCs returned, but the delivery tick
+      // never fired — records sat un-acked, in-flight retries never
+      // re-armed.
+      constexpr auto kInnerBudget = std::chrono::milliseconds{100};
+      const auto inner_deadline =
+          std::chrono::steady_clock::now() + kInnerBudget;
       while (true) {
         const int conn = ::accept(listen_fd_, nullptr, nullptr);
         if (conn < 0) {
@@ -160,6 +173,12 @@ auto Server::run(std::chrono::milliseconds tick_interval,
         }
         serve(conn);
         ::close(conn);
+        if (std::chrono::steady_clock::now() >= inner_deadline) {
+          // Yield to the tick. Any queued connections will be picked
+          // up by the next outer pselect; the listen socket's kernel
+          // backlog keeps them safe.
+          break;
+        }
         // poll for another pending connection without blocking
         fd_set rfds2;
         FD_ZERO(&rfds2);

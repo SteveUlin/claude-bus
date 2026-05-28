@@ -284,6 +284,69 @@ auto Loop::scanEvents() -> void {
       continue;
     }
 
+    // Agent-death cleanup: SessionEnd with any reason OTHER than
+    // clear/compact (those are restart-style, handled above). The
+    // claude session has exited — could be a clean /exit, could be
+    // a crash detected by the harness. Either way the in-flight
+    // records targeting this agent are now bound to a TUI that
+    // no longer exists; their dispatched-keystrokes vanished into
+    // the dead pane and no ack will ever fire.
+    //
+    // Release the in-flight entries WITHOUT advancing the cursor.
+    // The topic-log records stay at the head; if a new session
+    // for the same agent starts (zellij respawn, agent-launch
+    // re-resume), the next dispatch tick re-finds and re-delivers
+    // them to the fresh TUI. If the agent stays dead, phase-2
+    // hard-death detection (deferred) will eventually escalate.
+    //
+    // Also drop the presence sentinel — the [bus-attach] file
+    // outlives its writer otherwise and silences delivery to the
+    // (next) session. tui-locks are deliberately left alone:
+    // they're per-call flock semantics, not session state.
+    if (event == "SessionEnd") {
+      std::vector<std::string> to_release;
+      for (const auto& [id, f] : in_flight_) {
+        if (f.agent == agent) to_release.push_back(id);
+      }
+      for (const auto& id : to_release) {
+        removeInflight(id);
+        in_flight_.erase(id);
+      }
+      // Mirror the blocking-op map cleanup (the blocking-op ack
+      // path above only fires for clear/compact; other SessionEnd
+      // reasons could still have a stale blocking-op entry).
+      blocking_ops_.erase(agent);
+
+      const auto presence_path =
+          cfg_.state_dir + "/presence/" + agent;
+      std::error_code ec;
+      fs::remove(presence_path, ec);
+
+      // Audit + broker.log so the human (and post-mortems) see when
+      // the broker noticed an agent end. Quiet on inbox-ops by
+      // design (the monitor's GONE state is enough surface).
+      {
+        TopicConfig audit;
+        audit.name = "audit";
+        audit.kind = std::string{kKindAppendLog};
+        if (!registry_.contains("audit")) {
+          auto _ = registry_.create(audit);
+        }
+        topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+        topic::SendOpts a_opts;
+        a_opts.protocol = "agent-end";
+        stampEpoch(a_opts, current_epoch_);
+        const auto reason = v->getOrString("reason");
+        auto _ = audit_log.append(
+            "broker",
+            std::format("agent-end agent={} reason={} released={}",
+                        agent, reason.empty() ? "(none)" : reason,
+                        to_release.size()),
+            a_opts);
+      }
+      continue;
+    }
+
     if (event != "UserPromptSubmit") continue;
 
     // Find any in-flight record for this agent dispatched before the

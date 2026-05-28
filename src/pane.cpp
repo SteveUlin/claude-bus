@@ -349,6 +349,20 @@ auto detectMode(const std::vector<std::string>& lines) -> std::string {
       if (l.find(needle) != std::string::npos) return std::string{mode};
     }
   }
+  // Fallback: claude TUI sometimes hides the explicit `-- INSERT --`
+  // marker in the bottom status row (e.g., when the row displays the
+  // `← for agents` hint instead). In that case we still observe the
+  // canonical "bypass permissions" footer string, which means the
+  // status footer IS visible — we just can't see the mode marker.
+  // Treat that as INSERT: the dominant claude-TUI state, and the
+  // downstream sendToPaneSafe still issues `i` + Ctrl-U before any
+  // write so a false-positive (rare NORMAL/VISUAL with marker hidden)
+  // self-corrects. Without this fallback, every delivery to a pane
+  // showing the alt-status variant defers forever — that was the
+  // bast-wedge symptom 2026-05-28.
+  for (const auto& l : lines) {
+    if (l.find("bypass permissions") != std::string::npos) return "INSERT";
+  }
   return "unknown";
 }
 
@@ -561,20 +575,24 @@ auto sendToPaneSafe(std::string_view agent_name,
   const std::string saved =
       (ps.buffer != "(empty)") ? ps.buffer : std::string{};
 
-  // Enter INSERT only if we're not already there. In INSERT, send-keys
-  // "i" would type a literal 'i' and pollute the buffer.
-  if (ps.mode != "INSERT") {
-    sendKey(pane, "i");
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
-  }
-
-  // Ctrl-U clears the input field in claude TUI's INSERT mode (verified
-  // empirically). Skip on the common empty-buffer path to save a
-  // keypress + sleep.
-  if (!saved.empty()) {
-    sendKey(pane, "Ctrl u");
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
-  }
+  // Always send `i` then `Ctrl u` before writing. Rationale:
+  //   - If the pane is actually in NORMAL or VISUAL (whether the
+  //     marker was visible or hidden — see detectMode's fallback),
+  //     `i` switches to INSERT.
+  //   - If already in INSERT, `i` types a literal 'i' that pollutes
+  //     the buffer — but the next Ctrl-U clears the line, including
+  //     that 'i' and any prior draft, so the net effect is the same
+  //     as "ensure clean INSERT-mode buffer." That's the precondition
+  //     sendToPane expects.
+  //   - Costs ~100 ms of paired keypress + sleep per write. The
+  //     previous conditional path was clever (skip 'i' when mode ==
+  //     INSERT, skip Ctrl-U on empty buffer) but it broke against
+  //     claude-TUI variants that hide the explicit mode marker.
+  //     Robust > clever for a write that's already gating on flock.
+  sendKey(pane, "i");
+  std::this_thread::sleep_for(std::chrono::milliseconds{50});
+  sendKey(pane, "Ctrl u");
+  std::this_thread::sleep_for(std::chrono::milliseconds{50});
 
   if (!sendToPane(pane, text)) return false;
 

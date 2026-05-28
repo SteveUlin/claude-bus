@@ -8,7 +8,9 @@
 #include "topic_registry.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -197,6 +199,27 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     ::close(pidfd);
     return 1;
   }
+
+  // Parent-death signal. Tie the broker's lifetime to the launcher's:
+  // if our immediate parent (the floating-pane bash in the canonical
+  // layout) exits, the kernel sends us SIGTERM, which the existing
+  // signal handler in rpc::Server::run translates into a graceful
+  // gStopFlag shutdown. Closes the orphan-broker hole — a nohup +
+  // backgrounded launch had reparented the broker to init and let it
+  // survive across zellij restarts. PR_SET_PDEATHSIG is Linux-only;
+  // the bus already targets Linux, but the #ifdef keeps the build
+  // clean elsewhere. See docs/broker-lifetime-fix.md for the
+  // diagnosis.
+#ifdef PR_SET_PDEATHSIG
+  if (::prctl(PR_SET_PDEATHSIG, SIGTERM) < 0) {
+    logEvent(cfg.state_dir, "WARN",
+             std::format("prctl PR_SET_PDEATHSIG failed: {}",
+                         std::strerror(errno)));
+    // Not fatal — broker is still functional, it just won't auto-
+    // die with its parent. Better to log + run than to bail.
+  }
+#endif
+
   // We own the lock. Stomp any stale pid value with our own.
   if (::ftruncate(pidfd, 0) < 0) { /* not fatal */ }
   ::lseek(pidfd, 0, SEEK_SET);

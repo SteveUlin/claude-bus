@@ -72,6 +72,18 @@ Hooks now ONLY emit state events to `events.jsonl` (via
 `settings/hooks/log-event.sh`). They never pull mail or dispatch
 slashes — the broker decides when to push.
 
+**Launch contract.** The broker must be launched as a direct child of
+zellij — `layouts/fleet.kdl`'s floating pane is the canonical path,
+and `prctl(PR_SET_PDEATHSIG, SIGTERM)` ties the broker's lifetime to
+that parent so closing the pane / restarting zellij brings it down
+cleanly. Do **NOT** use `nohup`, `setsid`, or `disown` to background
+it from a tool-call shell or anywhere else: any of those defeat the
+parent-death signal and leave the broker reparented to init,
+surviving zellij restarts as an orphan. To restart manually, prefer
+`zellij action new-pane --floating -- /path/to/bus broker run`
+or stop-via-`bus broker stop` + relaunch the layout. See
+`docs/broker-lifetime-fix.md` for the diagnosis.
+
 **Topic kinds:**
 
 | Kind | What it does |

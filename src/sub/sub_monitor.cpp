@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <ios>
+#include <sstream>
 #include <map>
 #include <print>
 #include <set>
@@ -211,6 +212,69 @@ auto formatMail(std::int64_t unread) -> std::string {
   return std::to_string(unread);
 }
 
+// Scan `"<key>": <int>` after `"<scope>"` — avoids json::parse because
+// the statusline payload has float fields (cost.total_cost_usd) and
+// our json_min doesn't speak floats. Same trick sub_deck.cpp uses.
+auto scanIntAfter(std::string_view content,
+                  std::string_view scope_key,
+                  std::string_view leaf_key) -> long long {
+  auto scope = content.find(scope_key);
+  if (scope == std::string_view::npos) return -1;
+  auto key = content.find(leaf_key, scope);
+  if (key == std::string_view::npos) return -1;
+  auto i = content.find(':', key);
+  if (i == std::string_view::npos) return -1;
+  ++i;
+  while (i < content.size() && (content[i] == ' ' || content[i] == '\t')) ++i;
+  long long n = 0;
+  bool seen = false;
+  while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
+    n = n * 10 + (content[i] - '0');
+    seen = true;
+    ++i;
+  }
+  return seen ? n : -1;
+}
+
+struct CtxStats {
+  int pct{-1};
+  long long size_tokens{-1};
+};
+
+auto contextStatsFor(std::string_view agent) -> CtxStats {
+  CtxStats out;
+  const std::string path =
+      stateDir() + "/status/" + std::string{agent} + ".json";
+  std::ifstream in{path};
+  if (!in) return out;
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  const auto content = buf.str();
+  const auto pct = scanIntAfter(content, "\"context_window\"",
+                                "\"used_percentage\"");
+  if (pct >= 0) out.pct = static_cast<int>(pct > 100 ? 100 : pct);
+  out.size_tokens = scanIntAfter(content, "\"context_window\"",
+                                 "\"context_window_size\"");
+  return out;
+}
+
+auto formatCtxSize(long long tokens) -> std::string {
+  if (tokens <= 0) return "?";
+  if (tokens >= 1'000'000 && tokens % 1'000'000 == 0) {
+    return std::format("{}M", tokens / 1'000'000);
+  }
+  if (tokens >= 1000 && tokens % 1000 == 0) {
+    return std::format("{}K", tokens / 1000);
+  }
+  return std::format("{}", tokens);
+}
+
+// CTX column — '<pct>%/<size>' or '—'. Compact: '85%/1M', '94%/200K'.
+auto formatCtx(const CtxStats& s) -> std::string {
+  if (s.pct < 0) return "—";
+  return std::format("{}%/{}", s.pct, formatCtxSize(s.size_tokens));
+}
+
 auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   std::print("{}", kCursorHome);
 
@@ -231,9 +295,9 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<12} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "TITLE",
-               kReset, kClearEol);
+  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<9} {:<12} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "CTX", "PROJECT",
+               "TITLE", kReset, kClearEol);
 
   if (!snap.broker_alive) {
     std::print("{}", kClearBelow);
@@ -275,6 +339,15 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto project = formatProject(cwd);
     const auto file_title = titleFromFile(name);
     const auto title = formatTitle(file_title);
+    const auto ctx_stats = contextStatsFor(name);
+    const auto ctx_cell = formatCtx(ctx_stats);
+    // CTX color tier: ≥90% red, ≥75% yellow, else dim — surfaces
+    // approaching-ceiling context at a glance.
+    const auto ctx_color =
+        ctx_stats.pct < 0          ? kDim
+        : ctx_stats.pct >= 90      ? kRed
+        : ctx_stats.pct >= 75      ? kYellow
+                                   : kDim;
     (void)last_event;
     (void)last_tool;
     (void)has_draft;
@@ -288,13 +361,14 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
     std::println(
         "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
-        "{}{:<12}{} {}{:<56}{}{}",
+        "{}{:<9}{} {}{:<12}{} {}{:<56}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
         stateColor(st), stateName(st), kReset,
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
+        ctx_color, ctx_cell, kReset,
         cwd.empty() ? kDim : "", project, kReset,
         file_title.empty() ? kDim : "", title, kReset,
         kClearEol);

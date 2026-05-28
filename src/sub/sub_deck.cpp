@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <ios>
+#include <sstream>
 #include <map>
 #include <print>
 #include <set>
@@ -116,22 +117,63 @@ auto titleFor(std::string_view agent) -> std::string {
   return readFileFirstLine(stateDir() + "/focus/" + std::string{agent});
 }
 
-// Pull `context_window.used_percentage` from $STATE/status/<agent>.json
-// if the statusline sidecar (docs/context-budget.md) is writing it.
-// Returns -1 when unavailable so the renderer can fall back to "—".
-auto contextPctFor(std::string_view agent) -> int {
+// Scan `"<key>": <int>` after `"<scope>"` opens. Returns -1 on miss.
+// Avoids json::parse — the statusline payload contains
+// `cost.total_cost_usd` as a float and our json_min doesn't speak
+// floats. The file shape is stable enough to scan.
+auto scanIntAfter(std::string_view content,
+                  std::string_view scope_key,
+                  std::string_view leaf_key) -> long long {
+  auto scope = content.find(scope_key);
+  if (scope == std::string_view::npos) return -1;
+  auto key = content.find(leaf_key, scope);
+  if (key == std::string_view::npos) return -1;
+  auto i = content.find(':', key);
+  if (i == std::string_view::npos) return -1;
+  ++i;
+  while (i < content.size() && (content[i] == ' ' || content[i] == '\t')) ++i;
+  long long n = 0;
+  bool seen = false;
+  while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
+    n = n * 10 + (content[i] - '0');
+    seen = true;
+    ++i;
+  }
+  return seen ? n : -1;
+}
+
+struct CtxStats {
+  int pct{-1};                    // used_percentage
+  long long size_tokens{-1};      // context_window_size
+};
+
+auto contextStatsFor(std::string_view agent) -> CtxStats {
+  CtxStats out;
   const std::string path =
       stateDir() + "/status/" + std::string{agent} + ".json";
   std::ifstream in{path};
-  if (!in) return -1;
-  std::string content{std::istreambuf_iterator<char>{in}, {}};
-  if (content.empty()) return -1;
-  auto parsed = json::parse(content);
-  if (!parsed || !parsed->isObject()) return -1;
-  const auto* cw = parsed->get("context_window");
-  if (cw == nullptr || !cw->isObject()) return -1;
-  const auto pct = cw->getOrInt("used_percentage", -1);
-  return pct > 100 ? 100 : static_cast<int>(pct);
+  if (!in) return out;
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  const auto content = buf.str();
+  const auto pct = scanIntAfter(content, "\"context_window\"",
+                                "\"used_percentage\"");
+  if (pct >= 0) out.pct = static_cast<int>(pct > 100 ? 100 : pct);
+  out.size_tokens = scanIntAfter(content, "\"context_window\"",
+                                 "\"context_window_size\"");
+  return out;
+}
+
+// Compact ceiling label: 1000000 → "1M", 200000 → "200K", else "<N>".
+auto formatCtxSize(long long tokens) -> std::string {
+  if (tokens <= 0) return "?";
+  if (tokens >= 1'000'000 && tokens % 1'000'000 == 0) {
+    return std::format("{}M", tokens / 1'000'000);
+  }
+  if (tokens >= 1000 && tokens % 1000 == 0) {
+    return std::format("{}K", tokens / 1000);
+  }
+  return std::format("{}", tokens);
 }
 
 auto firstLine(std::string_view s, std::size_t max_chars = 56) -> std::string {
@@ -210,6 +252,7 @@ struct Row {
   std::string subject;     // title-or-derived; ask body for NEEDS_INPUT
   std::int64_t age_s{-1};
   int context_pct{-1};
+  long long context_size{-1};
 };
 
 // Build the activity sentence-body for one agent.
@@ -221,7 +264,9 @@ auto makeRow(std::string_view name, const json::Value& entry,
   r.state = computeStateFromLabel(state_label);
   const auto age_ms = entry.getOrInt("age_ms", -1);
   r.age_s = age_ms >= 0 ? age_ms / 1000 : -1;
-  r.context_pct = contextPctFor(name);
+  const auto ctx = contextStatsFor(name);
+  r.context_pct = ctx.pct;
+  r.context_size = ctx.size_tokens;
 
   const auto title = titleFor(name);
   std::string ask;
@@ -267,10 +312,12 @@ auto formatAgeBrief(std::int64_t age_s) -> std::string {
   return std::format("{}h", age_s / 3600);
 }
 
-auto formatMeta(std::int64_t age_s, int ctx_pct) -> std::string {
+auto formatMeta(std::int64_t age_s, int ctx_pct,
+                long long ctx_size_tokens) -> std::string {
   const auto age = formatAgeBrief(age_s);
   if (ctx_pct < 0) return std::format("({} · —)", age);
-  return std::format("({} · {}%)", age, ctx_pct);
+  return std::format("({} · {}%/{})", age, ctx_pct,
+                     formatCtxSize(ctx_size_tokens));
 }
 
 auto verbFor(State s) -> std::string_view {
@@ -301,7 +348,7 @@ auto printRow(const Row& r, std::string_view zone_glyph,
       (r.state == State::NeedsInput && !r.subject.empty())
           ? std::format("\"{}\"", r.subject)
           : r.subject;
-  const auto meta = formatMeta(r.age_s, r.context_pct);
+  const auto meta = formatMeta(r.age_s, r.context_pct, r.context_size);
   const auto name_color = agentColor(r.name);
 
   std::println("{}{}{}  {}{}{} {}{}{} {}  {}{}{}{}",

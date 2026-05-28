@@ -58,5 +58,10 @@ answer:
 
 - Outgoing messages start with `[auri]`.
 - Mail peers directly; mail comms only when surfacing to sulin.
-- Reference tracker IDs (#NN) in replies.
+- Reference tracker IDs (#NN) in the **body**, never the title.
+- `--title` describes the action in plain English a human would
+  understand — not tracker jargon. "shipping ack-then-work rule"
+  beats "#38 shipped"; "investigate broker orphan" beats
+  "#39 redispatch". The title is sulin's at-a-glance surface in
+  `bus monitor` and `bus log`.
 - `bus monitor` + last 5 min of `bus events` is the daily fleet view.

@@ -1,75 +1,93 @@
-# ops-inbox redesign — log-shaped, colorized, scannable
+# ops-inbox redesign — events.jsonl-derived lifecycle log
 
 Author: elodin · For: comms / sulin · Status: proposal, no code yet.
 
-## (a) what ops-inbox should be after redesign
+(Revised after sulin's clarification: ops-inbox is NOT an agent→sulin channel. Replace its viewer with a colorized lifecycle log derived from events.jsonl.)
 
-A **colorized append-only log** of infrastructure signals and direct asides — visible at a glance in the cockpit, scrollable without ceremony, one line per event with timestamp, source, and a short body. The semantic shape stays the same (sulin's auto-memory framing — "infra signals + direct asides, not chatter") but the *display* stops looking like a mailbox dump and starts looking like a structured tail.
+## (a) what the cockpit pane should show after redesign
 
-What it is NOT: a queue to be acked. Nothing reads ops-inbox-as-recipient; the broker writes to it, the human reads it, no agent consumes. Today it's typed `agent-inbox` because that's what auto-creates on the broker's escalation path — that's an implementation accident, not the intended shape.
+A **scannable colorized event log** showing fleet lifecycle transitions, one line per event. Three shapes the human cares about:
 
-## What lives in ops-inbox today
+- `agent X started working on Y`
+- `agent X finished with Y`
+- `agent X needs user input`
 
-Examining a recent peek: ~30+ records, all `sender=broker, protocol=delivery-failure`, mostly recursive stale-epoch escalations from the cross-restart period. Each renders as a 7-line stanza (`=== id ===` + sender + protocol + ttl_ms + deliver_when + body label + body). The body itself is often a single line, sometimes nested ("delivery to ops exhausted (...): delivery to ops exhausted (...): ..."). One screen of the current viewer shows 4–5 records; a log-shape would show 30–40.
+Plus, folded in alongside, the infrastructure events the broker emits (delivery-failure escalation, auto-clear, drop). Same line shape, different color band.
+
+The pane that today reads `bus topic inbox ops` becomes a new view — call it `bus log` for now — that tails `events.jsonl` and renders these transitions in real time.
+
+The `inbox-ops` topic itself can stay (the broker still writes delivery-failure escalations there as a per-record audit trail), but it stops being what the cockpit shows. Worth eventually deprecating in favor of writing only to the existing `audit` topic, but that's a tidying pass — not blocking this redesign.
+
+## What we have to read from
+
+Two sources, already populated:
+
+- **`events.jsonl`** — hook events keyed by agent. Maps to transitions:
+  - `SessionStart` → "X started" (with `source` distinguishing startup / resume / compact)
+  - `UserPromptSubmit` → "X received" (with `payload.prompt` first line)
+  - `PreToolUse:TodoWrite` / `TaskCreate` / `TaskUpdate` (status→in_progress) → "X working on Y" (Y from `activeForm`)
+  - `Stop` → "X finished" (Y resolved from `payload.last_assistant_message` first line or the focus file at event time)
+  - `Notification` with `notification_type=idle_prompt` → "X idle"
+  - `Notification` with `notification_type=permission_prompt` → "X needs input"
+  - `SessionEnd` → "X ended" (with `reason` for clear / compact)
+
+- **`$STATE/focus/<agent>`** — already maintained by `settings/hooks/focus-write.sh` (TodoWrite / TaskCreate / TaskUpdate hooks, kvothe just shipped this). Holds the current in-progress task's `activeForm`. Use as the "Y" when a transition doesn't carry one inline.
+
+- **`$STATE/title/<agent>`** — sulin's per-mail title (`bus msg mail --title`, also kvothe). Higher priority than focus when set; falls back to focus otherwise.
 
 ## (b) candidate shapes
 
-### (1) Pure cosmetic — single-line tail viewer
+### (1) Replace the viewer in place; keep the topic
 
-Make `bus topic inbox ops` itself render log-style instead of stanza-style. Format per record:
+Make a new `bus log` verb (or `bus topic inbox ops --log` to keep the path stable for the fleet.kdl pane). It tails `events.jsonl` and the `audit` topic (broker emissions), merges by timestamp, renders one line per relevant transition:
 
 ```
-HH:MM:SS [sender/protocol] body-first-line...
+HH:MM:SS  <agent>  ▸ started: implementing dispatch-tui
+HH:MM:SS  <agent>  ◇ working: writing src/dispatch.cpp
+HH:MM:SS  <agent>  ✓ finished: dispatch-tui ready for review
+HH:MM:SS  <agent>  ❓ needs input
+HH:MM:SS  broker   ⚠ delivery to bast exhausted: …
+HH:MM:SS  broker   🗜 auto-clear kvothe (idle 12m)
 ```
 
-- Color: timestamp dim; `[sender/protocol]` bracket colored by severity heuristic (`delivery-failure` → red; `audit` → yellow; `auto-clear` → magenta; `text` / `note` → cyan).
-- Multi-line bodies: take the first line, append `…` if more. Full body available via `bus msg body <id>`.
-- Pros: shipping cost is small (~50 lines in `src/sub/sub_inbox.cpp`), no schema change, no migration. Big UX win — density goes 4× per screen.
-- Cons: the per-record viewer (stanza format) is now hidden for ops; callers who want it use `bus msg peek inbox-ops` instead. Acceptable since `peek` already does that shape.
+Color: agent-color (already established per `bus agentColor`) for the agent name; severity glyph + body colored by transition kind (start=cyan, working=blue, finished=green dim, needs-input=yellow, broker-error=red, broker-info=magenta).
 
-### (2) Semantic restructure — kind = append-log + new verb
+Pros: one viewer change, no schema change. Reads sources that already exist. The inbox-ops topic stays for audit-as-data; the viewer just stops being its renderer. Sulin gets the lifecycle log immediately.
 
-Change `inbox-ops` from `agent-inbox` to `append-log` kind. Add a new verb `bus log ops` (or `bus tail ops`) for the log-shape viewer.
+Cons: events.jsonl is per-agent-event firehose — needs trimming. Many of its events (every PreToolUse:Bash, every PostToolUse:Read) are noise. Filter to the lifecycle subset above; ignore others.
 
-- Pros: types reflect intent. No one ever needs an "ack" semantics on ops; the kind should say so.
-- Cons: requires a migration (the broker has hard-coded `inbox-ops` auto-creation as agent-inbox in `delivery::escalate`). New verb is more surface than necessary — the same display can hang off the existing inbox verb. The append-log kind today has no consumer side and almost no test coverage.
-- Verdict: not worth the cost for this round. Re-evaluate if more append-log topics show up.
+### (2) Multiplex into a virtual topic
 
-### (3) Multiplex — aggregate audit + ops + comms-asides into one view
+Promote the lifecycle log to a real "synthesized" topic the broker maintains. The broker would translate events.jsonl into a curated topic-log internally, and the viewer reads that topic as it reads any other.
 
-Make the cockpit viewer read from {audit topic, inbox-ops, plus a new comms-aside protocol} and merge by timestamp. Color per source.
+Pros: separates concerns — viewer becomes dumb, the curation logic is server-side.
 
-- Pros: one place to watch for everything infra-shaped.
-- Cons: requires N-topic merge logic in the viewer; cursor semantics get messier (each source has its own cursor); the broker would need to stop double-writing audit + inbox-ops for the same event (today it writes both — see `delivery::escalate`). Significant invasiveness.
-- Verdict: defer. Can come later if (1) doesn't carry enough signal.
+Cons: doubles writes (every interesting event ends up in two places), introduces a new topic kind ("synthesized" or "derived"), broker has to keep its synthesis in lockstep with the hook event stream. Significantly more surface for marginal cleanliness. **Defer.**
 
-### (4) Severity field
+### (3) Topic-side restructure — `inbox-ops` → kind=append-log + multi-source viewer
 
-Add an explicit `severity` (INFO / WARN / ERR) to the wire format OR encode in `protocol` (e.g., `protocol="audit:INFO"`). Color by severity.
-
-- Pros: cleaner color mapping than guessing from protocol name.
-- Cons: protocol-encoding is a kludge; wire-format bump is a real change. The protocol field already has enough variance (`delivery-failure`, `audit`, `auto-clear`, `text`) that the severity heuristic in (1) maps well without it.
-- Verdict: optional layer on top of (1). Don't ship in v1 — see how far the protocol-name heuristic gets.
+(Carried over from v1 of this doc for context.) Touches broker code, requires migration, and now mostly orthogonal to sulin's actual ask: a *display* problem, not a *typing* problem. **Drop.**
 
 ## (c) Recommendation — ship (1), defer the rest
 
-Tighten `bus topic inbox ops` to a log-shape colorized single-line view. Concrete spec for the kvothe handoff:
+Concrete spec for the kvothe handoff:
 
-- Detect "log mode" when topic == `ops` (or a `--log` flag if generalization to other topics is wanted later).
-- Read records from cursor as today; for each, emit one line:
-  `<dim>HH:MM:SS</dim> [<color>sender/protocol</color>] <body-first-line>[…]`
-- Color rule (heuristic on protocol):
-  - `delivery-failure`, anything containing `error` / `fail` → red
-  - `audit`, `auto-clear` → yellow (auto-clear could be magenta if visually crowded by yellow audits — judgment call)
-  - everything else (text, note, info) → cyan
-- Multi-line body: first line only, `…` suffix if the body has any subsequent line.
-- Total record-line width should fit a typical pane (≤ 110 chars); truncate body to fit, `…` at the truncation point.
-- Keep the existing inotify-tail loop — only the render function changes.
+1. New verb `bus log [--since DUR] [--agent NAME]` reads `events.jsonl` from EOF backwards by `--since` (default 5m), then live-tails forward. Optionally interleaves the `audit` topic.
+2. Render one line per LIFECYCLE event only. The filter set:
+   - `UserPromptSubmit`, `Stop`, `Notification` (idle_prompt / permission_prompt)
+   - `SessionStart`, `SessionEnd`
+   - `PreToolUse` only when `tool_name in {TodoWrite, TaskCreate, TaskUpdate}` AND the call corresponds to a status → in_progress transition. (The `focus/<agent>` file is already populated by the hook; reading the file at render time avoids re-parsing tool input.)
+3. "Y" resolution priority per agent: `$STATE/title/<agent>` (if set) > `$STATE/focus/<agent>` > the event's inline payload (`prompt` / `last_assistant_message` first line) > empty.
+4. Format: `HH:MM:SS  <agent>  <glyph> <kind>: <body>`. Glyph + kind chosen from the table above; agent rendered in its existing per-agent color.
+5. Fleet-pane wiring: update `layouts/fleet.kdl`'s ops-inbox slot from `bus topic inbox ops` to `bus log` (keep the bash restart wrapper).
+6. Test by enqueueing to `events.jsonl` directly (sub_events already does this for tests) and confirming each transition renders.
 
-Implementation handoff: **kvothe** (per the comms-routing heuristic — viewers and dashboards are kvothe's territory; existing `sub_inbox.cpp` lives in the same render-state lib kvothe has been editing for monitor's FOCUS / PROJECT columns). Surface design choice (severity color map, body truncation width) in the commit message.
+Implementation handoff: **kvothe** (viewer territory; already owns `sub_monitor` / `sub_inbox` / `sub_events` and the focus/title file conventions). Surface design choices in the commit:
+- which transitions get a glyph and which fold (verdict: ship the 6 in the filter, ignore the rest)
+- whether the audit topic is merged into the view from v1 or v2
 
-## Out of scope for this doc
+## Out of scope
 
-- The "direct asides" producer side (a `bus msg note <text>` verb, or a comms slash for "drop a line into ops without bothering anyone"). Worth its own pass once the viewer is good. Sulin's framing implies this *should* exist; just not in this doc.
-- Cleanup of the recursive stale-epoch escalations currently polluting ops. Already mitigated for new records by my own `escalate()` stamping fix (commit 8534557); old records expire as the cursor advances or can be dropped with `bus msg drop`.
-- Severity field promotion to first-class — see (4); leave for a future round if the protocol heuristic isn't enough.
+- Removing the broker's writes to the `inbox-ops` topic. Worth doing once the viewer no longer reads it; not blocking this doc.
+- The `bus msg note` direct-asides channel from v1 of this doc — sulin's clarification explicitly drops this; the lifecycle log replaces it.
+- Persistence of the lifecycle log itself. `events.jsonl` is already on disk; the viewer just renders it. If we ever want a curated structured log, that's option (2) above and a separate decision.

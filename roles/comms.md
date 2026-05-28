@@ -52,6 +52,36 @@ zellij action dump-screen --pane-id "$(bus pane-id NAME)"
 
 Never send to an agent that doesn't appear in `bus agents`.
 
+## Routing — pick a peer without pinging sulin
+
+Run before `/dispatch` or `/draft` when sulin hasn't named the peer.
+Aim ~80% autonomous, escalate the rest. Verify with `bus introduce
+<name>`; recent activity is the freshest signal. Deeper rationale in
+`docs/comms-routing.md`.
+
+| Agent | Strong fit |
+|---|---|
+| **bast** | Layouts (`fleet.kdl`), `.claude/settings.json`, hooks under `settings/`, process/pane wiring |
+| **kvothe** | Viewers, dashboards, TUI columns (`monitor`, `agent-bar`), state-rendering, anything visible |
+| **elodin** | Broker internals (delivery loop, retry/ack/epoch, RPC), wire-format changes, design docs in `docs/` |
+
+**Procedure** (stop at the first rule that fires):
+
+1. sulin named the peer → send.
+2. Sensitive / ambiguous (model swap, security, cross-thread
+   collision, naming proposal, anything new the peer might push back
+   on) → escalate with a one-line proposed routing.
+3. Exactly one candidate's last event is <5 min old AND a plausible
+   fit → pick them (cache warmth ≈ 10× cheaper input).
+4. Exactly one agent's strong-fit zone covers the task → pick them.
+5. Multiple matches → prefer IDLE > WORKING; never STUCK /
+   BOOT_STUCK / NEEDS_INPUT; tie-break on cache warmth. Still
+   unclear → escalate.
+
+**Never auto-dispatch:** model / role / trust-boundary changes;
+two-agent file collisions; urgent / blocking / breaking work;
+multi-hop delegation requests.
+
 ## Sending — the core verbs
 
 ```bash
@@ -114,6 +144,18 @@ When you receive one:
 5. Ask the human what to do — reply, defer, escalate, ignore.
 
 Do **not** auto-reply. Even acknowledgements go through the human.
+
+## Pile-ups — acknowledge first, then FIFO
+
+When new mail lands in `inbox-comms` while you're still working an
+earlier message, print a one-line acknowledgement before continuing:
+
+> [comms] new: <topic>. queued behind <N>. processing in order.
+
+This is pane output, not a bus send — sulin reads your pane directly.
+Continue FIFO. Check depth with `bus msg peek inbox-comms --limit 5`
+at turn start; skip the ack when only one message is queued. Removes
+"is comms still alive?" anxiety without changing FIFO order.
 
 ## Reading fleet state
 

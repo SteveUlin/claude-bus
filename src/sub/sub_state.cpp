@@ -50,11 +50,21 @@ auto subInflight(std::span<const char* const> args) -> int {
 
 auto subState(std::span<const char* const> args) -> int {
   std::string filter;
-  if (args.size() > 1) {
-    std::println(stderr, "usage: bus state [AGENT]");
-    return 2;
+  bool show_all = false;
+  for (const auto* a : args) {
+    const std::string_view sv{a};
+    if (sv == "--all") {
+      show_all = true;
+    } else if (sv.starts_with("--")) {
+      std::println(stderr, "bus state: unknown flag \"{}\"", sv);
+      return 2;
+    } else if (filter.empty()) {
+      filter = sv;
+    } else {
+      std::println(stderr, "usage: bus state [--all] [AGENT]");
+      return 2;
+    }
   }
-  if (args.size() == 1) filter = args[0];
 
   const auto cfg = resolveConfig();
   std::map<std::string, json::Value> req;
@@ -79,12 +89,22 @@ auto subState(std::span<const char* const> args) -> int {
                "LAST EVENT", "AGE_MS", "ATTACH", "PANE");
   for (const auto& [name, entry] : state->asObject()) {
     if (!entry.isObject()) continue;
+    const auto state_label = entry.getOrString("state");
+    // Hide tombstones by default. They pile up (one per old test
+    // marker, dead session, etc.) and drown the live agents. `--all`
+    // brings them back when you genuinely want the full history.
+    // Single-agent queries always render — the user asked for that
+    // name specifically.
+    if (!show_all && filter.empty() &&
+        (state_label == "GONE" || state_label == "ENDED")) {
+      continue;
+    }
     std::string last_event = entry.getOrString("last_event");
     const auto tool = entry.getOrString("last_tool");
     if (!tool.empty()) last_event += ":" + tool;
     if (last_event.empty()) last_event = "—";
     std::println("{:<14} {:<10} {:<22} {:>8} {:<8} {}", name,
-                 entry.getOrString("state"), last_event,
+                 state_label, last_event,
                  entry.getOrInt("age_ms"),
                  entry.getOrBool("attached") ? "yes" : "no",
                  entry.getOrBool("pane_exists") ? "yes" : "no");

@@ -94,12 +94,38 @@ auto fetchAll(const std::string& socket_path,
 }
 
 // Honors $CLAUDE_BUS_STATE; same fallback the rest of the code uses.
-auto eventsLogPath() -> const std::string& {
-  static const std::string path = [] {
+auto stateDir() -> const std::string& {
+  static const std::string dir = [] {
     const char* env = std::getenv("CLAUDE_BUS_STATE");
-    return std::string{env ? env : "/tmp/claude-bus"} + "/events.jsonl";
+    return std::string{env ? env : "/tmp/claude-bus"};
   }();
+  return dir;
+}
+
+auto eventsLogPath() -> const std::string& {
+  static const std::string path = stateDir() + "/events.jsonl";
   return path;
+}
+
+// Read $STATE/focus/<name> — the focus file maintained by
+// settings/hooks/focus-write.sh. Empty string when missing or
+// unreadable. Trims a single trailing newline.
+auto focusFromFile(std::string_view name) -> std::string {
+  std::string path = stateDir() + "/focus/" + std::string{name};
+  std::ifstream in{path};
+  if (!in) return {};
+  std::string content;
+  std::getline(in, content);
+  return content;
+}
+
+// Basename of a slash-separated path. Drops trailing slashes first.
+// Empty input → empty output.
+auto pathBasename(std::string_view path) -> std::string {
+  while (!path.empty() && path.back() == '/') path.remove_suffix(1);
+  const auto slash = path.find_last_of('/');
+  if (slash == std::string_view::npos) return std::string{path};
+  return std::string{path.substr(slash + 1)};
 }
 
 // Light JSON string-value extractor. Returns the raw inner-bytes between
@@ -169,12 +195,18 @@ auto extractPromptTrimmed(std::string_view line,
   return out;
 }
 
-// Scan the last ~64 KiB of events.jsonl for UserPromptSubmit records;
-// return a map of agent → first-line-trimmed prompt. The scan is
-// sequential so the last occurrence per agent wins, which is what we
-// want for "most recent". Empty map on missing file.
-auto latestPrompts() -> std::map<std::string, std::string> {
-  std::map<std::string, std::string> out;
+// Per-agent tail-scan result.
+struct AgentTail {
+  std::string prompt;  // latest UserPromptSubmit body, first line
+  std::string cwd;     // latest payload.cwd seen for any event
+};
+
+// Scan the last ~64 KiB of events.jsonl. Last value per agent wins on
+// each field (prompt: only UserPromptSubmit lines update it; cwd: any
+// line with payload.cwd updates it). One pass for both signals — the
+// FOCUS and PROJECT columns share the read.
+auto latestAgentTails() -> std::map<std::string, AgentTail> {
+  std::map<std::string, AgentTail> out;
   std::ifstream in{eventsLogPath(), std::ios::ate | std::ios::binary};
   if (!in) return out;
   const auto end_pos = in.tellg();
@@ -184,18 +216,17 @@ auto latestPrompts() -> std::map<std::string, std::string> {
   const std::streamoff start = std::max<std::streamoff>(0, end_off - kTailBytes);
   in.seekg(start);
   std::string line;
-  // Skip a potentially-partial leading line when we seeked into the
-  // middle of the file.
-  if (start > 0) std::getline(in, line);
+  if (start > 0) std::getline(in, line);  // skip partial leading line
   while (std::getline(in, line)) {
-    if (line.find("\"event\":\"UserPromptSubmit\"") == std::string::npos) {
-      continue;
-    }
     auto agent = extractStr(line, "agent");
     if (agent.empty()) continue;
-    auto trimmed = extractPromptTrimmed(line, 28);
-    if (trimmed.empty()) continue;
-    out.insert_or_assign(std::move(agent), std::move(trimmed));
+    auto& slot = out[agent];
+    if (line.find("\"event\":\"UserPromptSubmit\"") != std::string::npos) {
+      auto trimmed = extractPromptTrimmed(line, 28);
+      if (!trimmed.empty()) slot.prompt = std::move(trimmed);
+    }
+    auto cwd = extractStr(line, "cwd");
+    if (!cwd.empty()) slot.cwd = std::move(cwd);
   }
   return out;
 }
@@ -203,34 +234,64 @@ auto latestPrompts() -> std::map<std::string, std::string> {
 // ─── rendering ───────────────────────────────────────────────────────
 
 constexpr std::size_t kFocusColWidth = 32;
+constexpr std::size_t kProjectColWidth = 12;
 
-// FOCUS column: prompt if we have one, else the last tool/event, else
-// a sentinel. `has_input` is whether the agent's TUI buffer is non-
-// empty — we append a draft glyph at the end so the FOCUS column also
-// signals "user has a draft typed."
-auto formatFocus(std::string_view prompt,
+// FOCUS column priority chain:
+//   1. focusFromFile — set by settings/hooks/focus-write.sh from the
+//      in-progress task's activeForm (see docs/monitor-focus.md). Most
+//      signal-dense: agent-authored imperative form.
+//   2. UserPromptSubmit prompt body — what the agent was asked, first
+//      line trimmed. Stale-ish (the ask, not the doing).
+//   3. last_event:last_tool — low-level mechanism.
+//   4. State-shape sentinels (`booting` / `—`).
+//
+// Returns a bool alongside the text indicating whether we hit the
+// authoritative source (file). The renderer uses that to dim fallbacks.
+struct FocusCell {
+  std::string text;
+  bool authoritative{false};
+};
+
+auto formatFocus(std::string_view file_focus,
+                 std::string_view prompt,
                  std::string_view last_event,
                  std::string_view last_tool,
-                 std::string_view state_label) -> std::string {
-  std::string body;
-  if (!prompt.empty()) {
-    body = std::string{prompt};
+                 std::string_view state_label) -> FocusCell {
+  FocusCell cell;
+  if (!file_focus.empty()) {
+    cell.text = std::string{file_focus};
+    cell.authoritative = true;
+  } else if (!prompt.empty()) {
+    cell.text = std::string{prompt};
   } else if (state_label == "STARTING" || state_label == "NEW") {
-    body = "booting";
+    cell.text = "booting";
   } else if (!last_tool.empty()) {
-    body = std::string{last_event};
-    body += ':';
-    body += last_tool;
+    cell.text = std::string{last_event};
+    cell.text += ':';
+    cell.text += last_tool;
   } else if (!last_event.empty()) {
-    body = std::string{last_event};
+    cell.text = std::string{last_event};
   } else {
-    body = "—";
+    cell.text = "—";
   }
-  if (body.size() > kFocusColWidth - 2) {
-    body.resize(kFocusColWidth - 3);
-    body += "…";
+  if (cell.text.size() > kFocusColWidth - 2) {
+    cell.text.resize(kFocusColWidth - 3);
+    cell.text += "…";
   }
-  return body;
+  return cell;
+}
+
+// PROJECT column — basename of the cwd we saw in the agent's most
+// recent event. Truncates to fit the column.
+auto formatProject(std::string_view cwd) -> std::string {
+  if (cwd.empty()) return "—";
+  auto base = pathBasename(cwd);
+  if (base.empty()) base = "/";
+  if (base.size() > kProjectColWidth - 1) {
+    base.resize(kProjectColWidth - 2);
+    base += "…";
+  }
+  return base;
 }
 
 // Mail cell — bare count when zero is dim, > 0 is cyan-emphasized.
@@ -260,8 +321,8 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "FOCUS",
+  std::println("{}  {:<12}    {:<10} {:>3} {:>5} {:<12} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "PROJECT", "FOCUS",
                kReset, kClearEol);
 
   if (!snap.broker_alive) {
@@ -278,8 +339,8 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     return;
   }
 
-  // Tail-scan events.jsonl once per render for the FOCUS column.
-  const auto prompts = latestPrompts();
+  // Tail-scan events.jsonl once per render for FOCUS prompt + PROJECT cwd.
+  const auto tails = latestAgentTails();
 
   std::size_t rendered = 0;
   for (const auto& [name, entry] : state.asObject()) {
@@ -298,35 +359,46 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const bool has_draft = !buffer.empty() && buffer != "(empty)";
 
     std::string prompt;
-    if (auto it = prompts.find(name); it != prompts.end()) {
-      prompt = it->second;
+    std::string cwd;
+    if (auto it = tails.find(name); it != tails.end()) {
+      prompt = it->second.prompt;
+      cwd = it->second.cwd;
     }
-    const auto focus = formatFocus(prompt, last_event, last_tool, state_label);
+    const auto file_focus = focusFromFile(name);
+    const auto focus = formatFocus(file_focus, prompt, last_event,
+                                   last_tool, state_label);
+    const auto project = formatProject(cwd);
 
-    // Attach dot — green when attached, dim when not. Same convention as
-    // the per-pane agent-bar.
+    // Attach dot — green when attached, dim when not.
     const auto attach_glyph = attached ? "●" : "○";
     const auto attach_color = attached ? kBrightGreen : kDim;
 
     const auto mail_color = unread > 0 ? kCyan : kDim;
     const auto mail_cell = formatMail(unread);
 
-    // Render the row in one println. Draft glyph is appended after the
-    // FOCUS text so it shifts naturally with the column width.
     const auto draft_suffix = has_draft
                                   ? std::string{" "} +
                                         std::string{kYellow} + "✎" +
                                         std::string{kReset}
                                   : std::string{};
+    // FOCUS color: bright (default) when sourced from the focus file or
+    // a real prompt body; dim when we're falling back to tool/event/
+    // sentinel text.
+    const auto focus_color = focus.authoritative || !prompt.empty()
+                                 ? std::string_view{""}
+                                 : std::string_view{kDim};
+
     std::println(
-        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>5}{} {}{}{}{}{}",
+        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>5}{} "
+        "{}{:<12}{} {}{}{}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
         stateColor(st), stateName(st), kReset,
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
-        prompt.empty() ? kDim : "", focus, kReset,
+        cwd.empty() ? kDim : "", project, kReset,
+        focus_color, focus.text, kReset,
         draft_suffix, kClearEol);
     ++rendered;
   }

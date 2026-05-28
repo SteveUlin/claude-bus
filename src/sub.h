@@ -27,6 +27,9 @@ auto subLog(std::span<const char* const>) -> int;
 // Per-agent activity card (defined in src/sub/sub_deck.cpp).
 auto subDeck(std::span<const char* const>) -> int;
 
+// Role discovery (defined in src/sub/sub_roles.cpp).
+auto subRoles(std::span<const char* const>) -> int;
+
 // Viewers (defined in src/sub/sub_{monitor,inbox,agent_bar}.cpp).
 auto subMonitor(std::span<const char* const>) -> int;
 auto subInbox(std::span<const char* const>) -> int;

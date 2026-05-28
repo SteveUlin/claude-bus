@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# prepare-commit-msg — append "Co-Authored-By: <agent-id> <noreply@claude-bus>"
+# when $CLAUDE_BUS_AGENT_ID is set. Idempotent; no-op for regular git
+# users (no env var). Makes per-agent authorship visible in jj log,
+# git blame, and GitHub UI — and diagnoses the shared-tree scoop-bundle
+# pattern (a kvothe-titled commit with Co-Authored-By: bast is a clear
+# signal). Per docs/bast-ideation.md §1.
+
+set -uo pipefail
+
+msg=${1:-}
+agent=${CLAUDE_BUS_AGENT_ID:-}
+if [ -z "$msg" ] || [ ! -f "$msg" ] || [ -z "$agent" ]; then
+    exit 0
+fi
+
+trailer="Co-Authored-By: $agent <noreply@claude-bus>"
+grep -qxF "$trailer" "$msg" && exit 0
+
+# Git's trailer parser expects a blank line before the trailer block.
+last=$(grep -v '^$' "$msg" | tail -n 1)
+if [ -n "$last" ] && ! printf '%s' "$last" | grep -qE '^[A-Z][A-Za-z-]+: '; then
+    printf '\n' >> "$msg"
+fi
+printf '%s\n' "$trailer" >> "$msg"
+exit 0

@@ -116,6 +116,15 @@ Mailbox state lives at `/tmp/claude-bus/mailbox/<name>.log` (one binary log file
 - **One ruleset per session.** Don't let agents drift into per-agent `settings.json` overrides unless a role genuinely requires it — the shared `settings/` is the point.
 - **Layouts are the API.** A new use case usually means a new layout in `layouts/`, not new flags on existing scripts.
 
+## Code changes
+
+Four principles for any edit here. Apply with judgment — trivial fixes don't need ceremony.
+
+- **Think before coding.** State your assumptions explicitly. If multiple interpretations exist, surface them — don't pick silently. If a simpler approach exists, say so. If something is unclear, stop and ask.
+- **Simplicity first.** Minimum code that solves the problem. No features beyond what was asked, no abstractions for single-use code, no error handling for impossible scenarios. If 200 lines could be 50, rewrite.
+- **Surgical changes.** Touch only what you must. Don't "improve" adjacent code, refactor working code, or shift unrelated style. Remove imports/variables that *your* change orphans; don't delete pre-existing dead code without asking. Every changed line should trace to the request.
+- **Goal-driven execution.** Translate vague tasks into verifiable goals: "Add validation" → write tests for invalid inputs, then make them pass. "Fix the bug" → write a test that reproduces it, then make it pass. Strong success criteria let you loop independently.
+
 ## Commands
 
 Everything runs through the unified `bin/bus` binary. `bus help`

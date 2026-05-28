@@ -2,9 +2,9 @@
 //
 // COMMS TAB (focus on launch):
 //   ┌─ comms-bar (1 row) ────────────────────────────────────────────┐
-//   │                                  │                              │
-//   │     comms pane (claude)          │       ops-inbox              │
-//   │        55% width                 │         45% width            │
+//   │                                  │  ops-inbox  ┐                │
+//   │     comms pane (claude)          │  jj-log     ┤ stacked        │
+//   │        55% width                 │  (alt+↑↓)   ┘ 45% width      │
 //   │                                  │                              │
 //   ├──────────────────────────────────┴──────────────────────────────┤
 //   │          monitor (full-width bottom strip, ~15 rows)            │
@@ -100,8 +100,22 @@ layout {
                 pane name="comms" size="55%" command="bash" {
                     args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role comms comms"
                 }
-                pane name="ops-inbox" command="bash" {
-                    args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" topic inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                // Right column: ops-inbox + jj-log stacked. alt+↑/↓
+                // toggles between them; only one is expanded at a time.
+                // ops-inbox is the active surface (broker escalations,
+                // delivery failures); jj-log gives ambient visibility
+                // into recent commit activity without leaving the tab.
+                pane stacked=true {
+                    pane name="ops-inbox" command="bash" {
+                        args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" topic inbox ops; rc=$?; printf '\\n\\033[1;31m[inbox-ops exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                    }
+                    // watch refreshes every 2 s; `-c` interprets ANSI
+                    // colors from jj. The bash restart loop is a safety
+                    // net for the rare cases watch exits (terminal
+                    // resize quirks, broken pipe).
+                    pane name="jj-log" command="bash" {
+                        args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; trap 'exit 0' INT; while :; do watch -n 2 -t -c jj log --limit 20 --color=always; rc=$?; printf '\\n\\033[1;31m[jj-log exited rc=%d at %s — restarting in 2s]\\033[0m\\n' \"$rc\" \"$(date +%H:%M:%S)\"; sleep 2; done"
+                    }
                 }
             }
             // Fixed 15-row monitor strip — the bus monitor dashboard

@@ -118,12 +118,23 @@ class Loop {
   // Delivery to that agent is deferred until the next Stop event.
   std::map<std::string, std::string> blocking_ops_;  // agent → msg_id
 
+  // Per-agent timestamp (ms) past which the next auto-clear check is
+  // allowed to fire. Prevents re-enqueueing /clear while the previous
+  // one is still in flight or while the agent hasn't emitted a new
+  // Stop event yet (cooldown). 0 means "no prior auto-clear seen."
+  std::map<std::string, std::int64_t> auto_clear_next_allowed_ms_;
+
+  // Last time the periodic auto-clear scan ran. Cheap rate-limit so
+  // the scan doesn't fire on every 250 ms broker tick.
+  std::int64_t auto_clear_last_scan_ms_{0};
+
   auto scanEvents() -> void;
   auto scanRetries() -> void;
   auto dispatchAgentInbox(const TopicConfig& cfg) -> void;
   auto dispatchTuiCommands(const TopicConfig& cfg) -> void;
   auto escalate(const InFlight& f, std::string_view reason,
                 std::string_view body) -> void;
+  auto maybeAutoClear() -> void;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;

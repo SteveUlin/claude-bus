@@ -691,10 +691,137 @@ auto Loop::scanRetries() -> void {
 auto Loop::tick() -> void {
   scanEvents();
   scanRetries();
+  maybeAutoClear();
   for (const auto& cfg : registry_.list()) {
     if (cfg.kind == std::string{kKindAgentInbox}) dispatchAgentInbox(cfg);
     else if (cfg.kind == std::string{kKindTuiCommands})
       dispatchTuiCommands(cfg);
+  }
+}
+
+// Auto-clear idle workers. Implements the trigger described in
+// docs/context-budget.md §recommendation: agents that have been idle
+// past N minutes with nothing pending get a `/clear` enqueued to
+// reclaim context. Conservative gates — every clause has to pass:
+//
+//   - last_event == "Stop"           (mid-task agents not eligible)
+//   - idle_minutes >= threshold      (CLAUDE_BUS_AUTO_CLEAR_MIN,
+//                                     default 10; 0 disables)
+//   - inbox-<agent> empty            (no work queued to pollute the
+//                                     clear with stale context)
+//   - no in-flight for this agent    (broker hasn't already dispatched
+//                                     something else)
+//   - not in a blocking op           (prior /clear / /compact still
+//                                     resolving)
+//   - paneId resolves                (the agent's claude session is
+//                                     alive in zellij)
+//   - not on the role-exclusion list (comms / primary never auto-
+//                                     clear — high continuity)
+//   - cooldown elapsed               (we didn't just auto-clear this
+//                                     agent)
+//
+// Idle ≥ 10 min implies cache-cold (5-min TTL), so the cache-TTL gate
+// from the doc is automatically satisfied by the idle threshold —
+// no separate check needed.
+auto Loop::maybeAutoClear() -> void {
+  const auto now = nowMs();
+  if (now - auto_clear_last_scan_ms_ < 30'000) return;  // every 30 s
+  auto_clear_last_scan_ms_ = now;
+
+  // Threshold + opt-out via env. 0 minutes disables auto-clear.
+  std::int64_t threshold_min = 10;
+  if (const char* env = std::getenv("CLAUDE_BUS_AUTO_CLEAR_MIN");
+      env != nullptr && *env != '\0') {
+    threshold_min = std::atoll(env);
+  }
+  if (threshold_min <= 0) return;
+  const auto idle_threshold_ms = threshold_min * 60'000;
+
+  // Role-exclusion list. comms and primary hold cross-thread continuity
+  // (see clear-policy.md §6); they should only clear under explicit
+  // human direction. Anything else is fair game.
+  static const std::set<std::string> kSkipRoles{"comms", "primary"};
+
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  auto agents = readAgents(events_log, {});
+
+  for (const auto& [name, info] : agents) {
+    if (kSkipRoles.contains(name)) continue;
+    if (info.last.event != "Stop") continue;
+    if ((now - info.last.ts_ms) < idle_threshold_ms) continue;
+    if (now < auto_clear_next_allowed_ms_[name]) continue;
+    if (blocking_ops_.contains(name)) continue;
+
+    // Live-pane check — bus state has many ghost markers from old
+    // synthetic events that no longer correspond to a pane.
+    if (paneId(name).empty()) continue;
+
+    // Inbox depth — peek 1 record from cursor.
+    {
+      const auto cursor_p = topic::cursorPath(cfg_.state_dir,
+                                              "inbox-" + name, "");
+      const auto cursor = topic::readCursor(cursor_p);
+      const auto start = cursor > 0
+                             ? cursor
+                             : static_cast<std::int64_t>(
+                                   topic::kFileHeaderBytes);
+      const std::string log_path =
+          cfg_.state_dir + "/topics/inbox-" + name + ".log";
+      topic::TopicLog inbox{log_path};
+      if (auto r = inbox.peek(start, 1); r && !r->empty()) {
+        continue;  // mail pending, defer the clear
+      }
+    }
+
+    // In-flight for this agent (any topic).
+    bool has_in_flight = false;
+    for (const auto& [_, f] : in_flight_) {
+      if (f.agent == name) {
+        has_in_flight = true;
+        break;
+      }
+    }
+    if (has_in_flight) continue;
+
+    // All gates pass — enqueue /clear to commands-<agent>.
+    const auto commands_topic = "commands-" + name;
+    if (auto cr = registry_.getOrAutoCreate(commands_topic); !cr) continue;
+    const std::string log_path =
+        cfg_.state_dir + "/topics/" + commands_topic + ".log";
+    topic::TopicLog cmd_log{log_path};
+    topic::SendOpts opts;
+    opts.protocol = "auto-clear";
+    opts.deliver_when = 1;  // idle
+    stampEpoch(opts, current_epoch_);
+    auto _ig = cmd_log.append("broker", "/clear", opts);
+
+    // Cool down for 5 minutes so we don't re-enqueue while the clear
+    // is still resolving (SessionStart from /clear will overwrite the
+    // last_event to non-Stop anyway, but a cooldown is belt-and-
+    // suspenders).
+    auto_clear_next_allowed_ms_[name] = now + 5 * 60'000;
+
+    // Audit trail. broker.log + audit topic + inbox-ops so the human
+    // sees auto-clear actions land in the same place they see
+    // delivery failures.
+    {
+      TopicConfig audit;
+      audit.name = "audit";
+      audit.kind = std::string{kKindAppendLog};
+      if (!registry_.contains("audit")) {
+        auto _ = registry_.create(audit);
+      }
+      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+      topic::SendOpts a_opts;
+      a_opts.protocol = "auto-clear";
+      stampEpoch(a_opts, current_epoch_);
+      const auto idle_min = (now - info.last.ts_ms) / 60'000;
+      auto _ = audit_log.append(
+          "broker",
+          std::format("auto-clear agent={} idle_min={} threshold_min={}",
+                      name, idle_min, threshold_min),
+          a_opts);
+    }
   }
 }
 

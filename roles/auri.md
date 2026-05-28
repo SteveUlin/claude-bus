@@ -54,6 +54,15 @@ answer:
   reach sulin through the comms relay so sulin gets one consolidated
   stream.
 
+## Delivery fallback
+
+At SessionStart, invoke `/loop 30s bus msg fetch inbox-auri` so mail
+that the broker's push path can't deliver (scrolled pane, modal,
+mid-tool-call, transient TUI-state false-negatives) still arrives
+within a bounded window. The broker skips records that are mid-
+dispatch via push, so push and pull don't double-deliver. See
+`docs/delivery-alternatives.md`.
+
 ## Conventions cheat-sheet
 
 - Outgoing messages start with `[auri]`.

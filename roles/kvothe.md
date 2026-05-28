@@ -52,6 +52,15 @@ Don't send me:
 - Drafting messages on sulin's behalf or routing decisions. **That's
   comms.**
 
+## Delivery fallback
+
+At SessionStart, invoke `/loop 30s bus msg fetch inbox-kvothe` so mail
+that the broker's push path can't deliver (scrolled pane, modal,
+mid-tool-call, transient TUI-state false-negatives) still arrives
+within a bounded window. The broker skips records that are
+mid-dispatch via push, so push and pull don't double-deliver. See
+`docs/delivery-alternatives.md`.
+
 ## Out of scope
 
 I don't run the broker, draft to humans, or own the message wire

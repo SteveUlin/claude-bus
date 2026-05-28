@@ -158,4 +158,18 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role elodin elodin"
         }
     }
+
+    // auri is the fleet's hub orchestrator (coordinator kind, like
+    // comms). sulin and comms route requests through auri; auri
+    // dispatches to the coder fleet. Tab sits at the end of the
+    // layout so existing tab indices for bast / kvothe / elodin
+    // stay stable.
+    agent_tab name="auri" {
+        pane size=1 borderless=true name="auri-bar" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar auri; printf '\\033[1;31m[auri-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
+        }
+        pane name="auri" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role auri auri"
+        }
+    }
 }

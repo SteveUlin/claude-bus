@@ -1,95 +1,85 @@
-# comms-UI: structured "who's working on what" surface for sulin
+# comms-UI: one-sentence-per-agent activity card
 
-`bus log` is a time-ordered scroll of fleet events — useful for
-debugging, wrong for the cockpit. sulin's words: *"the #1 thing I need
-is who is working on what, but a more structured view."* What's
-structured here is the **agent**, not the timeline. We need a present-
-state per-agent view that pins what needs human action and dims
-ambient activity.
+sulin's clarification: *"I want it to be a thing I can reference to
+know, ok, agent x is working on testing now, or agent y is running a
+sim."* What's wanted is a **reference card, not a log**, and not a
+stat-block either. One sentence per agent that reads as a sentence:
+`<name> is <doing X>`. Scannable at a glance. No transcript.
 
 ## What's missing today
 
-- `bus log` reads agent-by-time. Useful when debugging dispatch but
-  noisy for the human.
-- `bus monitor` is one-line-per-agent. TITLE was the right idea but a
-  single column can't hold context.
-- Neither surface pins "agent X needs you to answer Y" — that signal
-  has to be inferred from `NEEDS_INPUT` state in the dashboard.
+- `bus log` reads agent-by-time. Useful for debugging dispatch, wrong
+  for the cockpit.
+- `bus monitor` is one-line-per-agent but tabular — eight columns
+  drowning the one signal that matters.
+- Neither surface pins *"agent X needs you to answer Y"*. The signal
+  exists (state = NEEDS_INPUT) but isn't called out.
 
-The gap: a **per-agent stat-block** view that reads like a hand of
-cards, with `NEEDS YOU` at the top and ambient agents dim at the bottom.
+The gap: a verb that answers "who's working on what" in one sentence
+per agent.
 
 ## Proposed surface — `bus deck`
 
-One stat-block per agent. Two zones: ⚠ NEEDS YOU (pinned, prominent),
-then ✓ FLEET (sorted: WORKING → IDLE → STARTING; dim the further
-toward IDLE). Sample frame:
+Per-agent line. Two zones: ⚠ NEEDS YOU (pinned) then ✓ FLEET
+(WORKING → IDLE, recency-sorted). Sample frame:
 
 ```
-⚠ NEEDS YOU ────────────────────────────────────────────
-  elodin    broker auto-clear gate
-    asks   "should the auto-clear gate on epoch shift?"
-    in     broker.cpp · asked 2m ago
+🚌 claude-bus · 4 agents · 1 needs you
 
-✓ FLEET ───────────────────────────────────────────────
-  kvothe   design comms UI                       ◇ working
-    last   "shipped bus log a41bc756" (30m)
-    in     claude-bus · commit fe2d749d
-  auri     hub coordination                      ◇ working
-    last   "dispatched #44 to kvothe" (60s)
-    in     claude-bus
-  bast     fleet.kdl layout iteration            💤 idle
-    last   "comms-bar working on layout" (5m)
-    in     claude-bus
+⚠  elodin    asking: "should the auto-clear gate on epoch shift?"
+
+✓  kvothe    working on  design comms UI                        (1m)
+   auri      working on  hub coordination                       (60s)
+   bast      idle                                               (5m)
 ```
 
-Fits ~12 agents in a 25-row pane. Re-renders on 1 Hz tick. The
-`NEEDS YOU` zone disappears entirely when no agent is in
-`NEEDS_INPUT` — no empty header.
+One sentence per agent. The action verb is built from state + title:
 
-## Signal mapping
+| State          | Sentence                                              |
+| -------------- | ----------------------------------------------------- |
+| WORKING        | `<name> working on <title>`                           |
+| NEEDS_INPUT    | `<name> asking: "<permission_prompt first line>"`     |
+| IDLE           | `<name> idle`                                         |
+| HAS_MAIL       | `<name> has N unread`                                 |
+| STARTING       | `<name> starting`                                     |
+| STUCK          | `<name> stuck (last: <last_event>)`                   |
+| GONE / ENDED   | hidden                                                |
 
-Per agent, four fields:
-
-| Field   | Source                                                     |
-| ------- | ---------------------------------------------------------- |
-| title   | `$STATE/title/<agent>` → focus file → "—"                  |
-| last    | most recent `Stop` `last_assistant_message` first-line in tail |
-| asks    | most recent `Notification(permission_prompt)` payload      |
-| in      | `payload.cwd` basename + most recent file edit (optional)  |
-
-All four come from sources `bus monitor` already reads (events.jsonl
-tail + focus/title files). No broker change. No new state.
+Title source priority: `$STATE/title/<agent>` → focus file → recent
+`activeForm` from events tail. Same chain monitor's TITLE column
+already uses.
 
 ## Sorting + filtering
 
-- Top zone: agents with state `NEEDS_INPUT` (sorted by oldest pending).
-- Bottom zone: WORKING (recent activity first) → IDLE → STARTING.
-- Hide `GONE` / `ENDED` unconditionally; this is a cockpit, not a
-  historian. (Use `bus state --all` to inspect tombstones.)
-- `bus log` stays — it's the debugger view. We don't delete it.
+- NEEDS_INPUT pinned at top, sorted oldest-first (the longest pending
+  ask is loudest).
+- WORKING next, recency-sorted by `age_ms` from `bus state`.
+- IDLE / STARTING below, dim.
+- GONE / ENDED hidden unconditionally. (Use `bus state --all` for
+  tombstones.)
+- The NEEDS YOU zone disappears entirely when no agent is in
+  NEEDS_INPUT — no empty header.
 
 ## Where it lives
 
-Replace the `bus-log` pane in `layouts/fleet.kdl` (the right column
-above `jj-log`) with `bus deck`. `bus log` stays available as a verb
-but isn't pinned to the cockpit. monitor keeps its row — it answers
-"is the broker alive, what's the rough fleet shape" cheaply; `bus
-deck` answers "what should I do next."
+Replace `bus-log` in `layouts/fleet.kdl` (right column above
+`jj-log`) with `bus deck`. `bus log` keeps its verb but isn't pinned
+to the cockpit. `bus monitor` keeps its row for the rough fleet shape
+(broker alive? attach state? mail counts?) — `bus deck` answers
+"what's going on" in english.
 
 ## Out of scope (v1)
 
-- Interactive: no key bindings, no drill-down. Read-only render.
-- Threading: each agent's "last" is one message, not a thread. If a
-  thread view becomes load-bearing later, that's a separate verb.
-- Cross-agent context (e.g., "auri dispatched to kvothe; kvothe
-  hasn't replied"). Hub-coordination concerns belong to auri's
-  surface, not the cockpit deck.
+- Drill-down / interactive. Read-only render, 1 Hz.
+- Transcript or thread view. One sentence per agent — debugging
+  belongs in `bus log`.
+- Cross-agent flow ("auri dispatched to kvothe"). Hub-coordination is
+  auri's surface, not the cockpit.
 
 ## Open for sulin / comms
 
-- `bus deck` or another name? (alternatives: `bus brief`, `bus desk`)
-- Should the `in` line include the most recent file edited, or just
-  the project basename?
-- Refresh cadence: 1 Hz like monitor, or event-driven via inotify on
-  events.jsonl + focus/title?
+- `bus deck` or another name? (`bus brief`, `bus desk`, `bus board`)
+- Should `WORKING` show the age (`(60s)`) inline, or only on STUCK /
+  IDLE where it actually signals?
+- Refresh cadence: 1 Hz tick (matches monitor) or event-driven via
+  inotify on events.jsonl + focus/title?

@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace bus::delivery {
@@ -66,6 +67,14 @@ class Loop {
   auto inFlight() const -> const std::map<std::string, InFlight>& {
     return in_flight_;
   }
+
+  // Forget any in-flight entry for `msg_id`. Removes the on-disk
+  // tracker file AND the in-memory map entry. Used by the `drop` RPC
+  // to manually discard a stuck dispatch without firing escalation.
+  // No-op when the id isn't in-flight. Returns the entry's
+  // {topic, agent, cursor_after} if it was present (for the caller's
+  // audit trail), or std::nullopt otherwise.
+  auto forgetInflight(const std::string& msg_id) -> std::optional<InFlight>;
 
  private:
   const BrokerConfig& cfg_;

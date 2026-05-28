@@ -19,6 +19,7 @@ auto subMsg(std::span<const char* const> args) -> int {
     std::println(stderr, "  enqueue    publish a record to a topic");
     std::println(stderr, "  peek       read records from a topic without consuming");
     std::println(stderr, "  body       fetch a record body by msg_id");
+    std::println(stderr, "  drop       advance cursor past msg_id without delivering (audited)");
     return 1;
   }
 
@@ -33,6 +34,7 @@ auto subMsg(std::span<const char* const> args) -> int {
   if (cmd == "enqueue") return subEnqueue(sub_args);
   if (cmd == "peek") return subPeek(sub_args);
   if (cmd == "body") return subBody(sub_args);
+  if (cmd == "drop") return subDrop(sub_args);
 
   std::println(stderr, "bus msg: unknown command \"{}\"", cmd);
   return 1;

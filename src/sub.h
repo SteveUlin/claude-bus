@@ -44,6 +44,7 @@ auto subBroadcast(std::span<const char* const>) -> int;
 auto subFetch(std::span<const char* const>) -> int;
 auto subPeek(std::span<const char* const>) -> int;
 auto subBody(std::span<const char* const>) -> int;
+auto subDrop(std::span<const char* const>) -> int;
 
 // Broker introspection (defined in src/sub/sub_state.cpp).
 auto subState(std::span<const char* const>) -> int;

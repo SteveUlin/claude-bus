@@ -210,6 +210,23 @@ auto Loop::removeInflight(const std::string& msg_id) -> void {
   fs::remove(inflightPath(cfg_, msg_id), ec);
 }
 
+auto Loop::forgetInflight(const std::string& msg_id)
+    -> std::optional<InFlight> {
+  auto it = in_flight_.find(msg_id);
+  if (it == in_flight_.end()) return std::nullopt;
+  const auto snap = it->second;
+  // Also clear blocking-op tracking when the dropped record is a
+  // /clear or /compact dispatch; otherwise the agent stays trapped
+  // behind the gate forever.
+  if (blocking_ops_.contains(snap.agent) &&
+      blocking_ops_.at(snap.agent) == msg_id) {
+    clearBlockingOp(snap.agent);
+  }
+  removeInflight(msg_id);
+  in_flight_.erase(it);
+  return snap;
+}
+
 auto Loop::scanEvents() -> void {
   const std::string log = "/tmp/claude-bus/events.jsonl";
   const auto size = fileSize(log);

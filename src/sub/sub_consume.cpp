@@ -164,4 +164,38 @@ auto subBody(std::span<const char* const> args) -> int {
   return 0;
 }
 
+auto subDrop(std::span<const char* const> args) -> int {
+  if (args.empty()) {
+    std::println(stderr, "usage: bus msg drop MSG_ID");
+    return 2;
+  }
+  const std::string msg_id{args[0]};
+
+  // Stamp the audit row with the caller's agent id when known, so
+  // dropping via the bus from inside an agent leaves a useful trail.
+  const char* caller_env = std::getenv("CLAUDE_BUS_AGENT_ID");
+  const std::string caller =
+      (caller_env != nullptr && caller_env[0] != '\0') ? caller_env : "cli";
+
+  const auto cfg = resolveConfig();
+  std::map<std::string, json::Value> req;
+  req.insert({"op", json::Value::from("drop")});
+  req.insert({"msg_id", json::Value::from(msg_id)});
+  req.insert({"caller", json::Value::from(caller)});
+  auto resp = rpc::call(cfg.socket_path,
+                        json::Value::fromObject(std::move(req)));
+  if (!resp) {
+    std::println(stderr, "bus msg drop: {}", resp.error().message);
+    return 1;
+  }
+  if (!resp->getOrBool("ok")) {
+    std::println(stderr, "bus msg drop: {}", resp->getOrString("error"));
+    return 1;
+  }
+  std::println("dropped {} from {} (cursor → {})", msg_id,
+               resp->getOrString("topic"),
+               resp->getOrInt("cursor_after"));
+  return 0;
+}
+
 }  // namespace bus

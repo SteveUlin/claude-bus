@@ -547,17 +547,100 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     return json::errorResponse(std::string{"no such msg_id: "} + msg_id);
   });
 
+  // Delivery loop runs on each pselect tick (every 250ms), serially
+  // with RPC handlers. Same thread → no locking around registry /
+  // topic logs / in-flight tracker. Construct before binding the
+  // socket so handlers below can capture `dl`.
+  delivery::Loop dl{cfg, registry};
+  dl.load();
+
+  // Drop a record by msg_id without delivering — advance the topic
+  // cursor past it, forget any in-flight entry, and append an audit
+  // record. Used when a queued task is obsolete (e.g., the broker
+  // wedged before ack, or the producer changed its mind). Different
+  // from `fetch` (which is destructive on most kinds but still treated
+  // as a "real" consume); drop is the explicit "throw this away"
+  // verb. Returns ok with {topic, cursor_after, was_inflight}.
+  server.on("drop", [&, &dl_ref = dl](const json::Value& req) {
+    const auto msg_id = req.getOrString("msg_id");
+    if (msg_id.empty()) return json::errorResponse("missing msg_id");
+
+    // Locate the record across all known topics. The msg_id alone
+    // doesn't tell us which topic owns it, and a single message can
+    // sit on multiple topics (pubsub cascade), so prefer the topic
+    // recorded in the in-flight entry when one exists.
+    std::string found_topic;
+    std::int64_t next_offset = -1;
+    if (const auto inflight_snap = dl_ref.forgetInflight(msg_id);
+        inflight_snap.has_value()) {
+      found_topic = inflight_snap->topic;
+      next_offset = inflight_snap->cursor_after;
+    } else {
+      for (const auto& tcfg : registry.list()) {
+        auto& log = getOrOpenLog(tcfg.name);
+        auto all = log.dump();
+        if (!all) continue;
+        for (const auto& m : *all) {
+          if (m.id != msg_id) continue;
+          found_topic = tcfg.name;
+          next_offset = m.next_offset;
+          break;
+        }
+        if (!found_topic.empty()) break;
+      }
+    }
+
+    if (found_topic.empty() || next_offset < 0) {
+      return json::errorResponse(std::string{"no such msg_id: "} +
+                                 msg_id);
+    }
+
+    // Advance the topic's default cursor past the dropped record so
+    // it never gets dispatched again. Only move forward — never
+    // backward — so a drop on an already-consumed id is a no-op.
+    const auto cursor_p =
+        topic::cursorPath(cfg.state_dir, found_topic, "");
+    const auto cur = topic::readCursor(cursor_p);
+    if (next_offset > cur) {
+      if (!topic::writeCursor(cursor_p, next_offset)) {
+        return json::errorResponse("cursor write failed");
+      }
+    }
+
+    // Audit the drop. Auto-create the audit topic on first use so a
+    // fresh-bus drop still records a trail.
+    {
+      TopicConfig audit;
+      audit.name = "audit";
+      audit.kind = std::string{kKindAppendLog};
+      if (!registry.contains("audit")) {
+        auto _ig = registry.create(audit);
+      }
+      auto& audit_log = getOrOpenLog("audit");
+      topic::SendOpts opts;
+      opts.protocol = "drop";
+      const auto entry = std::format(
+          "drop msg_id={} topic={} next_offset={} caller={}",
+          msg_id, found_topic, next_offset,
+          req.getOrString("caller", "unknown"));
+      auto _ig2 = audit_log.append("broker", entry, opts);
+    }
+
+    logEvent(cfg.state_dir, "DROP",
+             std::format("msg_id={} topic={} cursor_after={}",
+                         msg_id, found_topic, next_offset));
+
+    std::map<std::string, json::Value> resp;
+    resp.insert({"topic", json::Value::from(found_topic)});
+    resp.insert({"cursor_after", json::Value::from(next_offset)});
+    return json::okResponse(std::move(resp));
+  });
+
   if (!server.bind()) {
     ::unlink(cfg.pid_path.c_str());
     ::close(pidfd);
     return 1;
   }
-
-  // Delivery loop runs on each pselect tick (every 250ms), serially
-  // with RPC handlers. Same thread → no locking around registry /
-  // topic logs / in-flight tracker.
-  delivery::Loop dl{cfg, registry};
-  dl.load();
 
   // Expose in-flight via the `inflight` RPC for debugging.
   server.on("inflight", [&dl](const json::Value&) {

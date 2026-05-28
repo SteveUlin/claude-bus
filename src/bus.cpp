@@ -19,6 +19,7 @@ const Subcommand kSubcommands[] = {
     {"help", subHelp, "list subcommands"},
     {"inflight", subInflight, "broker's in-flight deliveries (debug)"},
     {"introduce", subIntroduce, "composite card: registry + live state for an agent"},
+    {"log", subLog, "colored lifecycle log (events.jsonl → started / working / finished / …)"},
     {"monitor", subMonitor, "dashboard of all bus agents"},
     {"msg", subMsg, "message operations: send, fetch, mail, slash, broadcast, etc."},
     {"pane-id", subPaneId, "resolve pane name → terminal_N"},

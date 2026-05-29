@@ -388,11 +388,16 @@ auto readAgents(const std::string& log_path,
     // "permission_prompt". Drives the post-resume IDLE-vs-BootStuck
     // distinction in computeState.
     auto notif = extractField(line, "notification_type");
+    // transcript_path lives in payload; extractField does a flat
+    // substring search so nesting is fine. Drives the token-scan
+    // watcher (delivery.cpp) — the latest event names the live session.
+    auto transcript = extractField(line, "transcript_path");
     auto& info = out[agent];
     info.last.event = std::move(event);
     info.last.tool = std::move(tool);
     info.last.source = std::move(source);
     info.last.notification_type = std::move(notif);
+    info.last.transcript_path = std::move(transcript);
     info.last.ts_ms = parseIso8601Ms(ts);
   }
   return out;

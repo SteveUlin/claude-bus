@@ -128,6 +128,21 @@ class Loop {
   // the scan doesn't fire on every 250 ms broker tick.
   std::int64_t auto_clear_last_scan_ms_{0};
 
+  // Per-agent transcript tail state for the token-scan watcher. The
+  // watcher reads each live agent's transcript JSONL, computes context
+  // occupancy from the last assistant turn's usage, and writes
+  // $STATE/status/<agent>.json (the CTX% source deck + monitor read).
+  // Offset-based incremental read like scanEvents — only new bytes are
+  // parsed. A path change (new session after /clear or /compact) resets
+  // the offset to re-read the fresh transcript. See docs/status-decouple.md.
+  struct TokenScanState {
+    std::string path;
+    std::int64_t offset{0};
+    std::int64_t last_tokens{-1};
+  };
+  std::map<std::string, TokenScanState> token_scan_;
+  std::int64_t token_scan_last_ms_{0};
+
   auto scanEvents() -> void;
   auto scanRetries() -> void;
   auto dispatchAgentInbox(const TopicConfig& cfg) -> void;
@@ -135,6 +150,7 @@ class Loop {
   auto escalate(const InFlight& f, std::string_view reason,
                 std::string_view body) -> void;
   auto maybeAutoClear() -> void;
+  auto maybeScanTokens() -> void;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;

@@ -30,6 +30,10 @@ struct AgentEvent {
   std::string notification_type;  // payload.notification_type when
                                   // Notification ("idle_prompt" means
                                   // claude is at the prompt waiting)
+  std::string transcript_path;    // payload.transcript_path — points at
+                                  // the live session's JSONL. Updates
+                                  // on every event, so the latest event
+                                  // always names the current session.
   std::int64_t ts_ms{};
 };
 

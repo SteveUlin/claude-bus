@@ -770,6 +770,7 @@ auto Loop::tick() -> void {
   scanEvents();
   scanRetries();
   maybeAutoClear();
+  maybeScanTokens();
   for (const auto& cfg : registry_.list()) {
     if (cfg.kind == std::string{kKindAgentInbox}) dispatchAgentInbox(cfg);
     else if (cfg.kind == std::string{kKindTuiCommands})
@@ -900,6 +901,116 @@ auto Loop::maybeAutoClear() -> void {
                       name, idle_min, threshold_min),
           a_opts);
     }
+  }
+}
+
+// Token-scan watcher. Replaces the statusline script's data-write side
+// effect (see docs/status-decouple.md). For each live agent, tail its
+// transcript JSONL, compute context occupancy from the last assistant
+// turn's usage, and write $STATE/status/<agent>.json — the CTX% source
+// `bus deck` + `bus monitor` read. Only two fields are consumed
+// downstream (used_percentage + context_window_size), so that's all we
+// write.
+//
+// Numerator (context tokens) comes straight from the transcript and
+// matches the statusline's context_window.total_input_tokens exactly.
+// The denominator (window size) is NOT in the transcript anywhere, so
+// it comes from CLAUDE_BUS_CTX_WINDOW (default 200k; the fleet layout
+// sets 1M) with a tier-escalation safety net.
+auto Loop::maybeScanTokens() -> void {
+  const auto now = nowMs();
+  if (now - token_scan_last_ms_ < 5'000) return;  // every 5 s
+  token_scan_last_ms_ = now;
+
+  std::int64_t configured_window = 200'000;
+  if (const char* env = std::getenv("CLAUDE_BUS_CTX_WINDOW");
+      env != nullptr && *env != '\0') {
+    if (const auto v = std::atoll(env); v > 0) configured_window = v;
+  }
+
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  auto agents = readAgents(events_log, {});
+
+  for (const auto& [name, info] : agents) {
+    const auto& path = info.last.transcript_path;
+    if (path.empty()) continue;
+    // Live-pane gate — skip ghost markers from dead sessions.
+    if (paneId(name).empty()) continue;
+
+    auto& sc = token_scan_[name];
+    // New session (post /clear or /compact gets a fresh session UUID,
+    // hence a new transcript path) → re-read from the top.
+    if (sc.path != path) {
+      sc.path = path;
+      sc.offset = 0;
+      sc.last_tokens = -1;
+    }
+
+    // Incremental tail read: parse only assistant lines appended since
+    // the last scan, keeping the most recent turn's occupancy. Mirrors
+    // scanEvents' offset + partial-line handling.
+    const auto size = fileSize(path);
+    if (size > sc.offset) {
+      std::ifstream in{path};
+      if (in) {
+        in.seekg(sc.offset);
+        std::string line;
+        auto valid = in.tellg();
+        while (std::getline(in, line)) {
+          if (in.eof()) break;  // partial trailing line — wait for rest
+          valid = in.tellg();
+          // Cheap substring pre-filter before the JSON parse.
+          if (line.find("\"type\":\"assistant\"") == std::string::npos)
+            continue;
+          if (line.find("\"usage\"") == std::string::npos) continue;
+          auto v = json::parse(line);
+          if (!v || !v->isObject()) continue;
+          const auto* msg = v->get("message");
+          if (msg == nullptr || !msg->isObject()) continue;
+          const auto* usage = msg->get("usage");
+          if (usage == nullptr || !usage->isObject()) continue;
+          // Context occupancy = non-output tokens.
+          sc.last_tokens =
+              usage->getOrInt("input_tokens", 0) +
+              usage->getOrInt("cache_creation_input_tokens", 0) +
+              usage->getOrInt("cache_read_input_tokens", 0);
+        }
+        sc.offset = static_cast<std::int64_t>(valid);
+      }
+    }
+
+    if (sc.last_tokens < 0) continue;  // no assistant turn yet
+
+    // Escalation: if observed tokens exceed the configured window, the
+    // agent must be on a larger tier — bump the denominator so we don't
+    // report >100%. No-op when the knob already matches the fleet.
+    const std::int64_t tier =
+        sc.last_tokens > 200'000 ? 1'000'000 : 200'000;
+    const auto window =
+        configured_window > tier ? configured_window : tier;
+    auto pct = (sc.last_tokens * 100 + window / 2) / window;  // rounded
+    if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+
+    // Atomic write of the two fields deck + monitor read. The
+    // context_window block matches the old statusline projection's
+    // shape so the existing scanIntAfter readers keep working.
+    const std::string dir = cfg_.state_dir + "/status";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const std::string final_path = dir + "/" + name + ".json";
+    const std::string tmp_path =
+        final_path + ".tmp." + std::to_string(::getpid());
+    {
+      std::ofstream out{tmp_path, std::ios::trunc};
+      if (!out) continue;
+      out << std::format(
+          "{{\"agent\":\"{}\",\"ts\":{},\"context_window\":"
+          "{{\"used_percentage\":{},\"context_window_size\":{}}}}}\n",
+          name, now, pct, window);
+    }
+    fs::rename(tmp_path, final_path, ec);
+    if (ec) fs::remove(tmp_path, ec);
   }
 }
 

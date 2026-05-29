@@ -113,6 +113,24 @@ if [ -e "$canonical_settings" ]; then
     ln -sfn "$canonical_settings" "$workspace_dir/.claude/settings.json"
 fi
 
+# Same pattern for the hook SCRIPTS. The canonical scripts are tracked at
+# settings/hooks-shared/; each workspace's settings/hooks is a gitignored
+# symlink to it, so the $CLAUDE_PROJECT_DIR/settings/hooks/... references
+# in claude-settings.json resolve to the shared canonical and a NEW hook
+# is live in every workspace at once (no per-workspace copy to go stale).
+# A stale checkout may still have a real tracked settings/hooks dir — a
+# directory won't ln-replace cleanly, so drop it first (its files moved to
+# hooks-shared on main, so the deletion is consistent once the workspace
+# reconciles). An existing correct symlink is just refreshed. Guarded on
+# the canonical existing so a pre-migration checkout keeps its own dir.
+canonical_hooks="$BUS_ROOT/settings/hooks-shared"
+ws_hooks="$workspace_dir/settings/hooks"
+if [ -d "$canonical_hooks" ]; then
+    [ -L "$ws_hooks" ] || rm -rf "$ws_hooks"
+    mkdir -p "$workspace_dir/settings"
+    ln -sfn "$canonical_hooks" "$ws_hooks"
+fi
+
 # claude-code encodes the project's absolute path into the session
 # storage dir by replacing '/', '.', and '_' all with '-'. The encoded
 # path itself begins with '-' (from the leading '/' of cwd); the literal

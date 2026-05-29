@@ -49,3 +49,9 @@ core.*
 
 # stray logs
 *.log
+
+# Per-workspace symlink to the canonical hooks dir (settings/hooks-shared),
+# created by bin/agent-launch. Gitignored so jj never sees the symlink and
+# every workspace resolves $CLAUDE_PROJECT_DIR/settings/hooks/ to the shared
+# canonical. Edit the scripts in settings/hooks-shared/, never settings/hooks.
+/settings/hooks

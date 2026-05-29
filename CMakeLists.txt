@@ -14,6 +14,16 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 
+# Pure, dependency-light broker logic — no zellij, no sockets, no clock
+# beyond what the caller passes. Linked into both the `bus` binary and
+# the `bus_tests` unit suite so the tested code IS the shipped code.
+# (tail_reader is header-only; computeAxes lives in bus_agent_status.)
+add_library(bus_core STATIC
+    src/json_min.cpp
+    src/topic_log.cpp
+)
+target_include_directories(bus_core PUBLIC src)
+
 # Agent state derivation + pane helpers. Shared with the bus binary;
 # kept as a static library only for compile-time isolation, no longer
 # needed by separate executables (watcher / mailbox are retired).
@@ -31,9 +41,7 @@ add_executable(bus
     src/broker.cpp
     src/delivery.cpp
     src/dispatch.cpp
-    src/json_min.cpp
     src/rpc.cpp
-    src/topic_log.cpp
     src/topic_registry.cpp
     src/sub/sub_agent_bar.cpp
     src/sub/sub_agents.cpp
@@ -54,4 +62,22 @@ add_executable(bus
     src/sub/sub_topic.cpp
 )
 target_include_directories(bus PRIVATE src)
-target_link_libraries(bus PRIVATE bus_agent_status)
+target_link_libraries(bus PRIVATE bus_core bus_agent_status)
+
+# Unit tests for the pure logic (json::parse, topic::parseFrom,
+# computeAxes, the TailReader split/offset dance). Minimal in-tree
+# harness, no third-party dependency. Binary lands in build/, not bin/.
+# Run with `ctest --test-dir build` or `./build/bus_tests`.
+enable_testing()
+add_executable(bus_tests
+    tests/unit/harness.cpp
+    tests/unit/test_json.cpp
+    tests/unit/test_topic_log.cpp
+    tests/unit/test_agent_status.cpp
+    tests/unit/test_tail_reader.cpp
+)
+target_include_directories(bus_tests PRIVATE src tests/unit)
+target_link_libraries(bus_tests PRIVATE bus_core bus_agent_status)
+set_target_properties(bus_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME unit COMMAND bus_tests)

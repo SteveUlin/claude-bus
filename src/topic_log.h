@@ -34,9 +34,11 @@
 #include "types.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -103,6 +105,15 @@ class TopicLog {
  private:
   std::string path_;
 };
+
+// Parse records out of a raw topic-log buffer, starting at the given
+// byte offset (clamped to the file header), capped at `limit`. Stops
+// cleanly at the last whole record — a truncated tail record is left
+// unparsed (the same refuse-torn-tail invariant the append-log reader
+// relies on). Exposed for direct table-testing with hand-built buffers;
+// TopicLog::peek is the file-backed entry point.
+auto parseFrom(std::span<const std::byte> buf, std::int64_t start_offset,
+               std::size_t limit = SIZE_MAX) -> std::vector<Message>;
 
 // Cursor helpers — read / write u64 byte offsets to a small file
 // atomically. The cursor file is created on first write.

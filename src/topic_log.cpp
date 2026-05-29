@@ -177,6 +177,12 @@ auto readAll(const std::string& path)
   return buf;
 }
 
+}  // namespace
+
+// Exposed (declared in topic_log.h) so the binary wire parser can be
+// table-tested directly with hand-built buffers — including truncated
+// tails — without going through readAll + a real file. Calls the
+// anonymous-namespace getU* helpers above (same translation unit).
 auto parseFrom(std::span<const std::byte> buf, std::int64_t start_offset,
                std::size_t limit) -> std::vector<Message> {
   std::vector<Message> out;
@@ -241,8 +247,6 @@ auto parseFrom(std::span<const std::byte> buf, std::int64_t start_offset,
   }
   return out;
 }
-
-}  // namespace
 
 TopicLog::TopicLog(std::string path) : path_{std::move(path)} {}
 

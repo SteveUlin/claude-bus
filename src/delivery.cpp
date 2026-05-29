@@ -347,6 +347,21 @@ auto Loop::scanEvents() -> void {
       continue;
     }
 
+    // /clear wipes context, so the agent's title (the "what is this
+    // context window about?" tag set by `bus msg mail --title`) is
+    // now stale. Remove the file so monitor's TITLE column reverts
+    // to "—" until the next mail with --title sets a new one.
+    // /compact preserves a summary of context, so its title stays.
+    if (event == "SessionStart") {
+      const auto* payload = v->get("payload");
+      if (payload != nullptr && payload->isObject() &&
+          payload->getOrString("source") == "clear") {
+        std::error_code ec;
+        fs::remove(cfg_.state_dir + "/title/" + agent, ec);
+      }
+      continue;
+    }
+
     if (event != "UserPromptSubmit") continue;
 
     // Find any in-flight record for this agent dispatched before the

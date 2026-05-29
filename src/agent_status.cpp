@@ -263,17 +263,21 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
   } else if (ev == "SessionEnd") {
     ax.process = ProcessAxis::Ended;
   } else if (ev == "SessionStart") {
-    if (a.last.source == "compact" && age_s < 60) {
+    // The "no Notification follow-up = stuck" heuristic only holds for
+    // source=="startup". Other sources land at an already-active prompt
+    // (resume, clear) or run an unbounded internal task (compact); none
+    // of them are boot, so none can be boot-stuck.
+    if (a.last.source == "compact") {
+      // /compact summarises context — can take minutes on big windows.
+      // Stays Compacting until a follow-up event arrives.
       ax.process = ProcessAxis::Compacting;
-    } else if (a.last.source == "resume") {
-      // Resumed sessions inherit the prompt from the prior session and
-      // do not fire Notification(idle_prompt) — they go straight to
-      // UserPromptSubmit on the next user input. Absence of a follow-up
-      // event is normal, not a stuck signal. Treat resume as alive
-      // immediately; the turn axis reports Ready.
+    } else if (a.last.source == "resume" || a.last.source == "clear") {
+      // Resume inherits the prior prompt; /clear lands at a fresh
+      // prompt. Neither fires Notification(idle_prompt) reliably, so
+      // absence of a follow-up event is normal, not a stuck signal.
       ax.process = ProcessAxis::Alive;
     } else if (age_s > 30) {
-      ax.process = ProcessAxis::Stuck;  // no Notification follow-up
+      ax.process = ProcessAxis::Stuck;  // source=startup, boot hung
     } else {
       ax.process = ProcessAxis::Starting;
     }
@@ -295,10 +299,10 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
   } else if (ev == "Stop") {
     ax.turn = TurnAxis::Ready;
   } else if (ev == "SessionStart") {
-    // Only reaches here on source=="resume" (other SessionStart paths
-    // short-circuit via Process::Starting / Compacting / Stuck, which
-    // set turn=None above). Resumed sessions are at the prompt
-    // waiting for input.
+    // Reaches here on source=="resume" or source=="clear" (other
+    // SessionStart paths short-circuit via Process::Starting /
+    // Compacting / Stuck, which set turn=None above). Both land at a
+    // prompt waiting for input.
     ax.turn = TurnAxis::Ready;
   } else {
     // PreToolUse / PostToolUse / UserPromptSubmit — mid-turn work.

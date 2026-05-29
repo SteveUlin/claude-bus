@@ -657,6 +657,81 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     return json::okResponse(std::move(resp));
   });
 
+  // drain handler — the OFF-TTY delivery pull (roadmap 2.1 / transport
+  // §5.1). The agent's UserPromptSubmit/SessionStart hook calls this to
+  // consume its OWN pending inbox records and inject them as
+  // additionalContext, instead of the broker typing them into the pane.
+  // Consume semantics:
+  //   - presence-gated: defer (return nothing, cursor untouched) while
+  //     the [bus-attach] sentinel is fresh — the human has the keyboard.
+  //     This is the same gate dispatchAgentInbox enforces; it MUST move
+  //     with delivery (transport §6b.4).
+  //   - current-epoch only: a stale-epoch record (survived a broker
+  //     restart) is dropped — cursor advanced past, never delivered —
+  //     preserving the boot-epoch fence. NB: the TTY push path also
+  //     ESCALATES stale-epoch records to audit + inbox-ops; drain only
+  //     drops (no escalate) for now — see the prototype report.
+  //   - TTL: expired records are skipped + advanced past.
+  //   - pull-consume: the cursor advances past every record returned, so
+  //     the act of draining IS the ack. No in-flight entry, no retry —
+  //     which is the point: it removes the lost-ack retry-into-a-live-TTY
+  //     hazard that the push path carries.
+  // Returns {deferred: bool, messages: [...]}. Capped per call; the rest
+  // drain on the agent's next turn.
+  server.on("drain", [&, messageToJson](const json::Value& req) {
+    const auto agent = req.getOrString("agent");
+    if (agent.empty()) return json::errorResponse("missing agent");
+    const auto topic_name = std::string{"inbox-"} + agent;
+
+    std::map<std::string, json::Value> resp;
+    if (!registry.contains(topic_name)) {
+      resp.insert({"deferred", json::Value::from(false)});
+      resp.insert({"messages", json::Value::fromArray({})});
+      return json::okResponse(std::move(resp));
+    }
+    // Presence gate — defer the whole drain, cursor untouched.
+    if (hasPresenceFile(agent)) {
+      resp.insert({"deferred", json::Value::from(true)});
+      resp.insert({"messages", json::Value::fromArray({})});
+      return json::okResponse(std::move(resp));
+    }
+
+    const auto cursor_p = topic::cursorPath(cfg.state_dir, topic_name, "");
+    const auto cursor = topic::readCursor(cursor_p);
+    const auto start =
+        cursor > 0 ? cursor
+                   : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+    auto& log = getOrOpenLog(topic_name);
+    constexpr std::size_t kDrainCap = 16;
+    auto r = log.peek(start, kDrainCap);
+    if (!r) return json::errorResponse(r.error().message);
+
+    const auto now = nowMs();
+    std::vector<json::Value> out;
+    std::int64_t advance_to = -1;
+    for (const auto& m : *r) {
+      if (m.ttl_ms != 0 &&
+          m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now) {
+        advance_to = m.next_offset;  // expired — skip + advance past
+        continue;
+      }
+      if (delivery::recordEpoch(m) != current_epoch) {
+        advance_to = m.next_offset;  // stale epoch — drop + advance past
+        continue;
+      }
+      out.push_back(messageToJson(m));
+      advance_to = m.next_offset;
+    }
+    if (advance_to >= 0) {
+      if (!topic::writeCursor(cursor_p, advance_to)) {
+        return json::errorResponse("cursor write failed");
+      }
+    }
+    resp.insert({"deferred", json::Value::from(false)});
+    resp.insert({"messages", json::Value::fromArray(std::move(out))});
+    return json::okResponse(std::move(resp));
+  });
+
   // Drop a record by msg_id without delivering — advance the topic
   // cursor past it, forget any in-flight entry, and append an audit
   // record. Used when a queued task is obsolete (e.g., the broker

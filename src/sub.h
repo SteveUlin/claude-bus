@@ -51,6 +51,7 @@ auto subMsg(std::span<const char* const>) -> int;
 auto subSlash(std::span<const char* const>) -> int;
 auto subBroadcast(std::span<const char* const>) -> int;
 auto subFetch(std::span<const char* const>) -> int;
+auto subDrain(std::span<const char* const>) -> int;
 auto subPeek(std::span<const char* const>) -> int;
 auto subBody(std::span<const char* const>) -> int;
 auto subDrop(std::span<const char* const>) -> int;

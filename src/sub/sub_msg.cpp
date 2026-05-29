@@ -13,6 +13,7 @@ auto subMsg(std::span<const char* const> args) -> int {
     std::println(stderr, "commands:");
     std::println(stderr, "  send       name->pane TTY write");
     std::println(stderr, "  fetch      pop the next record from a topic");
+    std::println(stderr, "  drain      off-TTY: pull inbox-AGENT as additionalContext JSON");
     std::println(stderr, "  mail       enqueue text to inbox-AGENT");
     std::println(stderr, "  slash      enqueue a slash command to commands-AGENT");
     std::println(stderr, "  broadcast  fan out one body into many inboxes");
@@ -28,6 +29,7 @@ auto subMsg(std::span<const char* const> args) -> int {
 
   if (cmd == "send") return subSend(sub_args);
   if (cmd == "fetch") return subFetch(sub_args);
+  if (cmd == "drain") return subDrain(sub_args);
   if (cmd == "mail") return subMail(sub_args);
   if (cmd == "slash") return subSlash(sub_args);
   if (cmd == "broadcast") return subBroadcast(sub_args);

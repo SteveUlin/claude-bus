@@ -406,6 +406,21 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   if (agent_v == nullptr || !agent_v->isString()) return;
   const std::string agent = agent_v->asString();
 
+  // Off-TTY gate (roadmap 2.1 / transport §5.1). When
+  // $STATE/off-tty/<agent> exists, this agent's mail is delivered by its
+  // own UserPromptSubmit/SessionStart hook draining via the `drain` RPC
+  // and emitting additionalContext — NOT by the broker typing into the
+  // pane. Skip the TTY push entirely so the two paths never both deliver
+  // the same record. The flag is absent by default, so an unflagged
+  // fleet behaves exactly as before — this is the single switch that
+  // flips an agent off-TTY, and nothing changes until it's set.
+  // (Scoped to agent-inbox mail; tui-commands / slashes still go TTY.)
+  {
+    struct stat st;
+    const auto flag = cfg_.state_dir + "/off-tty/" + agent;
+    if (::stat(flag.c_str(), &st) == 0) return;
+  }
+
   // Universal gates: attached, blocking-op in flight.
   if (hasPresenceFile(agent)) return;
   if (blocking_ops_.contains(agent)) return;

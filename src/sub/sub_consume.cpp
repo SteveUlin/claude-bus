@@ -85,6 +85,63 @@ auto subFetch(std::span<const char* const> args) -> int {
   return 0;
 }
 
+// `bus msg drain AGENT [EVENT]` — the OFF-TTY delivery hook engine
+// (roadmap 2.1 / transport §5.1). Calls the broker's `drain` RPC to
+// pull-consume the agent's own pending inbox records, then prints a
+// Claude Code `additionalContext` JSON object so the calling
+// UserPromptSubmit/SessionStart hook can inject the mail as a clean
+// turn — no TTY write. Prints nothing (clean exit) when there's nothing
+// to deliver or the presence gate deferred, so it's safe to run on
+// every turn. EVENT defaults to UserPromptSubmit and sets hookEventName.
+auto subDrain(std::span<const char* const> args) -> int {
+  if (args.empty()) {
+    std::println(stderr, "usage: bus msg drain AGENT [EVENT]");
+    return 2;
+  }
+  const std::string agent{args[0]};
+  const std::string event = args.size() > 1 ? std::string{args[1]}
+                                            : std::string{"UserPromptSubmit"};
+
+  const auto cfg = resolveConfig();
+  std::map<std::string, json::Value> req;
+  req.insert({"op", json::Value::from("drain")});
+  req.insert({"agent", json::Value::from(agent)});
+  auto resp = rpc::call(cfg.socket_path,
+                        json::Value::fromObject(std::move(req)));
+  if (!resp) {
+    std::println(stderr, "bus msg drain: {}", resp.error().message);
+    return 1;
+  }
+  if (!resp->getOrBool("ok")) {
+    std::println(stderr, "bus msg drain: {}", resp->getOrString("error"));
+    return 1;
+  }
+
+  const auto* msgs = resp->get("messages");
+  if (msgs == nullptr || !msgs->isArray() || msgs->asArray().empty()) {
+    return 0;  // nothing to deliver (or deferred) — emit no context
+  }
+
+  std::string ctx;
+  for (const auto& m : msgs->asArray()) {
+    if (!m.isObject()) continue;
+    ctx += "## bus mail from ";
+    ctx += m.getOrString("sender", "unknown");
+    ctx += '\n';
+    ctx += m.getOrString("body");
+    ctx += "\n\n";
+  }
+  if (ctx.empty()) return 0;
+
+  std::map<std::string, json::Value> hso;
+  hso.insert({"hookEventName", json::Value::from(event)});
+  hso.insert({"additionalContext", json::Value::from(ctx)});
+  std::map<std::string, json::Value> out;
+  out.insert({"hookSpecificOutput", json::Value::fromObject(std::move(hso))});
+  std::println("{}", json::serialize(json::Value::fromObject(std::move(out))));
+  return 0;
+}
+
 auto subPeek(std::span<const char* const> args) -> int {
   if (args.empty()) {
     std::println(stderr,

@@ -1,0 +1,54 @@
+# Minimal OpenTelemetry Collector config for claude-bus.
+#
+# Receives the metrics + events Claude Code exports (CLAUDE_CODE_ENABLE_TELEMETRY=1,
+# wired in settings/claude-settings.json) over OTLP/gRPC on :4317, batches them, and
+# writes them to two queryable JSONL files plus a live debug stream.
+#
+# The payoff is per-subagent cost + token attribution for free: every
+# claude_code.token.usage / claude_code.cost.usage data point carries
+# `query_source` (main|subagent|auxiliary) and `agent.name`, so you can answer
+# "how many tokens did the code-review subagent burn" from the metrics alone —
+# no new C++ in the bus.
+#
+# Run it (see docs/otel-setup.md for the full story):
+#   mkdir -p /tmp/claude-bus/otel
+#   nix run nixpkgs#opentelemetry-collector-contrib -- \
+#     --config /home/sulin/claude-bus/settings/otel/collector.yaml
+#
+# When the collector is NOT running, Claude Code's OTLP exporter retries in the
+# background and drops on failure — it never blocks the agent or pollutes the
+# pane. So enabling telemetry fleet-wide is safe even with no collector up.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch:
+    timeout: 5s
+
+exporters:
+  # Live tail in the collector's own pane.
+  debug:
+    verbosity: detailed
+  # Queryable, append-only artifacts — the standardized analogue of events.jsonl,
+  # but carrying the token/cost data hooks lack.
+  file/metrics:
+    path: /tmp/claude-bus/otel/metrics.jsonl
+  file/events:
+    path: /tmp/claude-bus/otel/events.jsonl
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/metrics, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/events, debug]

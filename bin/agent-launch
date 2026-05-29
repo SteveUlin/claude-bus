@@ -98,6 +98,21 @@ fi
 [ -d "$workspace_dir" ] || workspace_dir="$BUS_ROOT"
 cd "$workspace_dir"
 
+# Point this workspace's Claude Code project config at the single
+# canonical file. settings/claude-settings.json is tracked + public;
+# .claude/settings.json is gitignored, so this symlink is invisible to
+# jj and an edit to the canonical file applies to every workspace at
+# once — no per-workspace commit + sync. ln -sfn is idempotent and
+# force-replaces a stale regular-file copy left by an older checkout, so
+# the symlink self-heals on every launch. Guarded on the canonical
+# existing so a pre-migration checkout (no canonical yet) keeps its own
+# .claude/settings.json instead of getting a dangling link.
+canonical_settings="$BUS_ROOT/settings/claude-settings.json"
+if [ -e "$canonical_settings" ]; then
+    mkdir -p "$workspace_dir/.claude"
+    ln -sfn "$canonical_settings" "$workspace_dir/.claude/settings.json"
+fi
+
 # claude-code encodes the project's absolute path into the session
 # storage dir by replacing '/', '.', and '_' all with '-'. The encoded
 # path itself begins with '-' (from the leading '/' of cwd); the literal

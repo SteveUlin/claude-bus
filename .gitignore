@@ -5,6 +5,12 @@
 /.cache/
 /.claude/scheduled_tasks.lock
 
+# Canonical Claude Code project config lives at settings/claude-settings.json
+# (tracked, public). Each jj workspace's .claude/settings.json is a symlink
+# to it, created by bin/agent-launch — gitignored so jj never materializes
+# divergent per-workspace copies. Edit the canonical file, not this path.
+/.claude/settings.json
+
 # compiled binaries; CMake puts them next to any remaining shell scripts
 /bin/bus
 /bin/mailbox

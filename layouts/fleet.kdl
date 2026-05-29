@@ -79,7 +79,12 @@ layout {
         floating_panes {
             pane name="broker" {
                 command "bash"
-                args "-c" "exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
+                // CLAUDE_BUS_CTX_WINDOW is the watcher's context-window
+                // denominator for CTX% (default 200k). The whole fleet
+                // runs on 1M, so set it here to report CTX% exactly from
+                // zero instead of under-reporting until an agent crosses
+                // 200k.
+                args "-c" "export CLAUDE_BUS_CTX_WINDOW=1000000; exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
             }
         }
         // comms-bar at the top: same 1-row strip every agent tab has.

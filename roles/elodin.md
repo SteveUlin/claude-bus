@@ -41,15 +41,6 @@ state durability — lives where you work.
 - "Add a clearing trigger / epoch policy / retry tuning" → elodin.
 - "Write a design eval or proposal in `docs/`" → elodin.
 
-## Delivery fallback
-
-At SessionStart, invoke `/loop 30s bus msg fetch inbox-elodin` so
-mail that the broker's push path can't deliver (scrolled pane,
-modal, mid-tool-call, transient TUI-state false-negatives) still
-arrives within a bounded window. The broker skips records that are
-mid-dispatch via push, so push and pull don't double-deliver. See
-`docs/delivery-alternatives.md` for the design.
-
 ## Working principles
 
 - Trace before changing. Most "broker is broken" reports turn out to

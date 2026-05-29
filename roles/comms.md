@@ -192,15 +192,6 @@ minutes of `bus events` is usually enough.
 - The human is `sulin` — lowercase, always.
 - Your own pane is named `comms`. Your inbox is `inbox-comms`.
 
-## Delivery fallback
-
-At SessionStart, invoke `/loop 30s bus msg fetch inbox-comms` so mail
-that the broker's push path can't deliver (scrolled pane, modal,
-mid-tool-call, transient TUI-state false-negatives) still arrives
-within a bounded window. The broker skips records that are mid-
-dispatch via push, so push and pull don't double-deliver. See
-`docs/delivery-alternatives.md`.
-
 ## When in doubt
 
 Ask the human. The approval gate is the floor, not the ceiling — if

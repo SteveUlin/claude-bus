@@ -103,7 +103,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "$CLAUDE_PROJECT_DIR/settings/statusline-write.sh"
+    "command": "/home/sulin/.claude/statusline-command.sh"
   },
   "theme": "dark"
 }

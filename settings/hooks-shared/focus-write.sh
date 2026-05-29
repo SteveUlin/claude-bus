@@ -30,7 +30,7 @@ set -uo pipefail
 
 NAME=${CLAUDE_BUS_AGENT_ID:-}
 [ -z "$NAME" ] && exit 0
-STATE=${CLAUDE_BUS_STATE:-/tmp/claude-bus}
+STATE=${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}
 FOCUS_FILE="$STATE/focus/$NAME"
 CACHE_DIR="$STATE/focus/$NAME.tasks"
 mkdir -p "$STATE/focus" "$CACHE_DIR" 2>/dev/null

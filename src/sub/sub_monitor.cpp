@@ -16,6 +16,7 @@
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../signals.h"
+#include "../state_paths.h"
 #include "../sub.h"
 
 #include <algorithm>
@@ -96,10 +97,7 @@ auto fetchAll(const std::string& socket_path,
 
 // Honors $CLAUDE_BUS_STATE; same fallback the rest of the code uses.
 auto stateDir() -> const std::string& {
-  static const std::string dir = [] {
-    const char* env = std::getenv("CLAUDE_BUS_STATE");
-    return std::string{env ? env : "/tmp/claude-bus"};
-  }();
+  static const std::string dir = [] { return bus::stateRoot(); }();
   return dir;
 }
 

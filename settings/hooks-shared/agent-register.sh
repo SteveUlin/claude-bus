@@ -22,7 +22,7 @@ set -euo pipefail
 
 EVENT=${1:-unknown}
 NAME=${CLAUDE_BUS_AGENT_ID:-}
-STATE=${CLAUDE_BUS_STATE:-/tmp/claude-bus}
+STATE=${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}
 # CLAUDE_PROJECT_DIR is exported by claude-code into hook env; fall back
 # to walking up from this script's own path so the hook still works
 # when invoked outside the agent context (e.g. manual testing).

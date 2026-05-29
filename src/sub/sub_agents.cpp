@@ -13,6 +13,7 @@
 #include "../broker.h"
 #include "../json_min.h"
 #include "../rpc.h"
+#include "../state_paths.h"
 #include "../sub.h"
 
 #include <cstdio>
@@ -33,9 +34,7 @@ namespace bus {
 namespace {
 
 auto stateDir() -> std::filesystem::path {
-  const char* env = std::getenv("CLAUDE_BUS_STATE");
-  return env ? std::filesystem::path{env}
-             : std::filesystem::path{"/tmp/claude-bus"};
+  return std::filesystem::path{bus::stateRoot()};
 }
 
 auto agentsDir() -> std::filesystem::path { return stateDir() / "agents"; }

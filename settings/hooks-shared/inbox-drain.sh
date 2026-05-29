@@ -19,7 +19,7 @@ set -uo pipefail
 
 EVENT="${1:-UserPromptSubmit}"
 NAME="${CLAUDE_BUS_AGENT_ID:-}"
-STATE="${CLAUDE_BUS_STATE:-/tmp/claude-bus}"
+STATE="${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}"
 [ -n "$NAME" ] || exit 0  # not a fleet agent
 
 # Off-TTY mode gate. The hook is wired fleet-wide, but it's a NO-OP

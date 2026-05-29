@@ -25,6 +25,7 @@
 #include "../broker.h"
 #include "../bus.h"
 #include "../signals.h"
+#include "../state_paths.h"
 #include "../sub.h"
 #include "../agent_status.h"
 
@@ -212,10 +213,7 @@ auto firstLine(std::string_view s, std::size_t max_chars = 50) -> std::string {
 }
 
 auto stateDir() -> const std::string& {
-  static const std::string dir = [] {
-    const char* env = std::getenv("CLAUDE_BUS_STATE");
-    return std::string{env ? env : "/tmp/claude-bus"};
-  }();
+  static const std::string dir = [] { return bus::stateRoot(); }();
   return dir;
 }
 

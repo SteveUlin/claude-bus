@@ -4,6 +4,7 @@
 #include "../bus.h"
 #include "../json_min.h"
 #include "../rpc.h"
+#include "../state_paths.h"
 #include "../sub.h"
 
 #include <cstdio>
@@ -147,8 +148,7 @@ auto subMail(std::span<const char* const> args) -> int {
   // monitor tick picks it up promptly. Enqueue failures don't roll
   // back the title — that's the sender's last intent regardless.
   if (title_set) {
-    const char* env = std::getenv("CLAUDE_BUS_STATE");
-    const std::string state_dir = env ? env : "/tmp/claude-bus";
+    const std::string state_dir = bus::stateRoot();
     const std::string dir = state_dir + "/title";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);

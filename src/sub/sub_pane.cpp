@@ -7,6 +7,7 @@
 
 #include "../bus.h"
 #include "../pane.h"
+#include "../state_paths.h"
 #include "../sub.h"
 
 #include <fcntl.h>
@@ -96,9 +97,7 @@ auto subSend(std::span<const char* const> args) -> int {
   // existing bin/dispatch-tui shell + the watcher's nudges agree on,
   // so concurrent writers (broker delivery, dispatch retries,
   // [bus-wake] nudges) serialize byte-for-byte at the TTY.
-  const char* state_env = std::getenv("CLAUDE_BUS_STATE");
-  const std::string state =
-      state_env ? state_env : std::string{"/tmp/claude-bus"};
+  const std::string state = bus::stateRoot();
   const std::string lock_dir = state + "/tui-locks";
   std::error_code ec;
   std::filesystem::create_directories(lock_dir, ec);

@@ -19,7 +19,8 @@
 namespace bus {
 
 struct BrokerConfig {
-  std::string state_dir;     // $CLAUDE_BUS_STATE; default /tmp/claude-bus
+  std::string state_dir;     // bus::stateRoot() — $CLAUDE_BUS_STATE or
+                             // the durable XDG default (see state_paths.h)
   std::string socket_path;   // $state/broker.sock
   std::string pid_path;      // $state/broker.pid
 };

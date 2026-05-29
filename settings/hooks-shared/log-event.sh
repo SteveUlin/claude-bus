@@ -7,7 +7,12 @@
 set -euo pipefail
 
 EVENT=${1:-unknown}
-LOG_DIR=/tmp/claude-bus
+# Durable state root — must match the broker's bus::stateRoot()
+# (src/state_paths.h): $CLAUDE_BUS_STATE, else $XDG_STATE_HOME, else
+# ~/.local/state. NOT /tmp, which a reboot wipes (it took the event log
+# + learnings with it). events.jsonl drives all agent-state derivation,
+# so this path and the broker's MUST agree.
+LOG_DIR="${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}"
 LOG="$LOG_DIR/events.jsonl"
 
 mkdir -p "$LOG_DIR"

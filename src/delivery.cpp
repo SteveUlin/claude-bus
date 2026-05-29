@@ -229,7 +229,7 @@ auto Loop::forgetInflight(const std::string& msg_id)
 }
 
 auto Loop::scanEvents() -> void {
-  const std::string log = "/tmp/claude-bus/events.jsonl";
+  const std::string log = cfg_.state_dir + "/events.jsonl";
   const auto size = fileSize(log);
 
   if (events_offset_ < 0) {
@@ -520,7 +520,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     //      history for this agent (fresh boot, post-wipe) but the
     //      pane is visibly at the prompt; trust the TTY.
     if (m.deliver_when == 1) {
-      const std::string events_log = "/tmp/claude-bus/events.jsonl";
+      const std::string events_log = cfg_.state_dir + "/events.jsonl";
       std::set<std::string> filter{agent};
       auto agents = readAgents(events_log, filter);
       AgentInfo info;
@@ -625,7 +625,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or
     // Starting+INSERT for post-wipe boots with no event history.
     if (m.deliver_when == 1) {
-      const std::string events_log = "/tmp/claude-bus/events.jsonl";
+      const std::string events_log = cfg_.state_dir + "/events.jsonl";
       std::set<std::string> filter{agent};
       auto agents = readAgents(events_log, filter);
       AgentInfo info;

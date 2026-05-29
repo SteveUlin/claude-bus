@@ -4,6 +4,7 @@
 #include "delivery.h"
 #include "json_min.h"
 #include "rpc.h"
+#include "state_paths.h"
 #include "topic_log.h"
 #include "topic_registry.h"
 
@@ -32,11 +33,6 @@
 namespace bus {
 
 namespace {
-
-auto envOr(const char* var, const char* def) -> std::string {
-  const char* v = std::getenv(var);
-  return v ? v : def;
-}
 
 // Read the contents of `path`, trimmed. Empty on miss.
 auto readFileTrimmed(const std::string& path) -> std::string {
@@ -149,7 +145,7 @@ auto writeEpoch(const std::string& path, std::uint64_t v) -> bool {
 
 auto resolveConfig() -> BrokerConfig {
   BrokerConfig cfg;
-  cfg.state_dir = envOr("CLAUDE_BUS_STATE", "/tmp/claude-bus");
+  cfg.state_dir = stateRoot();
   cfg.socket_path = cfg.state_dir + "/broker.sock";
   cfg.pid_path = cfg.state_dir + "/broker.pid";
   return cfg;
@@ -479,7 +475,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // adds an inotify-driven cache so the delivery loop can react to
   // state transitions without polling.
   server.on("state", [&](const json::Value& req) {
-    const std::string log_path = "/tmp/claude-bus/events.jsonl";
+    const std::string log_path = cfg.state_dir + "/events.jsonl";
     const auto wanted = req.getOrString("agent");
     std::set<std::string> filter;
     if (!wanted.empty()) filter.insert(wanted);

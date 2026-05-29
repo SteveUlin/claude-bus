@@ -1,6 +1,7 @@
 #include "rpc.h"
 
 #include "signals.h"
+#include "state_paths.h"
 
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -31,8 +32,7 @@ auto onStop(int) -> void { gStopFlag.store(1, std::memory_order_release); }
 }  // namespace
 
 auto defaultSocketPath() -> std::string {
-  const char* state = std::getenv("CLAUDE_BUS_STATE");
-  return std::string{state ? state : "/tmp/claude-bus"} + "/broker.sock";
+  return stateRoot() + "/broker.sock";
 }
 
 auto Server::requestStop() -> void { gStopFlag.store(1); }

@@ -33,7 +33,7 @@ set -uo pipefail
 NAME=${CLAUDE_BUS_AGENT_ID:-}
 [ -z "$NAME" ] && exit 0
 
-STATE=${CLAUDE_BUS_STATE:-/tmp/claude-bus}
+STATE=${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}
 LEARN_DIR="$STATE/learnings"
 LEARN_FILE="$LEARN_DIR/$NAME.md"
 

@@ -1,6 +1,7 @@
 #include "agent_status.h"
 
 #include "pane.h"
+#include "state_paths.h"
 
 #include <sys/stat.h>
 
@@ -434,9 +435,7 @@ auto agentColor(std::string_view name) -> std::string_view {
 namespace {
 
 auto presencePath(const std::string& name) -> std::filesystem::path {
-  const char* env = std::getenv("CLAUDE_BUS_STATE");
-  const std::filesystem::path root = env ? env : "/tmp/claude-bus";
-  return root / "presence" / name;
+  return std::filesystem::path{stateRoot()} / "presence" / name;
 }
 
 }  // namespace

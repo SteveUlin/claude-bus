@@ -143,6 +143,11 @@ class Loop {
   std::map<std::string, TokenScanState> token_scan_;
   std::int64_t token_scan_last_ms_{0};
 
+  // Doorbell: per-agent cooldown + scan rate-limit for waking idle
+  // off-TTY agents that have queued mail (see maybeWakeIdleOffTty).
+  std::map<std::string, std::int64_t> wake_next_allowed_ms_;
+  std::int64_t wake_last_scan_ms_{0};
+
   auto scanEvents() -> void;
   auto scanRetries() -> void;
   auto dispatchAgentInbox(const TopicConfig& cfg) -> void;
@@ -151,6 +156,7 @@ class Loop {
                 std::string_view body) -> void;
   auto maybeAutoClear() -> void;
   auto maybeScanTokens() -> void;
+  auto maybeWakeIdleOffTty() -> void;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;

@@ -786,6 +786,7 @@ auto Loop::tick() -> void {
   scanRetries();
   maybeAutoClear();
   maybeScanTokens();
+  maybeWakeIdleOffTty();
   for (const auto& cfg : registry_.list()) {
     if (cfg.kind == std::string{kKindAgentInbox}) dispatchAgentInbox(cfg);
     else if (cfg.kind == std::string{kKindTuiCommands})
@@ -914,6 +915,99 @@ auto Loop::maybeAutoClear() -> void {
           "broker",
           std::format("auto-clear agent={} idle_min={} threshold_min={}",
                       name, idle_min, threshold_min),
+          a_opts);
+    }
+  }
+}
+
+// Doorbell — wake an idle off-TTY agent that has queued mail.
+//
+// Off-TTY delivery is pull-on-turn: the drain hook fires on
+// UserPromptSubmit / SessionStart. A truly IDLE flagged agent (sitting
+// at the prompt, taking no turns) would never drain — its mail strands.
+// The old TTY push woke an agent because it submitted a prompt; a drain
+// does not. So when the loop sees queued mail for an idle, flagged,
+// unattended, live agent, it rings a doorbell: a single sentinel submit
+// ([bus-wake]) that fires UserPromptSubmit, on which the drain hook
+// delivers the mail as additionalContext. The broker writes ONLY the
+// sentinel — the mail itself never touches the TTY.
+//
+// Gates (every clause must pass):
+//   - off-TTY flagged ($STATE/off-tty/<agent>) — TTY agents are already
+//     woken by the push path itself.
+//   - NOT attached (no [bus-attach] sentinel) — never wake a pane the
+//     human is occupying.
+//   - idle / at the prompt (last event Stop or Notification idle) — a
+//     mid-turn agent drains on its own next turn; don't interrupt it.
+//   - live pane (paneId resolves).
+//   - mail queued past the cursor — nothing to wake for otherwise.
+//   - not mid blocking-op; cooldown elapsed (don't re-ring while a wake
+//     resolves).
+auto Loop::maybeWakeIdleOffTty() -> void {
+  const auto now = nowMs();
+  if (now - wake_last_scan_ms_ < 5'000) return;  // every 5 s
+  wake_last_scan_ms_ = now;
+
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  auto agents = readAgents(events_log, {});
+
+  for (const auto& [name, info] : agents) {
+    // Off-TTY flag — the doorbell only rings for pull-delivery agents.
+    {
+      struct stat st;
+      const auto flag = cfg_.state_dir + "/off-tty/" + name;
+      if (::stat(flag.c_str(), &st) != 0) continue;
+    }
+    if (hasPresenceFile(name)) continue;             // human attached
+    if (blocking_ops_.contains(name)) continue;
+    if (now < wake_next_allowed_ms_[name]) continue;  // cooldown
+
+    // Idle / at the prompt — not mid-turn.
+    const bool idle =
+        info.last.event == "Stop" ||
+        (info.last.event == "Notification" &&
+         info.last.notification_type == "idle_prompt");
+    if (!idle) continue;
+
+    if (paneId(name).empty()) continue;  // live pane only
+
+    // Mail queued past the inbox cursor?
+    {
+      const auto cursor_p =
+          topic::cursorPath(cfg_.state_dir, "inbox-" + name, "");
+      const auto cursor = topic::readCursor(cursor_p);
+      const auto start =
+          cursor > 0 ? cursor
+                     : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+      const std::string log_path =
+          cfg_.state_dir + "/topics/inbox-" + name + ".log";
+      topic::TopicLog inbox{log_path};
+      auto r = inbox.peek(start, 1);
+      if (!r || r->empty()) continue;  // nothing queued — no wake
+    }
+
+    // Ring it: a single sentinel submit via the same flock'd safe-write
+    // path mail uses. sendToPaneSafe defers on a scrolled/locked pane,
+    // returning false — skip the cooldown so we retry next scan.
+    if (!deliverInline(cfg_, name, "[bus-wake]")) continue;
+    wake_next_allowed_ms_[name] = now + 30'000;  // 30 s
+
+    // Audit so doorbell rings land where the human sees deliveries.
+    {
+      TopicConfig audit;
+      audit.name = "audit";
+      audit.kind = std::string{kKindAppendLog};
+      if (!registry_.contains("audit")) {
+        auto _ = registry_.create(audit);
+      }
+      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+      topic::SendOpts a_opts;
+      a_opts.protocol = "doorbell";
+      stampEpoch(a_opts, current_epoch_);
+      auto _ = audit_log.append(
+          "broker",
+          std::format("doorbell wake agent={} (off-TTY idle, mail queued)",
+                      name),
           a_opts);
     }
   }

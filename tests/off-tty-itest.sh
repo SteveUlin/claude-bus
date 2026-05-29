@@ -84,6 +84,14 @@ ck "$?" 0 "tester2 drains its own record"
 echo "$out5" | grep -q 'off-tty message'
 ck "$?" 1 "tester2 does NOT see tester's mail (per-agent isolation)"
 
+note "7. CANARY SAFETY: an UNflagged agent's drain returns nothing"
+# This is the property that makes a fleet-wide hook + per-agent sentinel
+# safe: a non-off-TTY agent stays entirely on the broker's TTY push path,
+# so its drain must be a no-op even with mail queued (else: double-deliver).
+"$BUS" msg mail plainagent "should stay on the TTY path" >/dev/null
+out6="$("$BUS" msg drain plainagent)"
+ck "$out6" "" "unflagged agent drains nothing (no double-delivery)"
+
 echo
 if [ "$fail" = 0 ]; then
   echo -e "\033[1mALL OFF-TTY INTEGRATION CHECKS PASSED\033[0m"

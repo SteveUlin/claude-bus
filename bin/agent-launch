@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
 # Exec claude with stable identity for agent NAME:
-#   - claude --name NAME       (prompt-box label / terminal title / /resume picker)
-#   - Resume strategy, in order of preference:
-#       1. ~/.cache/claude-bus/agents/NAME.session caches the UUID; resume
-#          that directly.
-#       2. If no cache, scan ~/.claude/projects/<cwd>/*.jsonl by mtime and
-#          read line 1; the most recent one whose `customTitle` equals
-#          NAME is this agent's last session. Write the UUID to the cache
-#          so future spawns skip the scan.
-#       3. Otherwise mint a new UUID, write the cache, start fresh.
-#     The scan path lets a crashed/killed agent rehydrate by name without
-#     the human passing a UUID — `spawn-agent NAME` Just Works.
-#   - assigns a stable color from the 8 claude /color choices on first run
-#     (stored at NAME.color); on resumed sessions claude already remembers
-#     the color session-side. For fresh sessions we drop a NAME.pending
-#     marker that a colorizer (or sibling subshell) picks up.
+#   - claude --name NAME       (customTitle / prompt-box label / terminal
+#     title / /resume picker)
+#   - Each agent runs in its own jj workspace at $BUS_ROOT/.workspaces/NAME.
+#     The workspace's cwd determines claude's session storage dir
+#     (~/.claude/projects/<encoded-cwd>/), so each agent's sessions are
+#     naturally namespaced and don't collide.
+#   - Resume strategy (identity = --name, no session UUIDs):
+#       1. One-time migration: if the workspace project dir has no
+#          session for NAME yet, move any legacy session JSONLs whose
+#          customTitle matches NAME from the BUS_ROOT-rooted project dir
+#          (used before per-agent workspaces existed) into the workspace
+#          project dir. Idempotent.
+#       2. If the workspace project dir contains any JSONL with
+#          customTitle == NAME, pass --continue. claude resumes the
+#          most recent in cwd (this agent's, since the workspace is
+#          per-agent).
+#       3. Otherwise launch fresh (no --continue, no --session-id).
+#   - assigns a stable color from the 8 claude /color choices on first
+#     run (stored at NAME.color); on resumed sessions claude already
+#     remembers the color session-side. For fresh sessions we send
+#     /color after the TUI is ready.
 # Sets env for the bus and hooks: CLAUDE_BUS_AGENT_ID=NAME plus the
 # pass-through CLAUDE_BUS_AGENT_{ROLE,KIND,WORKSPACE,PROJECT,SESSION}
-# that the agent-register hook picks up. ROLE is set from --role; the
+# that the agent-register hook picks up. ROLE comes from --role; the
 # others are inherited from the caller's env if set.
 #
 # With --role NAME, $BUS_ROOT/roles/NAME.md is stripped of YAML
 # frontmatter and passed to claude as --append-system-prompt-file.
 #
-# Used by bin/spawn-agent (live spawn) and by layouts/fleet.kdl (boot-time
-# spawn). Same identity rules apply either way.
+# Used by bin/spawn-agent (live spawn) and by layouts/fleet.kdl (boot-
+# time spawn). Same identity rules apply either way.
 #
 # Usage: agent-launch [--role ROLE] NAME
 set -euo pipefail
@@ -66,60 +72,85 @@ if [ "$#" -ne 1 ]; then
 fi
 
 name=$1
-sessions_dir="$HOME/.cache/claude-bus/agents"
-session_file="$sessions_dir/$name.session"
-color_file="$sessions_dir/$name.color"
+cache_dir="$HOME/.cache/claude-bus/agents"
+color_file="$cache_dir/$name.color"
+mkdir -p "$cache_dir"
+
+# Per-agent jj workspace. Each agent operates on its own working copy
+# under $BUS_ROOT/.workspaces/$name, all backed by the shared .jj/repo
+# (commits, branches, op log). Removes the "scoop-bundle" pattern where
+# one agent's `jj describe` swept up another agent's uncommitted edits.
+# See docs/jj-workspace-workaround.md for why we're using pure-jj
+# workspaces (jj-vcs/jj#8052's colocated-workspaces feature isn't
+# released yet; native `git` commands only work in the main $BUS_ROOT
+# workspace).
+#
+# Set up the workspace BEFORE session detection so claude's cwd —
+# which determines its project storage dir — is fixed before we look
+# for prior sessions.
+workspace_dir="$BUS_ROOT/.workspaces/$name"
+if [ ! -d "$workspace_dir" ]; then
+    mkdir -p "$BUS_ROOT/.workspaces"
+    if ! (cd "$BUS_ROOT" && jj workspace add ".workspaces/$name" 2>&1); then
+        echo "agent-launch: jj workspace add failed; launching in \$BUS_ROOT" >&2
+    fi
+fi
+[ -d "$workspace_dir" ] || workspace_dir="$BUS_ROOT"
+cd "$workspace_dir"
+
 # claude-code encodes the project's absolute path into the session
-# storage dir by replacing '/' with '-' (leading '-' included), and
-# stores it under ~/.claude/projects/<encoded>/. Note the slash between
-# "projects" and the encoded path — the encoded path itself begins with
-# '-' (from the leading '/' of BUS_ROOT).
-project_dir="$HOME/.claude/projects/$(echo "$BUS_ROOT" | sed 's|/|-|g')"
+# storage dir by replacing '/', '.', and '_' all with '-'. The encoded
+# path itself begins with '-' (from the leading '/' of cwd); the literal
+# slash sits between "projects" and the encoded path. Probed
+# empirically: `/tmp/foo_bar/.baz` becomes `-tmp-foo-bar--baz`.
+encode_dir() { printf '%s' "$1" | sed 's|[/._]|-|g'; }
+project_dir="$HOME/.claude/projects/$(encode_dir "$workspace_dir")"
+legacy_project_dir="$HOME/.claude/projects/$(encode_dir "$BUS_ROOT")"
+mkdir -p "$project_dir"
 
-mkdir -p "$sessions_dir"
-
-# Locate the most-recent JSONL whose first line carries this agent's name
-# in its customTitle. Returns the bare UUID, or empty on miss.
-discover_session_id() {
+# Returns 0 if $1 contains any JSONL whose first line declares
+# customTitle == name.
+has_session() {
     local f
-    for f in $(ls -t "$project_dir"/*.jsonl 2>/dev/null); do
+    for f in "$1"/*.jsonl; do
+        [ -f "$f" ] || continue
         if head -c 256 "$f" | grep -q "\"customTitle\":\"$name\""; then
-            basename "$f" .jsonl
             return 0
         fi
     done
     return 1
 }
 
-fresh_session=0
-session_id=""
-if [ -f "$session_file" ]; then
-    session_id=$(cat "$session_file")
-    if [ ! -f "$project_dir/$session_id.jsonl" ]; then
-        # Cache pointed at a session claude no longer has; treat as fresh
-        # but reuse the same UUID so the identity is stable.
-        fresh_session=1
-    fi
-else
-    # No cache — try to rehydrate by name before minting a new UUID.
-    if discovered=$(discover_session_id); then
-        session_id=$discovered
-        echo "$session_id" > "$session_file"
-    else
-        session_id=$(uuidgen)
-        echo "$session_id" > "$session_file"
-        fresh_session=1
-    fi
+# One-time migration: pull any legacy sessions whose customTitle matches
+# NAME from the BUS_ROOT-rooted project dir (the old shared location,
+# used before workspaces) into the workspace project dir. Idempotent —
+# only fires when the workspace has no session for NAME yet, so once a
+# fresh session is established here, prior history won't be moved on
+# top of it.
+if [ "$project_dir" != "$legacy_project_dir" ] \
+        && [ -d "$legacy_project_dir" ] \
+        && ! has_session "$project_dir"; then
+    for f in "$legacy_project_dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        if head -c 256 "$f" | grep -q "\"customTitle\":\"$name\""; then
+            mv "$f" "$project_dir/"
+        fi
+    done
 fi
 
-if [ "$fresh_session" = 1 ]; then
-    claude_flag=(--session-id "$session_id")
+# Resume by --continue when a prior session exists; otherwise launch
+# fresh. claude's --continue picks the most recent JSONL in cwd, which
+# (per-workspace) is this agent's last session.
+if has_session "$project_dir"; then
+    claude_flag=(--continue)
+    fresh_session=0
 else
-    claude_flag=(--resume "$session_id")
+    claude_flag=()
+    fresh_session=1
 fi
 
-# Assign a deterministic color from claude's 8-color palette if we don't have
-# one yet. cksum gives a stable name -> index.
+# Assign a deterministic color from claude's 8-color palette if we don't
+# have one yet. cksum gives a stable name -> index.
 if [ ! -f "$color_file" ]; then
     colors=(red blue green yellow purple orange pink cyan)
     idx=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % ${#colors[@]} ))
@@ -127,9 +158,9 @@ if [ ! -f "$color_file" ]; then
 fi
 color=$(cat "$color_file")
 
-# Fresh sessions: fork a subshell that waits for claude's TUI to be up and
-# then sends /color via the bus. The fork survives the exec below; we don't
-# need a long-lived daemon since this is one shot per spawn.
+# Fresh sessions: fork a subshell that waits for claude's TUI to be up
+# and then sends /color via the bus. The fork survives the exec below;
+# one-shot per spawn, no daemon needed.
 if [ "$fresh_session" = 1 ]; then
     (
         for _ in $(seq 1 30); do
@@ -166,37 +197,9 @@ fi
 export CLAUDE_BUS_AGENT_ID="$name"
 export CLAUDE_BUS_AGENT_ROLE="$role"
 export CLAUDE_BUS_AGENT_KIND="${CLAUDE_BUS_AGENT_KIND:-}"
-export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-}"
+export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-$workspace_dir}"
 export CLAUDE_BUS_AGENT_PROJECT="${CLAUDE_BUS_AGENT_PROJECT:-}"
 export CLAUDE_BUS_AGENT_SESSION="${CLAUDE_BUS_AGENT_SESSION:-}"
-
-# Per-agent jj workspace. Each agent operates on its own working copy
-# under $BUS_ROOT/.workspaces/$name, all backed by the shared
-# .jj/repo (commits, branches, op log). Removes the "scoop-bundle"
-# pattern where one agent's `jj describe` swept up another agent's
-# uncommitted edits. See docs/jj-workspace-workaround.md for the
-# constraint analysis and why we're using pure-jj workspaces
-# (jj-vcs/jj#8052's colocated-workspaces feature isn't released yet;
-# native `git` commands only work in the main $BUS_ROOT workspace).
-#
-# Auto-create on first launch per sulin's call. Idempotent — repeat
-# launches just cd into the existing workspace. If `jj workspace
-# add` fails for any reason (jj missing, repo state weird), log and
-# fall through to launching in $BUS_ROOT itself; that degrades to
-# pre-isolation behaviour rather than blocking the agent.
-workspace_dir="$BUS_ROOT/.workspaces/$name"
-if [ ! -d "$workspace_dir" ]; then
-    mkdir -p "$BUS_ROOT/.workspaces"
-    if (cd "$BUS_ROOT" && jj workspace add ".workspaces/$name" 2>&1); then
-        :
-    else
-        echo "agent-launch: jj workspace add failed; launching in \$BUS_ROOT" >&2
-    fi
-fi
-if [ -d "$workspace_dir" ]; then
-    cd "$workspace_dir"
-    export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-$workspace_dir}"
-fi
 
 # After cd'ing into the workspace, `bin/bus` (relative) no longer
 # resolves — the binary lives in the main $BUS_ROOT/bin and is

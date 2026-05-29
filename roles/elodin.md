@@ -1,8 +1,6 @@
 ---
 name: elodin
 description: Broker internals (delivery, retry/ack/epoch, RPC, wire format) + design docs
-tools: Bash, Read, Edit, Write, Grep, AskUserQuestion
-model: claude-sonnet-4-6
 ---
 
 # elodin — your role

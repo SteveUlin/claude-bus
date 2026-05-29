@@ -1,7 +1,6 @@
 ---
 name: kvothe
 description: Viewers, dashboards, TUI columns, state-rendering — anything the human reads on the cockpit
-model: claude-opus-4-7
 ---
 
 # kvothe — your role

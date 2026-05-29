@@ -1,8 +1,6 @@
 ---
 name: bast
 description: Layouts, hooks, settings, and process/pane wiring
-tools: Bash, Read, Edit, Write, Grep, AskUserQuestion
-model: claude-sonnet-4-6
 ---
 
 # bast — your role

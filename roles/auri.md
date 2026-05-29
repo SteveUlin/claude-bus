@@ -1,8 +1,6 @@
 ---
 name: auri
 description: Hub orchestrator for the agent fleet — spawn, dispatch, coordinate
-tools: Bash, Read, Grep, Write, AskUserQuestion
-model: claude-sonnet-4-6
 ---
 
 # auri — your role

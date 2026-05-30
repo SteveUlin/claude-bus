@@ -78,6 +78,47 @@ out7="$("$BUS" msg drain tester3)"
 echo "$out7" | grep -q 'for tester3 only'; ck "$?" 0 "tester3 drains its own record"
 echo "$out7" | grep -q 'off-tty message'; ck "$?" 1 "tester3 does NOT see tester's mail"
 
+# ── C4 objective verification: doorbell + strand-watchdog ──
+# The doorbell/strand-watchdog (delivery.cpp, maybeWakeIdleOffTty) only
+# acts on agents with a LIVE zellij pane — paneId() shells out to
+# `zellij action list-panes`, which returns nothing in this headless
+# subprocess sandbox, so the wake/strand EMISSION path never runs here.
+# Reproducing the doorbell-FIRES and strand-FIRES cases needs the
+# real-zellij + stub-pane harness (Option B in docs/broker-test-sandbox.md).
+# That positive reproduction lives, today, in the pure-logic unit test
+# tests/unit/test_doorbell_readiness.cpp — which proves the wake gate
+# (process==Alive && turn==Ready) and pins the post-compaction strand.
+# What this sandbox CAN assert objectively:
+
+note "8. exactly one delivery path per agent (no double-delivery)"
+# Off-TTY default: drain is the path, push is skipped. TTY opt-out:
+# push is the path, drain returns empty. Asserted as a matrix so a
+# regression that puts an agent on BOTH paths fails loudly.
+"$BUS" msg mail pathtest "single-path probe" >/dev/null
+op="$("$BUS" msg drain pathtest)"
+echo "$op" | grep -q 'single-path probe'; ck "$?" 0 "off-TTY agent: mail arrives via DRAIN"
+op2="$("$BUS" msg drain pathtest)"
+ck "$op2" "" "off-TTY agent: consumed once, not redelivered"
+"$BUS" msg mail comms "comms single-path probe" >/dev/null
+oc="$("$BUS" msg drain comms)"
+ck "$oc" "" "TTY agent (comms): drain empty — delivered by PUSH only"
+
+note "9. strand-watchdog: SILENT under healthy delivery (no false alarm)"
+# Every record enqueued above was drained cleanly (has_mail->false), so
+# the watchdog must not have emitted a single doorbell-strand alarm. A
+# spurious alarm leaking into the audit topic during normal drain ops
+# would be a false-positive regression.
+audit="$("$BUS" msg peek audit --limit 200 2>/dev/null)"
+echo "$audit" | grep -q 'doorbell-strand'; ck "$?" 1 "no doorbell-strand audit under healthy delivery"
+echo "$audit" | grep -q 'protocol:.*doorbell\b'; ck "$?" 1 "no doorbell wake fired (no live pane in sandbox)"
+
+# TODO(C1, kvothe — not yet landed): once C1 lands its cursor-state
+# assertions, add the strand-clock reproduction here: enqueue, hold a
+# pane unattended past CLAUDE_BUS_STRAND_MS, and assert the inbox cursor
+# has NOT advanced (mail genuinely undelivered) at the moment the
+# doorbell-strand alarm fires — distinguishing a true strand from a
+# drained-but-lost record. Needs the Option-B zellij-pane harness.
+
 echo
 if [ "$fail" = 0 ]; then echo -e "\033[1mALL OFF-TTY INTEGRATION CHECKS PASSED\033[0m"; else
   echo -e "\033[1mSOME CHECKS FAILED\033[0m"; fi

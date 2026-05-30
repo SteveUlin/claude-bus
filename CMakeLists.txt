@@ -74,6 +74,7 @@ add_executable(bus_tests
     tests/unit/test_json.cpp
     tests/unit/test_topic_log.cpp
     tests/unit/test_agent_status.cpp
+    tests/unit/test_doorbell_readiness.cpp
     tests/unit/test_tail_reader.cpp
     tests/unit/test_pane_cache.cpp
 )

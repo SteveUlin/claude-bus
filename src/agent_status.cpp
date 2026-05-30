@@ -198,6 +198,32 @@ auto stateColor(State s) -> std::string_view {
   return ansi::kReset;
 }
 
+auto foldTurnState(AgentInfo& info) -> void {
+  const auto& ev = info.last.event;
+  const auto ts = info.last.ts_ms;
+  if (ev == "UserPromptSubmit") {
+    info.turn_start_ms = ts;
+    info.open_tool.clear();
+    info.open_tool_since_ms = 0;
+  } else if (ev == "PreToolUse") {
+    info.open_tool = info.last.tool;
+    info.open_tool_since_ms = ts;
+  } else if (ev == "PostToolUse") {
+    info.open_tool.clear();
+    info.open_tool_since_ms = 0;
+  } else if (ev == "Stop") {
+    info.turn_start_ms = 0;
+    info.open_tool.clear();
+    info.open_tool_since_ms = 0;
+  } else if (ev == "Notification") {
+    if (info.last.notification_type == "idle_prompt") info.turn_start_ms = 0;
+  } else if (ev == "SessionStart" || ev == "SessionEnd") {
+    info.turn_start_ms = 0;
+    info.open_tool.clear();
+    info.open_tool_since_ms = 0;
+  }
+}
+
 auto computeAxes(const AgentInfo& a, std::size_t unread,
                  std::int64_t now_ms, bool pane_exists,
                  const PaneState* pane) -> AgentAxes {
@@ -342,6 +368,8 @@ auto readAgents(const std::string& log_path,
     info.last.notification_type = std::move(ev->notification_type);
     info.last.transcript_path = std::move(ev->transcript_path);
     info.last.ts_ms = ev->ts_ms;
+    // D8 fold: carry turn/tool structure across the sequence (Part A).
+    foldTurnState(info);
   }
   return out;
 }

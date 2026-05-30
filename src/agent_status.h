@@ -39,7 +39,34 @@ struct AgentEvent {
 
 struct AgentInfo {
   AgentEvent last;
+
+  // D8 fold accumulator — carried across the whole event sequence, not
+  // just the latest event, so a turn's STRUCTURE is visible rather than
+  // only its last frame. A tool that opened and never closed (wedged /
+  // dropped) and a turn that started and never advanced (the mid-stream
+  // dropped-turn) are otherwise indistinguishable from any mid-turn event
+  // under `state = f(last_event)`. Populated by readAgents via
+  // foldTurnState; the timerfd escalation + R1 triage consume them. Part A
+  // is additive: computeAxes' axis outputs do NOT yet depend on these (the
+  // wall-clock decouple is Part B). See docs/computeaxes-fold.md.
+  std::int64_t turn_start_ms{0};       // UserPromptSubmit that began the
+                                       // current turn; 0 = no active turn.
+  std::string open_tool;               // PreToolUse with no matching
+                                       // PostToolUse — a call in flight.
+  std::int64_t open_tool_since_ms{0};  // when that call opened.
 };
+
+// Fold one event into an agent's turn/tool accumulator. Reads info.last
+// (which the caller has just assigned) and updates the accumulator fields.
+// Pure + idempotent per call; exposed so the transition table can be
+// unit-tested without file I/O. The transitions:
+//   UserPromptSubmit          → turn opens (turn_start = ts), tool cleared
+//   PreToolUse                → tool opens (open_tool = tool, since = ts)
+//   PostToolUse               → tool closes (a call completed)
+//   Stop                      → turn closes, tool cleared
+//   Notification(idle_prompt) → turn closes (back at the prompt)
+//   SessionStart / SessionEnd → reset (new / ended session)
+auto foldTurnState(AgentInfo& info) -> void;
 
 // Lifecycle states. Names mirror what the monitor table prints; bar
 // renderers map them onto compact glyphs.

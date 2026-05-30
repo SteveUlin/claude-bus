@@ -5,11 +5,11 @@
 // agent-bar uses, so the two surfaces can never disagree on what an
 // agent is doing.
 //
-// The FOCUS column reads events.jsonl directly (in-process, tail-only)
-// for the latest UserPromptSubmit body per agent — the broker doesn't
-// expose prompt bodies through the state RPC, and we'd rather not
-// extend the shared lib for a viewer-only signal. Read is bounded to
-// the last ~64 KiB so even a multi-MB log stays cheap.
+// The LANE column resolves each agent's domain tag from its role file's
+// `lane:` frontmatter — the registry entry ($STATE/agents/<name>.json)
+// carries the role name + workspace, from which we locate <repo>/roles.
+// The TASK column reads $STATE/title/<agent> (set by `bus msg mail
+// --title`). Both are read in-process from files, like CTX.
 
 #include "../agent_status.h"
 #include "../broker.h"
@@ -19,13 +19,11 @@
 #include "../state_paths.h"
 #include "../sub.h"
 
-#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include <ios>
 #include <sstream>
 #include <map>
 #include <print>
@@ -101,11 +99,6 @@ auto stateDir() -> const std::string& {
   return dir;
 }
 
-auto eventsLogPath() -> const std::string& {
-  static const std::string path = stateDir() + "/events.jsonl";
-  return path;
-}
-
 // Read $STATE/title/<name> — set by `bus msg mail --title`. The TITLE
 // column's source. Empty string when no title has been set (or it was
 // explicitly cleared).
@@ -118,65 +111,93 @@ auto titleFromFile(std::string_view name) -> std::string {
   return content;
 }
 
-// Basename of a slash-separated path. Drops trailing slashes first.
-// Empty input → empty output.
-auto pathBasename(std::string_view path) -> std::string {
-  while (!path.empty() && path.back() == '/') path.remove_suffix(1);
-  const auto slash = path.find_last_of('/');
-  if (slash == std::string_view::npos) return std::string{path};
-  return std::string{path.substr(slash + 1)};
-}
-
 // Light JSON string-value extractor. Returns the raw inner-bytes between
-// the matching quotes, no escape handling. Fine for fields we know are
-// plain ASCII (agent, event); the prompt body needs more care — see
-// extractPromptTrimmed.
+// the matching quotes, no escape handling. Tolerates whitespace around
+// the colon, so it reads both compact (events.jsonl) and pretty-printed
+// (the jq-written registry) JSON. Fine for plain-ASCII fields.
 auto extractStr(std::string_view line, std::string_view key) -> std::string {
   std::string pat;
-  pat.reserve(key.size() + 4);
+  pat.reserve(key.size() + 2);
   pat += '"';
   pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  const auto start = pos + pat.size();
+  pat += '"';
+  const auto kpos = line.find(pat);
+  if (kpos == std::string_view::npos) return {};
+  auto i = kpos + pat.size();
+  while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+  if (i >= line.size() || line[i] != ':') return {};
+  ++i;
+  while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+  if (i >= line.size() || line[i] != '"') return {};
+  const auto start = i + 1;
   const auto end = line.find('"', start);
   if (end == std::string_view::npos) return {};
   return std::string(line.substr(start, end - start));
 }
 
-// Per-agent tail-scan result. Only `cwd` after the FOCUS column was
-// dropped per sulin's review — keep the events.jsonl scan as one pass
-// in case future columns want to share it.
-struct AgentTail {
-  std::string cwd;  // latest payload.cwd seen for any event
-};
+// ─── rendering ───────────────────────────────────────────────────────
 
-auto latestAgentTails() -> std::map<std::string, AgentTail> {
-  std::map<std::string, AgentTail> out;
-  std::ifstream in{eventsLogPath(), std::ios::ate | std::ios::binary};
-  if (!in) return out;
-  const auto end_pos = in.tellg();
-  if (end_pos <= 0) return out;
-  constexpr std::streamoff kTailBytes = 64 * 1024;
-  const std::streamoff end_off = static_cast<std::streamoff>(end_pos);
-  const std::streamoff start = std::max<std::streamoff>(0, end_off - kTailBytes);
-  in.seekg(start);
-  std::string line;
-  if (start > 0) std::getline(in, line);  // skip partial leading line
-  while (std::getline(in, line)) {
-    auto agent = extractStr(line, "agent");
-    if (agent.empty()) continue;
-    auto cwd = extractStr(line, "cwd");
-    if (!cwd.empty()) out[agent].cwd = std::move(cwd);
+constexpr std::size_t kLaneColWidth = 10;
+constexpr std::size_t kTitleColWidth = 56;
+
+// LANE column — the agent's domain tag. Truncates to the column width.
+auto formatLane(std::string_view lane) -> std::string {
+  if (lane.empty()) return "—";
+  std::string out{lane};
+  if (out.size() > kLaneColWidth - 1) {
+    out.resize(kLaneColWidth - 2);
+    out += "…";
   }
   return out;
 }
 
-// ─── rendering ───────────────────────────────────────────────────────
-
-constexpr std::size_t kProjectColWidth = 12;
-constexpr std::size_t kTitleColWidth = 56;
+// Resolve an agent's LANE (domain tag) from its role file's `lane:`
+// frontmatter. The registry entry ($STATE/agents/<name>.json) carries
+// the role name + workspace path; the repo root is the workspace minus
+// its `/.workspaces/<name>` suffix, and roles live at <repo>/roles.
+// Empty when the registry entry, role file, or `lane:` line is absent.
+auto laneFromRegistry(std::string_view name) -> std::string {
+  const std::string reg =
+      stateDir() + "/agents/" + std::string{name} + ".json";
+  std::ifstream in{reg};
+  if (!in) return {};
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  const auto content = buf.str();
+  const auto role = extractStr(content, "role");
+  const auto workspace = extractStr(content, "workspace");
+  if (role.empty() || workspace.empty()) return {};
+  const auto ws_pos = workspace.find("/.workspaces/");
+  const std::string repo = ws_pos == std::string::npos
+                               ? workspace
+                               : workspace.substr(0, ws_pos);
+  std::ifstream rf{repo + "/roles/" + role + ".md"};
+  if (!rf) return {};
+  std::string line;
+  bool in_fm = false;
+  while (std::getline(rf, line)) {
+    if (line == "---") {
+      if (!in_fm) {
+        in_fm = true;
+        continue;
+      }
+      break;  // end of frontmatter
+    }
+    if (in_fm && line.starts_with("lane:")) {
+      std::string_view v{line};
+      v.remove_prefix(5);
+      while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) {
+        v.remove_prefix(1);
+      }
+      while (!v.empty() && (v.back() == ' ' || v.back() == '\t' ||
+                            v.back() == '\r')) {
+        v.remove_suffix(1);
+      }
+      return std::string{v};
+    }
+  }
+  return {};
+}
 
 // TITLE column source — $STATE/title/<agent>, set by `bus msg mail
 // --title TITLE`. Truncates to the column width.
@@ -188,19 +209,6 @@ auto formatTitle(std::string_view title) -> std::string {
     out += "…";
   }
   return out;
-}
-
-// PROJECT column — basename of the cwd we saw in the agent's most
-// recent event. Truncates to fit the column.
-auto formatProject(std::string_view cwd) -> std::string {
-  if (cwd.empty()) return "—";
-  auto base = pathBasename(cwd);
-  if (base.empty()) base = "/";
-  if (base.size() > kProjectColWidth - 1) {
-    base.resize(kProjectColWidth - 2);
-    base += "…";
-  }
-  return base;
 }
 
 // Mail cell — bare count when zero is dim, > 0 is cyan-emphasized.
@@ -293,9 +301,9 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<9} {:<12} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "CTX", "PROJECT",
-               "TITLE", kReset, kClearEol);
+  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:>9} {:<10} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "CTX", "LANE",
+               "TASK", kReset, kClearEol);
 
   if (!snap.broker_alive) {
     std::print("{}", kClearBelow);
@@ -310,9 +318,6 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     std::fflush(stdout);
     return;
   }
-
-  // Tail-scan events.jsonl once per render for FOCUS prompt + PROJECT cwd.
-  const auto tails = latestAgentTails();
 
   std::size_t rendered = 0;
   for (const auto& [name, entry] : state.asObject()) {
@@ -330,11 +335,8 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto attached = entry.getOrBool("attached");
     const bool has_draft = !buffer.empty() && buffer != "(empty)";
 
-    std::string cwd;
-    if (auto it = tails.find(name); it != tails.end()) {
-      cwd = it->second.cwd;
-    }
-    const auto project = formatProject(cwd);
+    const auto lane_raw = laneFromRegistry(name);
+    const auto lane = formatLane(lane_raw);
     const auto file_title = titleFromFile(name);
     const auto title = formatTitle(file_title);
     const auto ctx_stats = contextStatsFor(name);
@@ -359,7 +361,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
     std::println(
         "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
-        "{}{:<9}{} {}{:<12}{} {}{:<56}{}{}",
+        "{}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
@@ -367,7 +369,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
         ctx_color, ctx_cell, kReset,
-        cwd.empty() ? kDim : "", project, kReset,
+        lane_raw.empty() ? kDim : "", lane, kReset,
         file_title.empty() ? kDim : "", title, kReset,
         kClearEol);
     ++rendered;

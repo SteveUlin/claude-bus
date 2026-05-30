@@ -48,6 +48,28 @@ auto readFileTrimmed(const std::string& path) -> std::string {
   return s;
 }
 
+// C2 idempotency — the last msg_id delivered to a (topic, consumer),
+// persisted next to its cursor as `<consumer>.lastid`. Derived by
+// swapping the `.cursor` suffix so it inherits the exact namespace the
+// C1 fix collapses single-recipient kinds onto.
+auto lastIdPath(const std::string& cursor_path) -> std::string {
+  constexpr std::string_view kSuffix = ".cursor";
+  if (cursor_path.size() >= kSuffix.size() &&
+      cursor_path.compare(cursor_path.size() - kSuffix.size(),
+                          kSuffix.size(), kSuffix) == 0) {
+    return cursor_path.substr(0, cursor_path.size() - kSuffix.size()) +
+           ".lastid";
+  }
+  return cursor_path + ".lastid";
+}
+
+auto writeLastId(const std::string& path, const std::string& id) -> bool {
+  std::ofstream out{path, std::ios::trunc};
+  if (!out) return false;
+  out << id << '\n';
+  return out.good();
+}
+
 // Append one structured line to broker.log. Format:
 //   ISO8601 TAG key=val key=val ...
 // Also writes to stderr when stderr is a TTY so race-loser invocations
@@ -441,7 +463,15 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (!registry.contains(name)) {
       return json::errorResponse(std::string{"no such topic: "} + name);
     }
-    const auto consumer = req.getOrString("consumer");
+    // C1: single-recipient kinds share one logical cursor — normalize any
+    // client --consumer to "" so peek reads the same cursor delivery/drain
+    // write (see fetch handler for the full rationale).
+    const auto* tcfg = registry.get(name);
+    const bool single_recipient =
+        tcfg != nullptr && (tcfg->kind == std::string{kKindAgentInbox} ||
+                            tcfg->kind == std::string{kKindTuiCommands});
+    const auto consumer =
+        single_recipient ? std::string{} : req.getOrString("consumer");
     const auto limit = req.getOrInt("limit", 0);
 
     const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
@@ -609,12 +639,21 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (!registry.contains(name)) {
       return json::errorResponse(std::string{"no such topic: "} + name);
     }
-    const auto consumer = req.getOrString("consumer");
     const auto* tcfg = registry.get(name);
     const bool is_blackboard =
         tcfg != nullptr && tcfg->kind == std::string{kKindBlackboard};
     const bool is_agent_inbox =
         tcfg != nullptr && tcfg->kind == std::string{kKindAgentInbox};
+    // C1: agent-inbox and tui-commands are single-recipient — delivery and
+    // drain always use the "" (_default) cursor. A fetch/peek that passes
+    // an arbitrary --consumer would open a divergent <consumer>.cursor and
+    // silently split the namespace (the inbox-<name>.cursor + <name>.cursor
+    // drift seen live → lost / re-delivered mail). Normalize to "".
+    const bool single_recipient =
+        is_agent_inbox ||
+        (tcfg != nullptr && tcfg->kind == std::string{kKindTuiCommands});
+    const auto consumer =
+        single_recipient ? std::string{} : req.getOrString("consumer");
 
     const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
     const auto cursor = topic::readCursor(cursor_p);
@@ -714,9 +753,18 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     auto r = log.peek(start, kDrainCap);
     if (!r) return json::errorResponse(r.error().message);
 
+    // C2: idempotency floor. Persist the last msg_id handed to this inbox
+    // and skip any record carrying an already-seen id, so a record can't be
+    // injected twice when the cursor failed to advance (crash window) or a
+    // producer re-enqueues under the same id. This is the consecutive-dup
+    // guard the spec calls for; full set-based dedup is left to the PEL.
+    const auto lastid_p = lastIdPath(cursor_p);
+    const auto last_id = readFileTrimmed(lastid_p);
+
     const auto now = nowMs();
     std::vector<json::Value> out;
     std::int64_t advance_to = -1;
+    std::string delivered_id;
     for (const auto& m : *r) {
       if (m.ttl_ms != 0 &&
           m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now) {
@@ -727,14 +775,20 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         advance_to = m.next_offset;  // stale epoch — drop + advance past
         continue;
       }
+      if (!last_id.empty() && m.id == last_id) {
+        advance_to = m.next_offset;  // already delivered — skip + advance past
+        continue;
+      }
       out.push_back(messageToJson(m));
       advance_to = m.next_offset;
+      delivered_id = m.id;
     }
     if (advance_to >= 0) {
       if (!topic::writeCursor(cursor_p, advance_to)) {
         return json::errorResponse("cursor write failed");
       }
     }
+    if (!delivered_id.empty()) writeLastId(lastid_p, delivered_id);
     resp.insert({"deferred", json::Value::from(false)});
     resp.insert({"messages", json::Value::fromArray(std::move(out))});
     return json::okResponse(std::move(resp));

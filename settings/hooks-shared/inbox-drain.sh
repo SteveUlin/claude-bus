@@ -24,6 +24,22 @@ EVENT="${1:-UserPromptSubmit}"
 NAME="${CLAUDE_BUS_AGENT_ID:-}"
 [ -n "$NAME" ] || exit 0  # not a fleet agent
 
+# Do NOT drain on a post-/compact SessionStart. /compact's additionalContext
+# does not surface to the model (the summarised context never replays it),
+# so draining here would CONSUME the mail (advance the cursor) into a void —
+# the exact post-compaction strand that hung the fleet. Leave the mail
+# QUEUED instead: the broker's doorbell wakes the now-idle agent (its wake
+# gate admits process=Compacting) and the resulting [bus-wake]
+# UserPromptSubmit drains it through a live turn that DOES surface it. This
+# is a delivery-timing skip, distinct from the TTY opt-out policy (still the
+# broker's, via the drain RPC); the hook gates it only because the source
+# rides in on stdin, which the broker never sees.
+if [ "$EVENT" = "SessionStart" ]; then
+  case "$(cat)" in
+    *'"source":"compact"'*) exit 0 ;;
+  esac
+fi
+
 BUS="$(dirname "$0")/../../bin/bus"
 [ -x "$BUS" ] || BUS="bus"
 

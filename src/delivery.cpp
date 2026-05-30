@@ -936,12 +936,13 @@ auto Loop::maybeAutoClear() -> void {
 //   - mail queued past the inbox cursor — nothing to wake for otherwise.
 //   - NOT attached — never wake a pane the human is occupying (attached
 //     defer is legitimate, not a strand).
-//   - READY at the prompt — computeAxes process=Alive + turn=Ready,
-//     which covers Stop, Notification(idle), AND SessionStart
-//     resume/clear (a JUST-RESTARTED agent). The old ad-hoc
-//     "Stop || Notification" check missed the restart case, so a
-//     freshly-relaunched agent with queued mail STRANDED — the prod-test
-//     failure. Excludes booting/compacting/working/stuck/needs-input.
+//   - READY at the prompt — computeAxes process=Alive + turn=Ready
+//     (Stop, Notification(idle), SessionStart resume/clear — a
+//     JUST-RESTARTED agent) OR process=Compacting (SessionStart(compact)
+//     is the last event, i.e. /compact just FINISHED and the agent is
+//     idle). The gate first missed the restart case, then missed
+//     compact — each omission STRANDED a freshly-{relaunched,compacted}
+//     agent with queued mail. Excludes booting/working/stuck/needs-input.
 //   - not mid blocking-op; cooldown elapsed.
 // Strand watchdog: an off-TTY agent whose mail sits undelivered while
 // UNATTENDED past CLAUDE_BUS_STRAND_MS (default 120s) emits a one-shot
@@ -1027,10 +1028,24 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     if (blocking_ops_.contains(name)) continue;
     if (now < wake_next_allowed_ms_[name]) continue;  // cooldown
 
-    // READY at the prompt? Covers Stop / Notification-idle / SessionStart
-    // resume+clear; excludes boot/compact/working/stuck/needs-input.
+    // READY at the prompt? Two wakeable shapes:
+    //  - Alive + Ready: Stop / Notification-idle / SessionStart resume+clear.
+    //  - Compacting: SessionStart(source=compact) is the LAST event. That
+    //    fires when /compact FINISHES (verified: PreCompact precedes it by
+    //    the whole compaction duration), so the agent is then idle at the
+    //    prompt — mid-compaction the last event is PreCompact => Working,
+    //    which stays excluded. A post-compaction idle off-TTY agent MUST be
+    //    woken or its mail strands forever: the SessionStart(compact)
+    //    additionalContext does not surface and no follow-up event comes.
+    //    Pairs with inbox-drain.sh NOT draining on source=compact, so the
+    //    mail is still queued here for this wake to deliver. The earlier
+    //    gate admitted resume/clear but missed compact — the live strand
+    //    that hung bast/elodin/kvothe. Excludes boot/working/stuck/needs-input.
     const auto ax = computeAxes(info, 0, now, pane_exists);
-    if (ax.process != ProcessAxis::Alive || ax.turn != TurnAxis::Ready) {
+    const bool ready_at_prompt =
+        ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready;
+    const bool idle_after_compact = ax.process == ProcessAxis::Compacting;
+    if (!ready_at_prompt && !idle_after_compact) {
       continue;  // not at the prompt yet — retry next scan when ready
     }
 

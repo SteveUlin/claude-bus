@@ -40,12 +40,15 @@ auto mk(std::string event, std::string source = "", std::string tool = "",
   return a;
 }
 
-// The wake gate, verbatim from delivery.cpp:1033 (inverted to a positive
-// "is this agent doorbell-eligible?"). If this drifts from the broker's
-// gate the verification is worthless, so keep them identical.
+// The wake gate, verbatim from delivery.cpp (inverted to a positive "is
+// this agent doorbell-eligible?"). If this drifts from the broker's gate
+// the verification is worthless, so keep them identical. Two wakeable
+// shapes: Alive+Ready (idle at the prompt) OR Compacting (a
+// SessionStart(compact) just FINISHED — also idle at the prompt).
 auto doorbellReady(const AgentInfo& a) -> bool {
   const auto ax = computeAxes(a, /*unread=*/0, kNow, /*pane_exists=*/true);
-  return ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready;
+  return (ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready) ||
+         ax.process == ProcessAxis::Compacting;
 }
 
 }  // namespace
@@ -73,34 +76,36 @@ TEST(doorbell_ready_after_clear) {
   CHECK(doorbellReady(mk("SessionStart", "clear", "", "", ago(2))));
 }
 
-// ─── THE POST-COMPACTION STRAND (the live C4 bug) ───
+// ─── THE POST-COMPACTION STRAND (the live C4 bug) — NOW FIXED ───
 // bast, elodin, AND kvothe all stranded post-compaction this session:
 // mail queued, no doorbell-wake, no strand alarm, human had to TTY-inject.
 //
-// Root cause, code-proven here: /compact emits SessionStart(source=
-// compact), which computeAxes maps to ProcessAxis::Compacting (NOT
-// Alive) — see agent_status.cpp:271-274. The wake gate requires
-// process==Alive, so a post-compaction idle agent is EXCLUDED from the
-// doorbell. agent_status.cpp:273 says it "stays Compacting until a
-// follow-up event arrives" — but an idle off-TTY agent at the prompt
-// fires NO follow-up event, and the one mechanism that would wake it
-// (the doorbell) is gated off. Permanent strand until a human intervenes.
+// Root cause: /compact emits SessionStart(source=compact), which
+// computeAxes maps to ProcessAxis::Compacting (NOT Alive) — see
+// agent_status.cpp:271-274. SessionStart(compact) fires when compaction
+// FINISHES (PreCompact precedes it by the whole compaction duration), so
+// the agent is then idle at the prompt — but the old gate required
+// process==Alive and excluded Compacting, so the doorbell never rang and
+// the mail stranded (no follow-up event ever comes for an idle agent).
 //
-// This asserts the CURRENT (broken) behavior so the gap is executable
-// and pinned. When the fix lands (compact made wake-eligible once the
-// summary completes, or the gate widened to admit Compacting-with-mail),
-// FLIP this to CHECK(doorbellReady(...)) — that flip IS the fix's
-// acceptance test.
-TEST(doorbell_strands_post_compaction_REPRODUCES_BUG) {
+// The fix admits Compacting to the wake gate (delivery.cpp), so a
+// post-compaction idle agent IS woken. (Paired with inbox-drain.sh no
+// longer draining on source=compact, so the mail is still queued for that
+// wake to deliver — the gate alone can't redeliver mail the SessionStart
+// drain already consumed into a context that never surfaces it.) This was
+// the acceptance assertion: it FLIPPED from !doorbellReady to doorbellReady
+// when the fix landed.
+TEST(doorbell_wakes_post_compaction_idle) {
   const auto compacted = mk("SessionStart", "compact", "", "", ago(2));
-  // Pinned: the agent is classified Compacting, not Alive...
+  // Still classified Compacting — the monitor display is intentionally
+  // unchanged (the agent did just compact)...
   CHECK_EQ(axisName(computeAxes(compacted, 0, kNow, true).process),
            std::string_view{"compacting"});
-  // ...so the doorbell gate rejects it and the mail strands.
-  CHECK(!doorbellReady(compacted));
-  // Age does not rescue it: an hour later it is still Compacting, still
-  // unwakeable. (Stays until a real follow-up event that never comes.)
-  CHECK(!doorbellReady(mk("SessionStart", "compact", "", "", ago(3600))));
+  // ...but the wake gate now ADMITS it, so the doorbell rings and the
+  // queued mail delivers. No longer a strand.
+  CHECK(doorbellReady(compacted));
+  // Holds regardless of age — Compacting is always post-compaction-idle.
+  CHECK(doorbellReady(mk("SessionStart", "compact", "", "", ago(3600))));
 }
 
 // ─── Other negative cases: NOT at the prompt → correctly not woken ───

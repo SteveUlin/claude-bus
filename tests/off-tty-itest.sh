@@ -112,12 +112,34 @@ audit="$("$BUS" msg peek audit --limit 200 2>/dev/null)"
 echo "$audit" | grep -q 'doorbell-strand'; ck "$?" 1 "no doorbell-strand audit under healthy delivery"
 echo "$audit" | grep -q 'protocol:.*doorbell\b'; ck "$?" 1 "no doorbell wake fired (no live pane in sandbox)"
 
-# TODO(C1, kvothe — not yet landed): once C1 lands its cursor-state
-# assertions, add the strand-clock reproduction here: enqueue, hold a
-# pane unattended past CLAUDE_BUS_STRAND_MS, and assert the inbox cursor
-# has NOT advanced (mail genuinely undelivered) at the moment the
-# doorbell-strand alarm fires — distinguishing a true strand from a
-# drained-but-lost record. Needs the Option-B zellij-pane harness.
+# TODO(C1, kvothe — landed): now that C1's cursor-state assertions are in,
+# a follow-up could add the strand-clock reproduction here: enqueue, hold a
+# pane unattended past CLAUDE_BUS_STRAND_MS, and assert the inbox cursor has
+# NOT advanced (mail genuinely undelivered) at the moment the doorbell-strand
+# alarm fires — distinguishing a true strand from a drained-but-lost record.
+# Needs the Option-B zellij-pane harness (paneId is headless-blind here).
+
+note "10. compact-SessionStart does NOT consume mail (the strand fix)"
+# /compact's additionalContext never surfaces, so inbox-drain.sh must SKIP
+# draining on SessionStart(source=compact) — leaving the mail QUEUED for the
+# doorbell (which now wakes a Compacting agent) to deliver via a live turn.
+# Resume/clear SessionStarts must still drain. Drives the hook directly.
+HOOK="$(cd "$(dirname "$0")/.." && pwd)/settings/hooks-shared/inbox-drain.sh"
+export CLAUDE_BUS_AGENT_ID=compactee
+"$BUS" msg mail compactee "must survive /compact" >/dev/null
+printf '%s' '{"hook_event_name":"SessionStart","source":"compact"}' \
+  | "$HOOK" SessionStart >/dev/null 2>&1
+hc=$?
+surv="$("$BUS" msg drain compactee UserPromptSubmit)"
+echo "$surv" | grep -q 'must survive /compact'
+ck "$?" 0 "compact SessionStart skips drain — mail still queued"
+ck "$hc" 0 "compact-skip exits clean"
+"$BUS" msg mail compactee "resume should deliver" >/dev/null
+rout="$(printf '%s' '{"hook_event_name":"SessionStart","source":"resume"}' \
+  | "$HOOK" SessionStart 2>/dev/null)"
+echo "$rout" | grep -q 'resume should deliver'
+ck "$?" 0 "resume SessionStart still drains (skip is compact-only)"
+unset CLAUDE_BUS_AGENT_ID
 
 echo
 if [ "$fail" = 0 ]; then echo -e "\033[1mALL OFF-TTY INTEGRATION CHECKS PASSED\033[0m"; else

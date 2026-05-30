@@ -175,4 +175,19 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role auri auri"
         }
     }
+
+    // intake — a non-blocking task producer, NOT an agent. sulin switches
+    // here to queue a task into a peer's inbox (default: comms) WITHOUT
+    // interrupting comms mid-turn; the broker delivers it when the target
+    // next idles. The pane runs bin/intake (a pure producer over
+    // `bus msg mail`; type a task + Enter, "@name task" targets a peer).
+    // End tab so existing indices (bast/kvothe/elodin/auri) stay stable —
+    // any later fleet.kdl tab addition (e.g. broker-launch determinism)
+    // must land AFTER this one. Quit intake to get an "Enter to reopen"
+    // prompt; Ctrl-D there drops to a shell so the pane stays usable.
+    agent_tab name="intake" {
+        pane name="intake" command="bash" {
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; while :; do \"$B/bin/intake\"; printf '\\n\\033[2m[intake exited — Enter to reopen]\\033[0m '; read -r _ || exec bash; done"
+        }
+    }
 }

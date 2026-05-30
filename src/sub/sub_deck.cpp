@@ -14,6 +14,7 @@
 
 #include "../agent_status.h"
 #include "../broker.h"
+#include "../event.h"
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../signals.h"
@@ -71,34 +72,6 @@ auto computeStateFromLabel(std::string_view label) -> State {
   if (label == "ENDED") return State::Ended;
   if (label == "GONE") return State::Gone;
   return State::New;
-}
-
-auto extractStr(std::string_view line, std::string_view key) -> std::string {
-  std::string pat;
-  pat.reserve(key.size() + 4);
-  pat += '"';
-  pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  std::size_t curr = pos + pat.size();
-  std::string out;
-  while (curr < line.size()) {
-    if (line[curr] == '"') break;
-    if (line[curr] == '\\' && curr + 1 < line.size()) {
-      const char n = line[curr + 1];
-      if (n == '"' || n == '\\' || n == '/') out += n;
-      else if (n == 'n') out += '\n';
-      else if (n == 'r') out += '\r';
-      else if (n == 't') out += '\t';
-      else out += n;
-      curr += 2;
-    } else {
-      out += line[curr];
-      ++curr;
-    }
-  }
-  return out;
 }
 
 auto readFileFirstLine(std::string_view path) -> std::string {
@@ -208,15 +181,12 @@ auto latestTails() -> std::map<std::string, AgentTail> {
   std::string line;
   if (start > 0) std::getline(in, line);
   while (std::getline(in, line)) {
-    auto agent = extractStr(line, "agent");
-    if (agent.empty()) continue;
-    auto& slot = out[agent];
-    auto cwd = extractStr(line, "cwd");
-    if (!cwd.empty()) slot.cwd = std::move(cwd);
-    if (line.find("\"notification_type\":\"permission_prompt\"") !=
-        std::string::npos) {
-      auto msg = extractStr(line, "message");
-      if (!msg.empty()) slot.ask = std::move(msg);
+    auto ev = parseEvent(line);
+    if (!ev || ev->agent.empty()) continue;
+    auto& slot = out[ev->agent];
+    if (!ev->cwd.empty()) slot.cwd = std::move(ev->cwd);
+    if (ev->notification_type == "permission_prompt" && !ev->message.empty()) {
+      slot.ask = std::move(ev->message);
     }
   }
   return out;

@@ -24,6 +24,7 @@
 
 #include "../broker.h"
 #include "../bus.h"
+#include "../event.h"
 #include "../signals.h"
 #include "../state_paths.h"
 #include "../sub.h"
@@ -165,37 +166,6 @@ auto shiftIso(std::string_view at_iso, std::int64_t dur_ms) -> std::string {
                    milliseconds{ms_val + dur_ms});
 }
 
-// JSON string-value extractor with the common-escape unescape pass.
-// Matches the helper in sub_events.cpp — agents' prompt bodies carry
-// embedded \" and \n that we want decoded.
-auto extractStr(std::string_view line, std::string_view key) -> std::string {
-  std::string pat;
-  pat.reserve(key.size() + 4);
-  pat += '"';
-  pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  std::size_t curr = pos + pat.size();
-  std::string out;
-  while (curr < line.size()) {
-    if (line[curr] == '"') break;
-    if (line[curr] == '\\' && curr + 1 < line.size()) {
-      const char next = line[curr + 1];
-      if (next == '"' || next == '\\' || next == '/') out += next;
-      else if (next == 'n') out += '\n';
-      else if (next == 'r') out += '\r';
-      else if (next == 't') out += '\t';
-      else out += next;
-      curr += 2;
-    } else {
-      out += line[curr];
-      curr += 1;
-    }
-  }
-  return out;
-}
-
 // First-line-trimmed, single-line preview of a multi-line string.
 auto firstLine(std::string_view s, std::size_t max_chars = 50) -> std::string {
   auto nl = s.find('\n');
@@ -266,74 +236,67 @@ auto sliceTime(std::string_view ts) -> std::string {
   return std::string{ts};
 }
 
-// Build a LogLine from a JSONL row, or nullopt if filtered out.
-auto buildLine(std::string_view line) -> std::optional<LogLine> {
-  const auto event = extractStr(line, "event");
-  if (event.empty()) return std::nullopt;
-  const auto agent = extractStr(line, "agent");
-  if (agent.empty()) return std::nullopt;
-  const auto ts = extractStr(line, "ts");
+// Build a LogLine from a parsed event, or nullopt if filtered out. `raw`
+// is the original JSONL line — kept only for the coarse status-substring
+// check on PreToolUse, which inspects a deeply-nested tool_input field.
+auto buildLine(const Event& e, std::string_view raw) -> std::optional<LogLine> {
+  if (e.event.empty() || e.agent.empty()) return std::nullopt;
 
   LogLine ll;
-  ll.time = sliceTime(ts);
-  ll.agent = agent;
+  ll.time = sliceTime(e.ts);
+  ll.agent = e.agent;
 
-  if (event == "SessionStart") {
+  if (e.event == "SessionStart") {
     ll.kind = "started";
     ll.glyph = kStyleStart.glyph;
     ll.color = kStyleStart.color;
-    const auto source = extractStr(line, "source");
-    if (!source.empty()) ll.body = source;
-  } else if (event == "UserPromptSubmit") {
+    if (!e.source.empty()) ll.body = e.source;
+  } else if (e.event == "UserPromptSubmit") {
     ll.kind = "received";
     ll.glyph = kStyleReceived.glyph;
     ll.color = kStyleReceived.color;
-    const auto prompt = extractStr(line, "prompt");
-    if (!prompt.empty()) ll.body = firstLine(prompt);
-  } else if (event == "Stop") {
+    if (!e.prompt.empty()) ll.body = firstLine(e.prompt);
+  } else if (e.event == "Stop") {
     ll.kind = "finished";
     ll.glyph = kStyleFinished.glyph;
     ll.color = kStyleFinished.color;
     ll.body_color = kDim;
-    const auto last = extractStr(line, "last_assistant_message");
-    if (!last.empty()) ll.body = firstLine(last);
-    else ll.body = resolveY(agent);  // fall back to focus/title
-  } else if (event == "Notification") {
-    const auto nt = extractStr(line, "notification_type");
-    if (nt == "idle_prompt") {
+    if (!e.last_assistant_message.empty())
+      ll.body = firstLine(e.last_assistant_message);
+    else ll.body = resolveY(e.agent);  // fall back to focus/title
+  } else if (e.event == "Notification") {
+    if (e.notification_type == "idle_prompt") {
       ll.kind = "idle";
       ll.glyph = kStyleIdle.glyph;
       ll.color = kStyleIdle.color;
-    } else if (nt == "permission_prompt") {
+    } else if (e.notification_type == "permission_prompt") {
       ll.kind = "needs input";
       ll.glyph = kStyleNeedsInput.glyph;
       ll.color = kStyleNeedsInput.color;
     } else {
       return std::nullopt;
     }
-  } else if (event == "SessionEnd") {
+  } else if (e.event == "SessionEnd") {
     ll.kind = "ended";
     ll.glyph = kStyleEnded.glyph;
     ll.color = kStyleEnded.color;
     ll.body_color = kDim;
-    const auto reason = extractStr(line, "reason");
-    if (!reason.empty()) ll.body = reason;
-  } else if (event == "PreToolUse") {
-    const auto tool = extractStr(line, "tool_name");
-    if (tool != "TaskUpdate" && tool != "TaskCreate" &&
-        tool != "TodoWrite") {
+    if (!e.reason.empty()) ll.body = e.reason;
+  } else if (e.event == "PreToolUse") {
+    if (e.tool_name != "TaskUpdate" && e.tool_name != "TaskCreate" &&
+        e.tool_name != "TodoWrite") {
       return std::nullopt;
     }
-    // Coarse "is this an in-progress transition?" check on the raw
-    // line. Cheap; aligns with what the focus-write hook already does
-    // for the file we read from below.
-    if (line.find("\"status\":\"in_progress\"") == std::string::npos) {
+    // Coarse "is this an in-progress transition?" check on the raw line —
+    // the status lives deep in tool_input; a substring probe is enough and
+    // matches what the focus-write hook does for the file we read below.
+    if (raw.find("\"status\":\"in_progress\"") == std::string_view::npos) {
       return std::nullopt;
     }
     ll.kind = "working";
     ll.glyph = kStyleWorking.glyph;
     ll.color = kStyleWorking.color;
-    ll.body = resolveY(agent);  // title > focus
+    ll.body = resolveY(e.agent);  // title > focus
   } else {
     return std::nullopt;
   }
@@ -376,13 +339,12 @@ auto drainStream(std::ifstream& in, std::string_view filter_agent,
       break;
     }
     pos = in.tellg();
-    if (!filter_agent.empty()) {
-      if (extractStr(line, "agent") != filter_agent) continue;
-    }
-    const auto ts = extractStr(line, "ts");
-    if (!since_iso.empty() && !ts.empty() && ts < since_iso) continue;
-    if (!until_iso.empty() && !ts.empty() && ts > until_iso) continue;
-    auto built = buildLine(line);
+    auto ev = parseEvent(line);
+    if (!ev) continue;
+    if (!filter_agent.empty() && ev->agent != filter_agent) continue;
+    if (!since_iso.empty() && !ev->ts.empty() && ev->ts < since_iso) continue;
+    if (!until_iso.empty() && !ev->ts.empty() && ev->ts > until_iso) continue;
+    auto built = buildLine(*ev, line);
     if (!built) continue;
     printLine(*built);
   }

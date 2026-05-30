@@ -1,6 +1,6 @@
 #include "agent_status.h"
 
-#include "json_min.h"
+#include "event.h"
 #include "pane.h"
 #include "state_paths.h"
 
@@ -11,35 +11,17 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace bus {
 
 namespace {
-
-// Parse "YYYY-MM-DDTHH:MM:SS.mmmZ" to ms since epoch (UTC). 0 on failure.
-auto parseIso8601Ms(std::string_view s) -> std::int64_t {
-  int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0, ms = 0;
-  if (std::sscanf(s.data(), "%4d-%2d-%2dT%2d:%2d:%2d.%3d", &Y, &M, &D, &h, &m,
-                  &sec, &ms) != 7) {
-    return 0;
-  }
-  std::tm tm{};
-  tm.tm_year = Y - 1900;
-  tm.tm_mon = M - 1;
-  tm.tm_mday = D;
-  tm.tm_hour = h;
-  tm.tm_min = m;
-  tm.tm_sec = sec;
-  const std::time_t t = ::timegm(&tm);
-  return static_cast<std::int64_t>(t) * 1000 + ms;
-}
 
 auto captureCommand(const std::string& cmd) -> std::string {
   FILE* pipe = ::popen(cmd.c_str(), "r");
@@ -341,40 +323,25 @@ auto readAgents(const std::string& log_path,
   std::ifstream in{log_path};
   if (!in) return out;
 
-  // Each line is `{ts,session,agent,pane,event,payload:{…}}`. The
-  // top-level fields (agent/event/ts) MUST come from the document root —
-  // a flat substring scan misread a payload-nested `"agent"`/`"event"`
-  // (e.g. inside a logged tool_input) as the record's own, silently
-  // attributing one agent's event to another. The per-turn fields
-  // (tool_name/source/notification_type/transcript_path) live inside
-  // `payload`, so read them from that object, not the root.
+  // One typed parse per line (parseEvent reads top-level agent/event/ts
+  // from the document root and the per-turn fields from `payload`, so a
+  // payload-nested `"agent"`/`"event"` can no longer be misattributed —
+  // subsumes C3). The latest event per agent wins.
   std::string line;
   while (std::getline(in, line)) {
     if (line.empty()) continue;
-    auto v = json::parse(line);
-    if (!v || !v->isObject()) continue;
+    auto ev = parseEvent(line);
+    if (!ev) continue;
+    if (ev->agent.empty() || ev->agent == "unknown") continue;
+    if (!filter.empty() && !filter.contains(ev->agent)) continue;
 
-    auto agent = v->getOrString("agent");
-    if (agent.empty() || agent == "unknown") continue;
-    if (!filter.empty() && !filter.contains(agent)) continue;
-
-    const auto* payload = v->get("payload");
-    const bool has_payload = payload != nullptr && payload->isObject();
-
-    auto& info = out[agent];
-    info.last.event = v->getOrString("event");
-    // SessionStart payload carries source ("startup"|"resume"|"compact");
-    // Notification payloads carry notification_type
-    // ("idle_prompt"|"permission_prompt"); PreToolUse carries tool_name;
-    // every event carries transcript_path (names the live session for the
-    // token-scan watcher). All nested under payload.
-    info.last.tool = has_payload ? payload->getOrString("tool_name") : "";
-    info.last.source = has_payload ? payload->getOrString("source") : "";
-    info.last.notification_type =
-        has_payload ? payload->getOrString("notification_type") : "";
-    info.last.transcript_path =
-        has_payload ? payload->getOrString("transcript_path") : "";
-    info.last.ts_ms = parseIso8601Ms(v->getOrString("ts"));
+    auto& info = out[ev->agent];
+    info.last.event = std::move(ev->event);
+    info.last.tool = std::move(ev->tool_name);
+    info.last.source = std::move(ev->source);
+    info.last.notification_type = std::move(ev->notification_type);
+    info.last.transcript_path = std::move(ev->transcript_path);
+    info.last.ts_ms = ev->ts_ms;
   }
   return out;
 }

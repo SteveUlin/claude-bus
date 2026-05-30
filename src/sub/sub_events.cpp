@@ -7,6 +7,7 @@
 
 #include "../bus.h"
 #include "../broker.h"
+#include "../event.h"
 #include "../topic_log.h"
 #include "../signals.h"
 #include "../sub.h"
@@ -36,56 +37,20 @@ namespace {
 volatile std::sig_atomic_t gStopEvents = 0;
 auto onSignalEvents(int) -> void { gStopEvents = 1; }
 
-// Pull `"key":"value"` from a JSONL line. Naive — no escape handling.
-// log-event.sh writes plain ASCII for the fields we look up (ts,
-// agent, event, tool_name, prompt). A real parser would handle
-// escapes; we don't need it here.
-auto extractStr(std::string_view line, std::string_view key) -> std::string {
-  std::string pat;
-  pat.reserve(key.size() + 4);
-  pat += '"';
-  pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  std::size_t curr = pos + pat.size();
-  std::string out;
-  while (curr < line.size()) {
-    if (line[curr] == '"') break;
-    if (line[curr] == '\\' && curr + 1 < line.size()) {
-      char next = line[curr + 1];
-      if (next == '"' || next == '\\' || next == '/') out += next;
-      else if (next == 'n') out += '\n';
-      else if (next == 'r') out += '\r';
-      else if (next == 't') out += '\t';
-      else out += next; // fallback
-      curr += 2;
-    } else {
-      out += line[curr];
-      curr += 1;
-    }
-  }
-  return out;
-}
-
 // One-line formatted summary: HH:MM:SS.mmm  agent  event[:tool]  detail
-auto formatLine(std::string_view jsonl) -> std::string {
-  const auto ts = extractStr(jsonl, "ts");
-  const auto agent = extractStr(jsonl, "agent");
-  const auto event = extractStr(jsonl, "event");
-  const auto tool = extractStr(jsonl, "tool_name");
-
+auto formatLine(const Event& e) -> std::string {
   // ts looks like "2026-05-26T08:32:06.123Z" — slice HH:MM:SS.mmm.
-  std::string ts_short = ts.size() >= 23 ? ts.substr(11, 12) : ts;
+  std::string ts_short = e.ts.size() >= 23 ? e.ts.substr(11, 12) : e.ts;
 
-  std::string event_col = event;
-  if (!tool.empty()) {
+  std::string event_col = e.event;
+  if (!e.tool_name.empty()) {
     event_col += ":";
-    event_col += tool;
+    event_col += e.tool_name;
   }
 
   std::string detail;
-  if (auto prompt = extractStr(jsonl, "prompt"); !prompt.empty()) {
+  if (!e.prompt.empty()) {
+    std::string prompt = e.prompt;
     constexpr std::size_t kMax = 60;
     if (prompt.size() > kMax) {
       prompt.resize(kMax);
@@ -104,7 +69,7 @@ auto formatLine(std::string_view jsonl) -> std::string {
   std::string out;
   out += pad(ts_short, 13);
   out += "  ";
-  out += pad(agent, 14);
+  out += pad(e.agent, 14);
   out += "  ";
   out += pad(event_col, 22);
   if (!detail.empty()) {
@@ -130,13 +95,11 @@ auto drainStream(std::ifstream& in, std::string_view filter_agent,
     }
     pos = in.tellg();
 
-    if (!filter_agent.empty()) {
-      if (extractStr(line, "agent") != filter_agent) continue;
-    }
-    if (!since.empty()) {
-      if (extractStr(line, "ts") < since) continue;
-    }
-    std::println("{}", formatLine(line));
+    auto ev = parseEvent(line);
+    if (!ev) continue;
+    if (!filter_agent.empty() && ev->agent != filter_agent) continue;
+    if (!since.empty() && ev->ts < since) continue;
+    std::println("{}", formatLine(*ev));
   }
   std::fflush(stdout);
 }

@@ -19,6 +19,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 # the `bus_tests` unit suite so the tested code IS the shipped code.
 # (tail_reader is header-only; computeAxes lives in bus_agent_status.)
 add_library(bus_core STATIC
+    src/event.cpp
     src/json_min.cpp
     src/topic_log.cpp
 )
@@ -75,6 +76,7 @@ enable_testing()
 add_executable(bus_tests
     tests/unit/harness.cpp
     tests/unit/test_json.cpp
+    tests/unit/test_event.cpp
     tests/unit/test_topic_log.cpp
     tests/unit/test_agent_status.cpp
     tests/unit/test_doorbell_readiness.cpp

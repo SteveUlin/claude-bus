@@ -98,38 +98,47 @@ fi
 [ -d "$workspace_dir" ] || workspace_dir="$BUS_ROOT"
 cd "$workspace_dir"
 
-# Point this workspace's Claude Code project config at the single
-# canonical file. settings/claude-settings.json is tracked + public;
-# .claude/settings.json is gitignored, so this symlink is invisible to
-# jj and an edit to the canonical file applies to every workspace at
-# once — no per-workspace commit + sync. ln -sfn is idempotent and
-# force-replaces a stale regular-file copy left by an older checkout, so
-# the symlink self-heals on every launch. Guarded on the canonical
-# existing so a pre-migration checkout (no canonical yet) keeps its own
-# .claude/settings.json instead of getting a dangling link.
-canonical_settings="$BUS_ROOT/settings/claude-settings.json"
-if [ -e "$canonical_settings" ]; then
+# --- Deterministic config propagation (1b) -------------------------------
+# Materialize this workspace's Claude Code config from LANDED main on every
+# launch, into gitignored paths. This REPLACES the old symlink-to-default-
+# checkout, which went stale whenever the default workspace lagged main
+# (the recurring "config push doesn't reach agents" bug).
+#
+# Source of truth = jj's LOCAL main bookmark, read with --ignore-working-
+# copy: that skips the working-copy snapshot, so it works even though this
+# (or any) workspace is "stale" — workspaces go stale constantly under
+# concurrent ops, and a plain `jj`/symlink-to-a-checkout inherits that
+# staleness. Reading main directly does not. Config therefore == landed
+# main by construction; it propagates on land + relaunch, with zero
+# dependence on reconciling the default tree.
+#
+# Resolve main's commit once (staleness-immune), then:
+#  - claude-settings.json: a single `jj file show` into .claude/.
+#  - settings/hooks-shared/*: `git archive` the subtree by that commit id
+#    (one bulk export preserving examples/; reads the git object by sha, so
+#    it's independent of whether git refs track jj bookmarks). chmod +x
+#    since archive content is extracted mode-less here.
+# Both targets are gitignored (/.claude/settings.json, /settings/hooks), so
+# jj never sees these materialized copies. Touches only this workspace.
+main_rev=$(jj --ignore-working-copy log --no-graph -r main -T 'commit_id' 2>/dev/null)
+if [ -n "$main_rev" ]; then
     mkdir -p "$workspace_dir/.claude"
-    ln -sfn "$canonical_settings" "$workspace_dir/.claude/settings.json"
+    if ! jj --ignore-working-copy file show -r "$main_rev" settings/claude-settings.json \
+            > "$workspace_dir/.claude/settings.json" 2>/dev/null; then
+        echo "agent-launch: WARN failed to materialize claude-settings.json from main" >&2
+    fi
+    rm -rf "$workspace_dir/settings/hooks"
+    mkdir -p "$workspace_dir/settings/hooks"
+    if git --git-dir="$BUS_ROOT/.git" archive "$main_rev" settings/hooks-shared 2>/dev/null \
+            | tar -x --strip-components=2 -C "$workspace_dir/settings/hooks" 2>/dev/null; then
+        chmod +x "$workspace_dir/settings/hooks"/*.sh 2>/dev/null
+    else
+        echo "agent-launch: WARN failed to materialize settings/hooks from main" >&2
+    fi
+else
+    echo "agent-launch: WARN could not resolve main; config not refreshed" >&2
 fi
-
-# Same pattern for the hook SCRIPTS. The canonical scripts are tracked at
-# settings/hooks-shared/; each workspace's settings/hooks is a gitignored
-# symlink to it, so the $CLAUDE_PROJECT_DIR/settings/hooks/... references
-# in claude-settings.json resolve to the shared canonical and a NEW hook
-# is live in every workspace at once (no per-workspace copy to go stale).
-# A stale checkout may still have a real tracked settings/hooks dir — a
-# directory won't ln-replace cleanly, so drop it first (its files moved to
-# hooks-shared on main, so the deletion is consistent once the workspace
-# reconciles). An existing correct symlink is just refreshed. Guarded on
-# the canonical existing so a pre-migration checkout keeps its own dir.
-canonical_hooks="$BUS_ROOT/settings/hooks-shared"
-ws_hooks="$workspace_dir/settings/hooks"
-if [ -d "$canonical_hooks" ]; then
-    [ -L "$ws_hooks" ] || rm -rf "$ws_hooks"
-    mkdir -p "$workspace_dir/settings"
-    ln -sfn "$canonical_hooks" "$ws_hooks"
-fi
+# -------------------------------------------------------------------------
 
 # claude-code encodes the project's absolute path into the session
 # storage dir by replacing '/', '.', and '_' all with '-'. The encoded

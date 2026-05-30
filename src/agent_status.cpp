@@ -1,5 +1,6 @@
 #include "agent_status.h"
 
+#include "json_min.h"
 #include "pane.h"
 #include "state_paths.h"
 
@@ -17,43 +18,10 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <utility>
 
 namespace bus {
 
 namespace {
-
-// Pull "key":"value" out of a JSONL line. No escape handling — the values
-// log-event.sh writes are plain ASCII for the fields we care about
-// (ts, agent, event, tool_name). A real parser would handle escapes; the
-// log writer guarantees we never have them.
-auto extractField(std::string_view line, std::string_view key) -> std::string {
-  std::string pat;
-  pat.reserve(key.size() + 4);
-  pat += '"';
-  pat += key;
-  pat += "\":\"";
-  const auto pos = line.find(pat);
-  if (pos == std::string_view::npos) return {};
-  std::size_t curr = pos + pat.size();
-  std::string out;
-  while (curr < line.size()) {
-    if (line[curr] == '"') break;
-    if (line[curr] == '\\' && curr + 1 < line.size()) {
-      char next = line[curr + 1];
-      if (next == '"' || next == '\\' || next == '/') out += next;
-      else if (next == 'n') out += '\n';
-      else if (next == 'r') out += '\r';
-      else if (next == 't') out += '\t';
-      else out += next; // fallback
-      curr += 2;
-    } else {
-      out += line[curr];
-      curr += 1;
-    }
-  }
-  return out;
-}
 
 // Parse "YYYY-MM-DDTHH:MM:SS.mmmZ" to ms since epoch (UTC). 0 on failure.
 auto parseIso8601Ms(std::string_view s) -> std::int64_t {
@@ -373,33 +341,40 @@ auto readAgents(const std::string& log_path,
   std::ifstream in{log_path};
   if (!in) return out;
 
+  // Each line is `{ts,session,agent,pane,event,payload:{…}}`. The
+  // top-level fields (agent/event/ts) MUST come from the document root —
+  // a flat substring scan misread a payload-nested `"agent"`/`"event"`
+  // (e.g. inside a logged tool_input) as the record's own, silently
+  // attributing one agent's event to another. The per-turn fields
+  // (tool_name/source/notification_type/transcript_path) live inside
+  // `payload`, so read them from that object, not the root.
   std::string line;
   while (std::getline(in, line)) {
-    auto agent = extractField(line, "agent");
+    if (line.empty()) continue;
+    auto v = json::parse(line);
+    if (!v || !v->isObject()) continue;
+
+    auto agent = v->getOrString("agent");
     if (agent.empty() || agent == "unknown") continue;
     if (!filter.empty() && !filter.contains(agent)) continue;
-    auto event = extractField(line, "event");
-    const auto ts = extractField(line, "ts");
-    auto tool = extractField(line, "tool_name");
-    // SessionStart payload carries source: "startup" | "resume" |
-    // "compact" — we only care about compact for the Compacting
-    // state, but capture it always for clarity.
-    auto source = extractField(line, "source");
-    // Notification payloads carry "notification_type": "idle_prompt" /
-    // "permission_prompt". Drives the post-resume IDLE-vs-BootStuck
-    // distinction in computeState.
-    auto notif = extractField(line, "notification_type");
-    // transcript_path lives in payload; extractField does a flat
-    // substring search so nesting is fine. Drives the token-scan
-    // watcher (delivery.cpp) — the latest event names the live session.
-    auto transcript = extractField(line, "transcript_path");
+
+    const auto* payload = v->get("payload");
+    const bool has_payload = payload != nullptr && payload->isObject();
+
     auto& info = out[agent];
-    info.last.event = std::move(event);
-    info.last.tool = std::move(tool);
-    info.last.source = std::move(source);
-    info.last.notification_type = std::move(notif);
-    info.last.transcript_path = std::move(transcript);
-    info.last.ts_ms = parseIso8601Ms(ts);
+    info.last.event = v->getOrString("event");
+    // SessionStart payload carries source ("startup"|"resume"|"compact");
+    // Notification payloads carry notification_type
+    // ("idle_prompt"|"permission_prompt"); PreToolUse carries tool_name;
+    // every event carries transcript_path (names the live session for the
+    // token-scan watcher). All nested under payload.
+    info.last.tool = has_payload ? payload->getOrString("tool_name") : "";
+    info.last.source = has_payload ? payload->getOrString("source") : "";
+    info.last.notification_type =
+        has_payload ? payload->getOrString("notification_type") : "";
+    info.last.transcript_path =
+        has_payload ? payload->getOrString("transcript_path") : "";
+    info.last.ts_ms = parseIso8601Ms(v->getOrString("ts"));
   }
   return out;
 }

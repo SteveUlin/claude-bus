@@ -4,6 +4,8 @@
 #include "dispatch.h"
 #include "json_min.h"
 #include "pane.h"
+#include "retention.h"
+#include "tail_reader.h"
 #include "topic_log.h"
 #include "tty_policy.h"
 
@@ -15,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -24,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -56,6 +60,55 @@ auto fileSize(const std::string& path) -> std::int64_t {
   struct stat st;
   if (::stat(path.c_str(), &st) != 0) return 0;
   return static_cast<std::int64_t>(st.st_size);
+}
+
+// Read a whole file into a byte string. Empty on miss/error.
+auto readFileBytes(const std::string& path) -> std::string {
+  std::ifstream in{path, std::ios::binary};
+  if (!in) return {};
+  std::ostringstream buf;
+  buf << in.rdbuf();
+  return buf.str();
+}
+
+// Atomically replace `path` with `content` (tmp + rename). pid-suffixed
+// tmp so two broker instances (shouldn't happen — singleton) can't collide.
+auto atomicReplace(const std::string& path, std::string_view content) -> bool {
+  const std::string tmp =
+      path + ".trim." + std::to_string(::getpid());
+  {
+    std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
+    if (!out) return false;
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!out) {
+      std::error_code ec;
+      fs::remove(tmp, ec);
+      return false;
+    }
+  }
+  std::error_code ec;
+  fs::rename(tmp, path, ec);
+  if (ec) {
+    fs::remove(tmp, ec);
+    return false;
+  }
+  return true;
+}
+
+// Byte-slice a topic log's head: keep the 64-byte file header verbatim
+// (preserves created_ms etc.) + every byte at/after cut_offset, preserving
+// record bytes exactly (no re-append / restamp). Returns true on rewrite.
+auto trimTopicLogHead(const std::string& path, std::int64_t cut_offset,
+                      std::int64_t header_bytes) -> bool {
+  const auto bytes = readFileBytes(path);
+  const auto size = static_cast<std::int64_t>(bytes.size());
+  if (cut_offset <= header_bytes || cut_offset >= size) return false;
+  std::string out;
+  out.reserve(static_cast<std::size_t>(header_bytes + (size - cut_offset)));
+  out.append(bytes, 0, static_cast<std::size_t>(header_bytes));
+  out.append(bytes, static_cast<std::size_t>(cut_offset),
+             static_cast<std::size_t>(size - cut_offset));
+  return atomicReplace(path, out);
 }
 
 // Write a small body to a pane, holding the per-pane flock. Returns
@@ -231,26 +284,21 @@ auto Loop::forgetInflight(const std::string& msg_id)
 
 auto Loop::scanEvents() -> void {
   const std::string log = cfg_.state_dir + "/events.jsonl";
-  const auto size = fileSize(log);
+  bus::TailReader reader{log};
 
   if (events_offset_ < 0) {
-    events_offset_ = size;  // first tick: seek to EOF, ignore history
+    reader.seekToEnd();  // first tick: skip history, ack only new events
+    events_offset_ = reader.offset();
     return;
   }
-  if (size <= events_offset_) return;
+  reader.setOffset(events_offset_);
 
-  std::ifstream in{log};
-  if (!in) return;
-  in.seekg(events_offset_);
-
-  std::string line;
-  auto valid_pos = in.tellg();
-  while (std::getline(in, line)) {
-    if (in.eof()) {
-      break; // partial line, wait for the rest
-    }
-    valid_pos = in.tellg();
-
+  // poll() returns only whole, newline-terminated lines and never
+  // advances past a torn trailing record; on a shrink (events.jsonl
+  // rotation, see maybeTrimLogs) it resets to the file start. The
+  // offset advance + partial-line guard the inline copy hand-rolled
+  // now live in one tested component.
+  for (auto& line : reader.poll()) {
     if (line.empty()) continue;
     auto v = json::parse(line);
     if (!v || !v->isObject()) continue;
@@ -396,7 +444,7 @@ auto Loop::scanEvents() -> void {
     removeInflight(oldest_id);
     in_flight_.erase(oldest_id);
   }
-  events_offset_ = static_cast<std::int64_t>(valid_pos);
+  events_offset_ = reader.offset();
 }
 
 auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
@@ -784,6 +832,7 @@ auto Loop::tick() -> void {
   maybeAutoClear();
   maybeScanTokens();
   maybeWakeIdleOffTty();
+  maybeTrimLogs();
   for (const auto& cfg : registry_.list()) {
     if (cfg.kind == std::string{kKindAgentInbox}) dispatchAgentInbox(cfg);
     else if (cfg.kind == std::string{kKindTuiCommands})
@@ -1116,38 +1165,28 @@ auto Loop::maybeScanTokens() -> void {
       sc.last_tokens = -1;
     }
 
-    // Incremental tail read: parse only assistant lines appended since
-    // the last scan, keeping the most recent turn's occupancy. Mirrors
-    // scanEvents' offset + partial-line handling.
-    const auto size = fileSize(path);
-    if (size > sc.offset) {
-      std::ifstream in{path};
-      if (in) {
-        in.seekg(sc.offset);
-        std::string line;
-        auto valid = in.tellg();
-        while (std::getline(in, line)) {
-          if (in.eof()) break;  // partial trailing line — wait for rest
-          valid = in.tellg();
-          // Cheap substring pre-filter before the JSON parse.
-          if (line.find("\"type\":\"assistant\"") == std::string::npos)
-            continue;
-          if (line.find("\"usage\"") == std::string::npos) continue;
-          auto v = json::parse(line);
-          if (!v || !v->isObject()) continue;
-          const auto* msg = v->get("message");
-          if (msg == nullptr || !msg->isObject()) continue;
-          const auto* usage = msg->get("usage");
-          if (usage == nullptr || !usage->isObject()) continue;
-          // Context occupancy = non-output tokens.
-          sc.last_tokens =
-              usage->getOrInt("input_tokens", 0) +
-              usage->getOrInt("cache_creation_input_tokens", 0) +
-              usage->getOrInt("cache_read_input_tokens", 0);
-        }
-        sc.offset = static_cast<std::int64_t>(valid);
-      }
+    // Incremental tail read via the shared TailReader: parse only
+    // assistant lines appended since the last scan, keeping the most
+    // recent turn's occupancy. poll() owns the offset advance + torn-tail
+    // refusal that this loop used to hand-roll with tellg.
+    bus::TailReader reader{path};
+    reader.setOffset(sc.offset);
+    for (auto& line : reader.poll()) {
+      // Cheap substring pre-filter before the JSON parse.
+      if (line.find("\"type\":\"assistant\"") == std::string::npos) continue;
+      if (line.find("\"usage\"") == std::string::npos) continue;
+      auto v = json::parse(line);
+      if (!v || !v->isObject()) continue;
+      const auto* msg = v->get("message");
+      if (msg == nullptr || !msg->isObject()) continue;
+      const auto* usage = msg->get("usage");
+      if (usage == nullptr || !usage->isObject()) continue;
+      // Context occupancy = non-output tokens.
+      sc.last_tokens = usage->getOrInt("input_tokens", 0) +
+                       usage->getOrInt("cache_creation_input_tokens", 0) +
+                       usage->getOrInt("cache_read_input_tokens", 0);
     }
+    sc.offset = reader.offset();
 
     if (sc.last_tokens < 0) continue;  // no assistant turn yet
 
@@ -1181,6 +1220,161 @@ auto Loop::maybeScanTokens() -> void {
     }
     fs::rename(tmp_path, final_path, ec);
     if (ec) fs::remove(tmp_path, ec);
+  }
+}
+
+// --- Log retention (D1 + D2; see docs/log-retention.md) -----------------
+
+// Smallest consumer cursor across every $STATE/cursors/<topic>/*.cursor.
+// Returns 0 when no cursor exists (the "nobody has read anything" floor
+// that, under the delivery-guarantee clamp, prevents any trim). Defensive
+// against the C1 cursor-namespace split: if a topic carries both a
+// `_default` and a named-consumer cursor, the laggard wins.
+auto Loop::minConsumerCursor(std::string_view topic) const -> std::int64_t {
+  const std::string dir =
+      cfg_.state_dir + "/cursors/" + std::string{topic};
+  std::error_code ec;
+  if (!fs::exists(dir, ec)) return 0;
+  std::int64_t min_cursor = -1;
+  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    if (!entry.is_regular_file()) continue;
+    if (entry.path().extension() != ".cursor") continue;
+    const auto c = topic::readCursor(entry.path().string());
+    if (min_cursor < 0 || c < min_cursor) min_cursor = c;
+  }
+  return min_cursor < 0 ? 0 : min_cursor;
+}
+
+auto Loop::rebaseTopicCursors(std::string_view topic,
+                              std::int64_t dropped_bytes,
+                              std::int64_t header_bytes) -> void {
+  const std::string dir =
+      cfg_.state_dir + "/cursors/" + std::string{topic};
+  std::error_code ec;
+  if (!fs::exists(dir, ec)) return;
+  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    if (!entry.is_regular_file()) continue;
+    if (entry.path().extension() != ".cursor") continue;
+    const auto path = entry.path().string();
+    const auto c = topic::readCursor(path);
+    const auto rebased =
+        retention::rebaseCursor(c, dropped_bytes, header_bytes);
+    if (rebased != c) topic::writeCursor(path, rebased);
+  }
+}
+
+// events.jsonl: when it exceeds CLAUDE_BUS_EVENTS_MAX_BYTES, rewrite it
+// keeping only the most recent ~half, aligned to a line boundary. The
+// retained tail keeps readAgents' per-agent state intact; events_offset_
+// jumps to the new EOF so scanEvents does NOT reprocess (and mis-ACK on)
+// the retained lines. Advisory log — the canonical binary topic logs are
+// untouched. A hook append racing the rename is lost (documented).
+auto Loop::trimEventsLog() -> void {
+  std::int64_t cap = 16 * 1024 * 1024;
+  if (const char* env = std::getenv("CLAUDE_BUS_EVENTS_MAX_BYTES");
+      env != nullptr && *env != '\0') {
+    cap = std::atoll(env);
+  }
+  if (cap <= 0) return;  // disabled
+
+  const std::string log = cfg_.state_dir + "/events.jsonl";
+  const auto size = fileSize(log);
+  if (size <= cap) return;
+
+  const auto bytes = readFileBytes(log);
+  if (bytes.empty()) return;
+  // Keep the last ~half, snapped forward to the next line boundary.
+  std::size_t approx = bytes.size() - static_cast<std::size_t>(cap / 2);
+  const auto nl = bytes.find('\n', approx);
+  if (nl == std::string::npos) return;  // no boundary past the cut — skip
+  const std::size_t cut = nl + 1;
+  if (cut >= bytes.size()) return;
+
+  if (!atomicReplace(log, std::string_view{bytes}.substr(cut))) return;
+  // Resume the ACK scan at the new EOF — the retained tail was already
+  // processed; reprocessing it would positionally ACK newer in-flight.
+  events_offset_ = fileSize(log);
+}
+
+auto Loop::maybeTrimLogs() -> void {
+  const auto now = nowMs();
+  // Default 60 s; CLAUDE_BUS_TRIM_INTERVAL_MS lets tests trigger the sweep
+  // promptly (mirrors CLAUDE_BUS_ACK_TIMEOUT_MS).
+  std::int64_t interval_ms = 60'000;
+  if (const char* env = std::getenv("CLAUDE_BUS_TRIM_INTERVAL_MS");
+      env != nullptr && *env != '\0') {
+    if (const auto v = std::atoll(env); v > 0) interval_ms = v;
+  }
+  if (now - trim_last_scan_ms_ < interval_ms) return;
+  trim_last_scan_ms_ = now;
+
+  trimEventsLog();  // D1
+
+  // D2: per-topic head trim (retention_ms + absolute size cap).
+  std::int64_t topic_max_bytes = 8 * 1024 * 1024;
+  if (const char* env = std::getenv("CLAUDE_BUS_TOPIC_MAX_BYTES");
+      env != nullptr && *env != '\0') {
+    topic_max_bytes = std::atoll(env);
+  }
+  const auto header = static_cast<std::int64_t>(topic::kFileHeaderBytes);
+
+  for (const auto& tc : registry_.list()) {
+    const std::int64_t retention_ms = tc.retention_ms;
+    if (retention_ms <= 0 && topic_max_bytes <= 0) continue;  // dead config
+
+    const std::string path =
+        cfg_.state_dir + "/topics/" + tc.name + ".log";
+    topic::TopicLog log{path};
+    auto recs = log.dump();
+    if (!recs || recs->empty()) continue;
+
+    std::vector<retention::RecordMeta> meta;
+    meta.reserve(recs->size());
+    for (const auto& m : *recs) {
+      meta.push_back({m.offset, m.next_offset, m.sent_ms});
+    }
+
+    // Delivery-guaranteed kinds clamp to the consumer floor so undelivered
+    // / in-flight mail is never dropped; fire-and-forget kinds expire
+    // regardless (lets audit.log, which has no persistent consumer, shrink).
+    const bool guaranteed = tc.kind == std::string{kKindAgentInbox} ||
+                            tc.kind == std::string{kKindTuiCommands};
+    const auto min_cursor = guaranteed ? minConsumerCursor(tc.name) : 0;
+
+    const auto plan =
+        retention::planTrim(meta, now, retention_ms, topic_max_bytes, header,
+                            min_cursor, guaranteed);
+    if (plan.dropped_bytes <= 0) continue;
+
+    if (!trimTopicLogHead(path, plan.cut_offset, header)) continue;
+
+    // Every absolute offset shifted down by dropped_bytes — rebase cursors
+    // and in-flight trackers for this topic.
+    rebaseTopicCursors(tc.name, plan.dropped_bytes, header);
+    for (auto& [id, f] : in_flight_) {
+      if (f.topic != tc.name) continue;
+      f.cursor_after =
+          retention::rebaseCursor(f.cursor_after, plan.dropped_bytes, header);
+      writeInflight(f);
+    }
+
+    // Audit the trim (skip when trimming audit itself — that would feed the
+    // loop and isn't useful; broker.log via the daemon already records it).
+    if (tc.name != "audit") {
+      TopicConfig audit;
+      audit.name = "audit";
+      audit.kind = std::string{kKindAppendLog};
+      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
+      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+      topic::SendOpts a_opts;
+      a_opts.protocol = "retention-trim";
+      stampEpoch(a_opts, current_epoch_);
+      auto _ = audit_log.append(
+          "broker",
+          std::format("retention-trim topic={} dropped_bytes={} cut_offset={}",
+                      tc.name, plan.dropped_bytes, plan.cut_offset),
+          a_opts);
+    }
   }
 }
 

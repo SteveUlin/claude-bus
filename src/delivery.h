@@ -129,6 +129,10 @@ class Loop {
   // the scan doesn't fire on every 250 ms broker tick.
   std::int64_t auto_clear_last_scan_ms_{0};
 
+  // Last time the log-retention sweep ran (events.jsonl rewrite +
+  // per-topic head trim). Rate-limited; see maybeTrimLogs.
+  std::int64_t trim_last_scan_ms_{0};
+
   // Per-agent transcript tail state for the token-scan watcher. The
   // watcher reads each live agent's transcript JSONL, computes context
   // occupancy from the last assistant turn's usage, and writes
@@ -166,6 +170,17 @@ class Loop {
   auto maybeAutoClear() -> void;
   auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
+
+  // In-tick log retention (roadmap D1+D2; see docs/log-retention.md).
+  // maybeTrimLogs is the rate-limited entry from tick(); it rewrites
+  // events.jsonl (advisory tail-preserving) and head-trims topic logs
+  // (retention_ms + size cap), rebasing every affected cursor + in-flight
+  // tracker.
+  auto maybeTrimLogs() -> void;
+  auto trimEventsLog() -> void;
+  auto rebaseTopicCursors(std::string_view topic, std::int64_t dropped_bytes,
+                          std::int64_t header_bytes) -> void;
+  auto minConsumerCursor(std::string_view topic) const -> std::int64_t;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;

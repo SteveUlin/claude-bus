@@ -32,6 +32,9 @@ add_library(bus_agent_status STATIC
     src/pane.cpp
 )
 target_include_directories(bus_agent_status PUBLIC src)
+# readAgents parses each event line with json::parse (json_min), so the
+# json symbols must resolve after this archive on the link line.
+target_link_libraries(bus_agent_status PUBLIC bus_core)
 
 # The unified `bus` binary. Owns the broker daemon, all subcommand
 # handlers, RPC, JSON, topic logs, and the delivery loop.
@@ -77,6 +80,7 @@ add_executable(bus_tests
     tests/unit/test_doorbell_readiness.cpp
     tests/unit/test_tail_reader.cpp
     tests/unit/test_pane_cache.cpp
+    tests/unit/test_retention.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
 target_link_libraries(bus_tests PRIVATE bus_core bus_agent_status)

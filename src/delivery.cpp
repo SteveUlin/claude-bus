@@ -525,7 +525,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
       auto agents = readAgents(events_log, filter);
       AgentInfo info;
       if (auto it = agents.find(agent); it != agents.end()) info = it->second;
-      const auto pane = paneState(agent);
+      const auto pane = paneStateCached(agent);
       const auto st = computeState(info, 0, now, pane.ok);
       const bool agent_ready =
           st == State::Idle ||
@@ -630,7 +630,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
       auto agents = readAgents(events_log, filter);
       AgentInfo info;
       if (auto it = agents.find(agent); it != agents.end()) info = it->second;
-      const auto pane = paneState(agent);
+      const auto pane = paneStateCached(agent);
       const auto st = computeState(info, 0, now, pane.ok);
       const bool agent_ready =
           st == State::Idle ||

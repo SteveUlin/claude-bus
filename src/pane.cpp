@@ -643,4 +643,23 @@ auto paneState(std::string_view name) -> PaneState {
   return ps;
 }
 
+auto paneStateCacheTtlMs() -> std::int64_t {
+  if (const char* e = std::getenv("CLAUDE_BUS_PANESTATE_TTL_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v >= 0) return v;
+  }
+  return 300;
+}
+
+auto paneStateCached(std::string_view name) -> PaneState {
+  // One process-static cache on the broker's loop thread. The broker is
+  // single-threaded, so no locking is needed; the state RPC handler runs
+  // on the same thread but deliberately calls raw paneState() instead.
+  static PaneStateCache cache{
+      [](std::string_view n) { return paneState(n); },
+      [] { return std::chrono::steady_clock::now(); },
+      std::chrono::milliseconds{paneStateCacheTtlMs()}};
+  return cache.get(name);
+}
+
 }  // namespace bus

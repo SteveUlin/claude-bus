@@ -10,8 +10,12 @@
 // `bus pane-state`, `bus msg send` subcommands are thin CLI shells around
 // these.
 
+#include <chrono>
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace bus {
 
@@ -84,5 +88,53 @@ struct PaneState {
 };
 
 auto paneState(std::string_view name) -> PaneState;
+
+// Per-name TTL cache over paneState (roadmap 1.1 — the broker-wedge fix).
+// paneState() forks a blocking `zellij dump-screen` on the broker's
+// single delivery-loop thread; the gates call it ~2-3x per agent per
+// tick, so a slow zellij stalls the whole loop. This collapses N forks
+// per tick to <=1 by serving a result fresher than `ttl` from memory.
+//
+// Single-threaded by design (the loop owns it) — NO locking. The
+// fetcher and clock are injected so the policy is unit-testable without
+// zellij or real time. Use paneStateCached() at the gate call sites;
+// the state RPC keeps raw paneState() for monitor freshness.
+class PaneStateCache {
+ public:
+  using Fetcher = std::function<PaneState(std::string_view)>;
+  using Clock = std::function<std::chrono::steady_clock::time_point()>;
+
+  PaneStateCache(Fetcher fetch, Clock clock, std::chrono::milliseconds ttl)
+      : fetch_{std::move(fetch)}, clock_{std::move(clock)}, ttl_{ttl} {}
+
+  auto get(std::string_view name) -> PaneState {
+    const auto t = clock_();
+    if (auto it = cache_.find(std::string{name});
+        it != cache_.end() && (t - it->second.at) < ttl_) {
+      return it->second.state;  // fresh enough — skip the fork
+    }
+    PaneState s = fetch_(name);
+    cache_[std::string{name}] = Entry{s, t};
+    return s;
+  }
+
+ private:
+  struct Entry {
+    PaneState state;
+    std::chrono::steady_clock::time_point at;
+  };
+  Fetcher fetch_;
+  Clock clock_;
+  std::chrono::milliseconds ttl_;
+  std::unordered_map<std::string, Entry> cache_;
+};
+
+// TTL in ms from $CLAUDE_BUS_PANESTATE_TTL_MS (default 300). Read once.
+auto paneStateCacheTtlMs() -> std::int64_t;
+
+// Loop-thread-only cached paneState — backed by one process-static
+// PaneStateCache (real fetcher + steady_clock). No locking. The gate
+// call sites use this; the state RPC stays on raw paneState().
+auto paneStateCached(std::string_view name) -> PaneState;
 
 }  // namespace bus

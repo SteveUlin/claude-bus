@@ -75,6 +75,7 @@ add_executable(bus_tests
     tests/unit/test_topic_log.cpp
     tests/unit/test_agent_status.cpp
     tests/unit/test_tail_reader.cpp
+    tests/unit/test_pane_cache.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
 target_link_libraries(bus_tests PRIVATE bus_core bus_agent_status)

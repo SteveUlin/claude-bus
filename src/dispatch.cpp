@@ -53,7 +53,7 @@ class FlockGuard {
 };
 
 auto isReady(std::string_view agent) -> bool {
-  const auto ps = paneState(agent);
+  const auto ps = paneStateCached(agent);
   return ps.ok && ps.mode == "INSERT" && ps.buffer == "(empty)";
 }
 

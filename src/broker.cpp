@@ -7,6 +7,7 @@
 #include "state_paths.h"
 #include "topic_log.h"
 #include "topic_registry.h"
+#include "tty_policy.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -681,21 +682,15 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     std::map<std::string, json::Value> resp;
     // Off-TTY mode gate — SYMMETRIC with dispatchAgentInbox's push skip.
-    // Drain consumes the inbox ONLY when this agent is flagged off-TTY
-    // ($STATE/off-tty/<agent>); otherwise the broker's TTY push still
-    // owns delivery and draining here would double-deliver. This is what
-    // makes a fleet-wide hook + per-agent sentinel a SAFE canary: an
-    // unflagged agent's hook calls drain, gets an empty result, and
-    // stays entirely on the TTY path. Flip ONE agent by touching its
-    // flag; nothing else changes.
-    {
-      struct stat st;
-      const auto flag = cfg.state_dir + "/off-tty/" + agent;
-      if (::stat(flag.c_str(), &st) != 0) {
-        resp.insert({"deferred", json::Value::from(false)});
-        resp.insert({"messages", json::Value::fromArray({})});
-        return json::okResponse(std::move(resp));
-      }
+    // Off-TTY is the fleet default; drain consumes the inbox for every
+    // agent EXCEPT the durable TTY opt-out set (comms + the env list —
+    // see tty_policy.h). A TTY agent's hook still calls drain (the hook
+    // is fleet-wide) but gets an empty result here, so it stays entirely
+    // on the broker's TTY push path with no double-delivery.
+    if (isTtyAgent(agent)) {
+      resp.insert({"deferred", json::Value::from(false)});
+      resp.insert({"messages", json::Value::fromArray({})});
+      return json::okResponse(std::move(resp));
     }
     if (!registry.contains(topic_name)) {
       resp.insert({"deferred", json::Value::from(false)});

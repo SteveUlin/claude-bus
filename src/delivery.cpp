@@ -5,6 +5,7 @@
 #include "json_min.h"
 #include "pane.h"
 #include "topic_log.h"
+#include "tty_policy.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -406,20 +407,16 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   if (agent_v == nullptr || !agent_v->isString()) return;
   const std::string agent = agent_v->asString();
 
-  // Off-TTY gate (roadmap 2.1 / transport §5.1). When
-  // $STATE/off-tty/<agent> exists, this agent's mail is delivered by its
-  // own UserPromptSubmit/SessionStart hook draining via the `drain` RPC
-  // and emitting additionalContext — NOT by the broker typing into the
-  // pane. Skip the TTY push entirely so the two paths never both deliver
-  // the same record. The flag is absent by default, so an unflagged
-  // fleet behaves exactly as before — this is the single switch that
-  // flips an agent off-TTY, and nothing changes until it's set.
-  // (Scoped to agent-inbox mail; tui-commands / slashes still go TTY.)
-  {
-    struct stat st;
-    const auto flag = cfg_.state_dir + "/off-tty/" + agent;
-    if (::stat(flag.c_str(), &st) == 0) return;
-  }
+  // Off-TTY gate (roadmap 2.1 / transport §5.1). Off-TTY is the FLEET
+  // DEFAULT now: every agent's mail is delivered by its own
+  // UserPromptSubmit/SessionStart hook draining via the `drain` RPC and
+  // emitting additionalContext — NOT by the broker typing into the pane.
+  // Skip the TTY push entirely so the two paths never both deliver the
+  // same record. The opt-out set (TTY agents) is durable + committed —
+  // see tty_policy.h; it is NOT the ephemeral $STATE sentinel that kept
+  // getting wiped. (Scoped to agent-inbox mail; tui-commands/slashes
+  // still go TTY.)
+  if (isOffTty(agent)) return;
 
   // Universal gates: attached, blocking-op in flight.
   if (hasPresenceFile(agent)) return;
@@ -952,12 +949,9 @@ auto Loop::maybeWakeIdleOffTty() -> void {
   auto agents = readAgents(events_log, {});
 
   for (const auto& [name, info] : agents) {
-    // Off-TTY flag — the doorbell only rings for pull-delivery agents.
-    {
-      struct stat st;
-      const auto flag = cfg_.state_dir + "/off-tty/" + name;
-      if (::stat(flag.c_str(), &st) != 0) continue;
-    }
+    // The doorbell only rings for off-TTY agents (the default); TTY
+    // agents are woken by the push path itself. See tty_policy.h.
+    if (isTtyAgent(name)) continue;
     if (hasPresenceFile(name)) continue;             // human attached
     if (blocking_ops_.contains(name)) continue;
     if (now < wake_next_allowed_ms_[name]) continue;  // cooldown

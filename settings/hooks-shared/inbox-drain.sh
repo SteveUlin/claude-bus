@@ -7,27 +7,22 @@
 # `additionalContext` — replacing the broker's TTY write. The pane stays
 # the human's.
 #
-# Thin wrapper: `bus msg drain` does the work (presence gate, epoch/TTL
-# fence, cursor advance, additionalContext framing) and prints either an
-# additionalContext JSON object or nothing. Safe to run every turn.
+# Thin wrapper: `bus msg drain` does the work (off-TTY policy check,
+# presence gate, epoch/TTL fence, cursor advance, additionalContext
+# framing) and prints either an additionalContext JSON object or
+# nothing. Safe to run every turn.
 #
-# NOT YET referenced by settings/claude-settings.json — wiring it there
-# (+ creating $STATE/off-tty/<agent>) is the single change that flips an
-# agent off-TTY. See docs/prototypes/off-tty-delivery/README.md.
+# Off-TTY is the FLEET DEFAULT, so this drains for every agent — EXCEPT
+# the durable TTY opt-out set (comms + $CLAUDE_BUS_TTY_AGENTS), for whom
+# the `drain` RPC returns empty (they stay on the broker's TTY push).
+# The policy lives in the broker (tty_policy.h), authoritative — the
+# hook stays dumb so the opt-out can never drift between the two.
 
 set -uo pipefail
 
 EVENT="${1:-UserPromptSubmit}"
 NAME="${CLAUDE_BUS_AGENT_ID:-}"
-STATE="${CLAUDE_BUS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-bus}"
 [ -n "$NAME" ] || exit 0  # not a fleet agent
-
-# Off-TTY mode gate. The hook is wired fleet-wide, but it's a NO-OP
-# unless this agent is sentineled off-TTY — so referencing it in
-# settings.json does NOT change any agent's delivery until you touch
-# $STATE/off-tty/<agent>. (The drain RPC enforces the same gate
-# authoritatively; this early-exit just skips the round-trip.)
-[ -e "$STATE/off-tty/$NAME" ] || exit 0
 
 BUS="$(dirname "$0")/../../bin/bus"
 [ -x "$BUS" ] || BUS="bus"

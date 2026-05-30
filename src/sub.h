@@ -47,6 +47,7 @@ auto subTopic(std::span<const char* const>) -> int;
 // Producers + consumers (defined in src/sub/sub_{produce,consume}.cpp).
 auto subEnqueue(std::span<const char* const>) -> int;
 auto subMail(std::span<const char* const>) -> int;
+auto subTask(std::span<const char* const>) -> int;
 auto subMsg(std::span<const char* const>) -> int;
 auto subSlash(std::span<const char* const>) -> int;
 auto subBroadcast(std::span<const char* const>) -> int;

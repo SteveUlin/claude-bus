@@ -99,16 +99,14 @@ auto subEnqueue(std::span<const char* const> args) -> int {
   return callEnqueue(topic, body, protocol, deliver_when, ttl_ms);
 }
 
-// `bus msg mail AGENT BODY [--title TITLE]` — enqueue to inbox-AGENT
-// (auto-created agent-inbox). When --title is set, also write the
-// title to $STATE/title/AGENT so `bus monitor` can render it as the
-// recipient's current "what is this context window about?" tag.
-// Empty --title clears the existing file. Mails without --title leave
-// any existing title in place — titles persist across follow-up
-// dispatches until the sender explicitly updates them.
+// `bus msg mail AGENT BODY [--ttl MS]` — enqueue to inbox-AGENT
+// (auto-created agent-inbox).
+//
+// NOTE: --title is still accepted (so existing callers don't break) but
+// is now INERT — it no longer writes the monitor TASK column. Chatty
+// mail subjects were clobbering that column; set an agent's current
+// task deliberately with `bus task set AGENT "<action>"` instead.
 auto subMail(std::span<const char* const> args) -> int {
-  std::string title;
-  bool title_set = false;
   std::int64_t ttl_ms = kDefaultMailTtlMs;
   std::vector<std::string_view> positional;
   positional.reserve(args.size());
@@ -116,12 +114,11 @@ auto subMail(std::span<const char* const> args) -> int {
     const std::string_view a{args[i]};
     if (a == "--title") {
       if (++i >= args.size()) {
-        std::println(stderr,
-                     "usage: bus msg mail AGENT BODY [--title TITLE] [--ttl MS]");
+        std::println(stderr, "usage: bus msg mail AGENT BODY [--ttl MS]");
         return 2;
       }
-      title = args[i];
-      title_set = true;
+      // Accepted for backward compat, intentionally ignored — the TASK
+      // column is owned by `bus task set` now.
     } else if (a == "--ttl") {
       if (++i >= args.size()) return 2;
       ttl_ms = std::atoll(args[i]);
@@ -136,32 +133,50 @@ auto subMail(std::span<const char* const> args) -> int {
     }
   }
   if (positional.size() != 2) {
-    std::println(stderr,
-                 "usage: bus msg mail AGENT BODY [--title TITLE] [--ttl MS]");
+    std::println(stderr, "usage: bus msg mail AGENT BODY [--ttl MS]");
     return 2;
   }
   const std::string agent{positional[0]};
   const std::string body{positional[1]};
   const std::string topic = std::string{"inbox-"} + agent;
 
-  // Write/clear the title file before the enqueue call so the next
-  // monitor tick picks it up promptly. Enqueue failures don't roll
-  // back the title — that's the sender's last intent regardless.
-  if (title_set) {
-    const std::string state_dir = bus::stateRoot();
-    const std::string dir = state_dir + "/title";
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    const std::string path = dir + "/" + agent;
-    if (title.empty()) {
-      std::filesystem::remove(path, ec);
-    } else {
-      std::ofstream out{path};
-      if (out) out << title << '\n';
-    }
+  return callEnqueue(topic, body, "text", "immediate", ttl_ms);
+}
+
+// `bus task set AGENT "<action>"` — set the agent's monitor TASK column
+// ($STATE/title/AGENT). The DELIBERATE task setter, split out from mail
+// so chatty `bus msg mail` subjects can't clobber the column. An empty
+// action clears it; the broker also clears it on the agent's /clear (a
+// fresh session has no current task — see delivery.cpp scanEvents).
+auto subTask(std::span<const char* const> args) -> int {
+  if (args.size() < 2 || std::string_view{args[0]} != "set") {
+    std::println(stderr, "usage: bus task set AGENT \"<action>\"");
+    return 2;
+  }
+  const std::string agent{args[1]};
+  // Join any trailing args so an unquoted multi-word action still works;
+  // no args after AGENT clears the column.
+  std::string action;
+  for (std::size_t i = 2; i < args.size(); ++i) {
+    if (!action.empty()) action += ' ';
+    action += args[i];
   }
 
-  return callEnqueue(topic, body, "text", "immediate", ttl_ms);
+  const std::string dir = bus::stateRoot() + "/title";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  const std::string path = dir + "/" + agent;
+  if (action.empty()) {
+    std::filesystem::remove(path, ec);
+    return 0;
+  }
+  std::ofstream out{path};
+  if (!out) {
+    std::println(stderr, "bus task set: cannot write {}", path);
+    return 1;
+  }
+  out << action << '\n';
+  return 0;
 }
 
 // `bus msg broadcast TAG BODY --to AGENTS` — fan out one body into each

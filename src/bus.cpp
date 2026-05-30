@@ -29,6 +29,7 @@ const Subcommand kSubcommands[] = {
     {"roles", subRoles, "list role files (no args) or print one role's body (NAME)"},
     {"spawn", subSpawn, "open a new zellij tab for an agent"},
     {"state", subState, "broker's view of agent lifecycle"},
+    {"task", subTask, "set an agent's monitor TASK column: task set AGENT \"<action>\""},
     {"topic", subTopic, "topic registry: create / list / show / inbox"},
     {"version", subVersion, "print version"},
 };

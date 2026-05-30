@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 
 namespace bus::delivery {
@@ -147,6 +148,14 @@ class Loop {
   // off-TTY agents that have queued mail (see maybeWakeIdleOffTty).
   std::map<std::string, std::int64_t> wake_next_allowed_ms_;
   std::int64_t wake_last_scan_ms_{0};
+
+  // Strand watchdog: per-agent ms when mail was first seen queued +
+  // undelivered to an UNATTENDED off-TTY agent (0 = not queued / drained
+  // / attached). If it stays past the strand threshold, emit a one-shot
+  // alarm (tracked in strand_alarmed_) — the objective "no mail stranded
+  // silently" signal. Both reset when the mail drains.
+  std::map<std::string, std::int64_t> mail_queued_since_ms_;
+  std::set<std::string> strand_alarmed_;
 
   auto scanEvents() -> void;
   auto scanRetries() -> void;

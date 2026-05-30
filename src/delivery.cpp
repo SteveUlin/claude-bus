@@ -929,43 +929,52 @@ auto Loop::maybeAutoClear() -> void {
 // delivers the mail as additionalContext. The broker writes ONLY the
 // sentinel — the mail itself never touches the TTY.
 //
-// Gates (every clause must pass):
-//   - off-TTY flagged ($STATE/off-tty/<agent>) — TTY agents are already
-//     woken by the push path itself.
-//   - NOT attached (no [bus-attach] sentinel) — never wake a pane the
-//     human is occupying.
-//   - idle / at the prompt (last event Stop or Notification idle) — a
-//     mid-turn agent drains on its own next turn; don't interrupt it.
-//   - live pane (paneId resolves).
-//   - mail queued past the cursor — nothing to wake for otherwise.
-//   - not mid blocking-op; cooldown elapsed (don't re-ring while a wake
-//     resolves).
+// Gates (every clause must pass), plus a strand watchdog:
+//   - off-TTY (the default) — TTY agents are woken by the push path.
+//   - live pane (paneId resolves) — else gone/transitioning, replays on
+//     respawn (not a strand).
+//   - mail queued past the inbox cursor — nothing to wake for otherwise.
+//   - NOT attached — never wake a pane the human is occupying (attached
+//     defer is legitimate, not a strand).
+//   - READY at the prompt — computeAxes process=Alive + turn=Ready,
+//     which covers Stop, Notification(idle), AND SessionStart
+//     resume/clear (a JUST-RESTARTED agent). The old ad-hoc
+//     "Stop || Notification" check missed the restart case, so a
+//     freshly-relaunched agent with queued mail STRANDED — the prod-test
+//     failure. Excludes booting/compacting/working/stuck/needs-input.
+//   - not mid blocking-op; cooldown elapsed.
+// Strand watchdog: an off-TTY agent whose mail sits undelivered while
+// UNATTENDED past CLAUDE_BUS_STRAND_MS (default 120s) emits a one-shot
+// audit alarm (protocol=doorbell-strand) — the objective "no mail
+// strands silently" signal. Cleared when the mail drains.
 auto Loop::maybeWakeIdleOffTty() -> void {
   const auto now = nowMs();
   if (now - wake_last_scan_ms_ < 5'000) return;  // every 5 s
   wake_last_scan_ms_ = now;
 
+  std::int64_t strand_ms = 120'000;
+  if (const char* env = std::getenv("CLAUDE_BUS_STRAND_MS");
+      env != nullptr && *env != '\0') {
+    if (const auto v = std::atoll(env); v > 0) strand_ms = v;
+  }
+
   const std::string events_log = cfg_.state_dir + "/events.jsonl";
   auto agents = readAgents(events_log, {});
 
   for (const auto& [name, info] : agents) {
-    // The doorbell only rings for off-TTY agents (the default); TTY
-    // agents are woken by the push path itself. See tty_policy.h.
-    if (isTtyAgent(name)) continue;
-    if (hasPresenceFile(name)) continue;             // human attached
-    if (blocking_ops_.contains(name)) continue;
-    if (now < wake_next_allowed_ms_[name]) continue;  // cooldown
+    if (isTtyAgent(name)) continue;  // off-TTY agents only (the default)
 
-    // Idle / at the prompt — not mid-turn.
-    const bool idle =
-        info.last.event == "Stop" ||
-        (info.last.event == "Notification" &&
-         info.last.notification_type == "idle_prompt");
-    if (!idle) continue;
-
-    if (paneId(name).empty()) continue;  // live pane only
+    // No live pane → gone/transitioning; the topic-log record replays on
+    // respawn. Not a strand — clear tracking.
+    const bool pane_exists = !paneId(name).empty();
+    if (!pane_exists) {
+      mail_queued_since_ms_.erase(name);
+      strand_alarmed_.erase(name);
+      continue;
+    }
 
     // Mail queued past the inbox cursor?
+    bool has_mail = false;
     {
       const auto cursor_p =
           topic::cursorPath(cfg_.state_dir, "inbox-" + name, "");
@@ -973,34 +982,77 @@ auto Loop::maybeWakeIdleOffTty() -> void {
       const auto start =
           cursor > 0 ? cursor
                      : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-      const std::string log_path =
-          cfg_.state_dir + "/topics/inbox-" + name + ".log";
-      topic::TopicLog inbox{log_path};
+      topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + name +
+                            ".log"};
       auto r = inbox.peek(start, 1);
-      if (!r || r->empty()) continue;  // nothing queued — no wake
+      has_mail = r && !r->empty();
+    }
+    if (!has_mail) {  // drained / nothing queued → healthy
+      mail_queued_since_ms_.erase(name);
+      strand_alarmed_.erase(name);
+      continue;
     }
 
-    // Ring it: a single sentinel submit via the same flock'd safe-write
-    // path mail uses. sendToPaneSafe defers on a scrolled/locked pane,
-    // returning false — skip the cooldown so we retry next scan.
+    // Attached → legitimate defer (presence gate), not a strand. Reset
+    // the clock so it counts only unattended time.
+    if (hasPresenceFile(name)) {
+      mail_queued_since_ms_[name] = now;
+      continue;
+    }
+
+    // Unattended off-TTY agent WITH queued mail. Start the strand clock;
+    // alarm once if it overruns — the objective no-stranding signal.
+    if (mail_queued_since_ms_[name] == 0) mail_queued_since_ms_[name] = now;
+    if (now - mail_queued_since_ms_[name] >= strand_ms &&
+        !strand_alarmed_.contains(name)) {
+      strand_alarmed_.insert(name);
+      const auto queued_ms = now - mail_queued_since_ms_[name];
+      TopicConfig audit;
+      audit.name = "audit";
+      audit.kind = std::string{kKindAppendLog};
+      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
+      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+      topic::SendOpts a_opts;
+      a_opts.protocol = "doorbell-strand";
+      stampEpoch(a_opts, current_epoch_);
+      auto _ = audit_log.append(
+          "broker",
+          std::format("doorbell-strand agent={} queued_ms={} — off-TTY "
+                      "mail undelivered past threshold",
+                      name, queued_ms),
+          a_opts);
+    }
+
+    // --- wake gates ---
+    if (blocking_ops_.contains(name)) continue;
+    if (now < wake_next_allowed_ms_[name]) continue;  // cooldown
+
+    // READY at the prompt? Covers Stop / Notification-idle / SessionStart
+    // resume+clear; excludes boot/compact/working/stuck/needs-input.
+    const auto ax = computeAxes(info, 0, now, pane_exists);
+    if (ax.process != ProcessAxis::Alive || ax.turn != TurnAxis::Ready) {
+      continue;  // not at the prompt yet — retry next scan when ready
+    }
+
+    // Ring it: one sentinel submit via the flock'd safe-write path mail
+    // uses. sendToPaneSafe defers on a scrolled/locked pane (returns
+    // false) — skip the cooldown so we retry next scan.
     if (!deliverInline(cfg_, name, "[bus-wake]")) continue;
     wake_next_allowed_ms_[name] = now + 30'000;  // 30 s
 
-    // Audit so doorbell rings land where the human sees deliveries.
+    // Audit each ring — the objective "a wake fired" signal.
     {
       TopicConfig audit;
       audit.name = "audit";
       audit.kind = std::string{kKindAppendLog};
-      if (!registry_.contains("audit")) {
-        auto _ = registry_.create(audit);
-      }
+      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
       topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
       topic::SendOpts a_opts;
       a_opts.protocol = "doorbell";
       stampEpoch(a_opts, current_epoch_);
       auto _ = audit_log.append(
           "broker",
-          std::format("doorbell wake agent={} (off-TTY idle, mail queued)",
+          std::format("doorbell wake agent={} (off-TTY, idle, mail queued)",
                       name),
           a_opts);
     }

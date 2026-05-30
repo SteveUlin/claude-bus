@@ -1,5 +1,6 @@
 ---
 name: elodin
+lane: broker
 description: Broker internals (delivery, retry/ack/epoch, RPC, wire format) + design docs
 ---
 

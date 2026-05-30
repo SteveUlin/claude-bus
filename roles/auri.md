@@ -1,5 +1,6 @@
 ---
 name: auri
+lane: dispatch
 description: Hub orchestrator for the agent fleet — spawn, dispatch, coordinate
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: kvothe
+lane: viewers
 description: Viewers, dashboards, TUI columns, state-rendering — anything the human reads on the cockpit
 ---
 

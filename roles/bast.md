@@ -1,5 +1,6 @@
 ---
 name: bast
+lane: layouts
 description: Layouts, hooks, settings, and process/pane wiring
 ---
 

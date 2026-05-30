@@ -1,5 +1,6 @@
 ---
 name: comms
+lane: comms
 description: Human's comms amplifier for the agent fleet
 ---
 

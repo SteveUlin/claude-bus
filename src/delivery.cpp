@@ -1024,8 +1024,8 @@ auto Loop::maybeWakeIdleOffTty() -> void {
 // Numerator (context tokens) comes straight from the transcript and
 // matches the statusline's context_window.total_input_tokens exactly.
 // The denominator (window size) is NOT in the transcript anywhere, so
-// it comes from CLAUDE_BUS_CTX_WINDOW (default 200k; the fleet layout
-// sets 1M) with a tier-escalation safety net.
+// it comes straight from CLAUDE_BUS_CTX_WINDOW (default 200k; the fleet
+// layout sets the real window).
 auto Loop::maybeScanTokens() -> void {
   const auto now = nowMs();
   if (now - token_scan_last_ms_ < 5'000) return;  // every 5 s
@@ -1090,13 +1090,13 @@ auto Loop::maybeScanTokens() -> void {
 
     if (sc.last_tokens < 0) continue;  // no assistant turn yet
 
-    // Escalation: if observed tokens exceed the configured window, the
-    // agent must be on a larger tier — bump the denominator so we don't
-    // report >100%. No-op when the knob already matches the fleet.
-    const std::int64_t tier =
-        sc.last_tokens > 200'000 ? 1'000'000 : 200'000;
-    const auto window =
-        configured_window > tier ? configured_window : tier;
+    // Denominator is just the configured window (CLAUDE_BUS_CTX_WINDOW;
+    // the fleet layout sets it to the real window). The old two-tier
+    // ">200k ? 1M : 200K" escalation guess is gone — it mis-reported a
+    // 1M-window agent sitting under 200k tokens, and the knob is the
+    // honest source. pct is clamped to [0,100] so a misconfigured knob
+    // can't produce a nonsense number.
+    const auto window = configured_window;
     auto pct = (sc.last_tokens * 100 + window / 2) / window;  // rounded
     if (pct > 100) pct = 100;
     if (pct < 0) pct = 0;

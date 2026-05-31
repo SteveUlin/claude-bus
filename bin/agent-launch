@@ -309,6 +309,15 @@ if [ -n "$role" ]; then
     claude_role_flag=(--append-system-prompt-file "$stripped")
 fi
 
+# Per-agent reasoning effort. comms is sulin's interface (converse / relay /
+# surface) — keep it snappy at LOW. Every other agent stays on claude's
+# DEFAULT: the flag is omitted (not hardcoded to a level), so coders + auri
+# are untouched. Levels: low|medium|high|xhigh|max.
+claude_effort_flag=()
+if [ "$name" = "comms" ]; then
+    claude_effort_flag=(--effort low)
+fi
+
 export CLAUDE_BUS_AGENT_ID="$name"
 export CLAUDE_BUS_AGENT_ROLE="$role"
 export CLAUDE_BUS_AGENT_KIND="${CLAUDE_BUS_AGENT_KIND:-}"
@@ -327,4 +336,4 @@ case ":$PATH:" in
     *) export PATH="$BUS_ROOT/bin:$PATH" ;;
 esac
 
-exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" --dangerously-skip-permissions
+exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" --dangerously-skip-permissions

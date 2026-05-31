@@ -1,6 +1,9 @@
 # jj workspaces + git worktrees — workaround for per-agent isolation
 
-Author: elodin · For: auri / sulin · Status: research only, no code yet.
+Author: elodin · For: auri / sulin · Status: workaround (1) now SHIPPED in
+`bin/agent-launch` (per-agent pure-jj workspaces, incl. cross-repo for the
+taro project). The colocated jj+git-worktree shape is captured as a manual
+technique in the appendix below (added by bast, source jj#8052/ipetkov).
 
 ## The scoop-bundle problem
 
@@ -18,7 +21,7 @@ The constraint as it stands today:
 - `jj workspace add` creates additional jj workspaces, but they're **pure-jj**: no `.git` in the new workspace directory, so `git status` / `git log` / `git diff` don't work there. `jj` operations work; `jj git push` works (uses the shared backend, not the workspace's `.git`).
 - `jj git init --colocate` will refuse to run inside an existing git worktree — that's step (3) of the tracking issue, explicitly called out as TODO.
 
-So the elegant "git worktree + colocated jj workspace per agent" shape isn't available until #8052 ships. We need a workaround that lives within today's constraints.
+So the elegant "git worktree + colocated jj workspace per agent" shape isn't available until #8052 ships *as a first-class feature*. There is, however, a by-hand technique that produces it today — see **Appendix: colocated jj workspace + git worktree, by hand**. We default to the pure-jj workaround below; the hack matters when a workspace genuinely needs native `git` in place (e.g. a taro peer where `nix develop` / flake evaluation reads git-tracked files from the workspace's own repo).
 
 ## Workarounds, ranked
 
@@ -81,6 +84,64 @@ Why this over waiting for #8052:
 - The `.workspaces/` directory: under `$BUS_ROOT` (visible in `jj log` activity but ignored from tracking) or under `/tmp/claude-bus/workspaces/` (ephemeral, gone on host reboot)? My lean: under `$BUS_ROOT`, gitignored. Persistent so an agent's working copy survives across host reboots; visible enough to debug.
 - Should `bin/agent-launch` auto-create the workspace if it doesn't exist, or require explicit `bus workspace init <agent>` first? My lean: auto-create on first launch. Fewer manual steps; the cost (an empty workspace directory) is negligible if the agent never actually runs.
 - Should agent workspaces share a single op log with the main, or get distinct heads to prevent crosstalk? jj's default is shared — every agent sees every other agent's commits via `jj log`. That's probably what we want; the op log IS the cross-agent visibility surface.
+
+## Appendix: colocated jj workspace + git worktree, by hand
+
+*Added by bast. Technique by ipetkov in [jj#8052](https://github.com/jj-vcs/jj/issues/8052),
+forwarded by sulin/auri as reference for the multi-workspace machinery.*
+
+Workaround (1) gives each agent a **pure-jj** workspace — fully fine for the
+claude-bus fleet, where all VCS activity is jj and the shared `bin/bus`
+binary is read from `$BUS_ROOT`. But a secondary workspace with no `.git`
+can't answer native `git`, and some tooling needs that **in the workspace
+directory** — most relevantly `nix develop` / flake evaluation, which only
+sees *git-tracked* files via the workspace's own git repo. The taro project
+(Zig, std-only, built under direnv) is the live example: a peer building in
+`~/taro/.workspaces/<name>` wants git there.
+
+Until jj#8052 ships colocated workspaces as a feature, this manual dance
+yields a workspace that is BOTH a jj workspace AND a git worktree. Run it
+from the main colocated repo; `foo` is the new workspace name:
+
+```sh
+name=foo
+git worktree add "../$name" --no-checkout --detach
+# Rename the worktree but preserve the .git entry. Git won't notice right now ;)
+mv "../$name" "../${name}2"
+# Create a new jj workspace; it insists the dir not exist
+jj workspace add --name "${name}" "../${name}"
+cd "../${name}"
+# move the .git entry back into place
+mv "../${name}2/.git" .
+rmdir "../${name}2"
+# Hacky clean up
+git reset .
+# voila: colocated jj workspace AND git worktree
+jj st && git status
+```
+
+Plus: add `.jj` to the worktree's `.gitignore` so git doesn't try to track
+the jj metadata.
+
+### LOAD-BEARING GOTCHA — `git_head()` is relative to the MAIN worktree
+
+jj does **not** understand that additional git worktrees have their own
+separate git HEAD: `git_head()` is always relative to the MAIN/original
+workspace. So native git mostly works in the hacked workspace, EXCEPT
+anything that diffs against HEAD — `git diff`, `git status`'s
+staged/unstaged view — shows the diff relative to **whatever is checked out
+in the MAIN worktree**, not `@-` for THIS workspace. Concretely: `git diff`
+in the peer's workspace can show garbage (the main worktree's delta), not
+the peer's actual changes. Use `jj diff` for truth in these workspaces; reach
+for native `git` only for operations that don't depend on per-worktree HEAD
+(e.g. `nix` flake evaluation reading tracked files, which is the reason to do
+this at all). This is fixed if/when jj learns multiple git heads (a TODO step
+of #8052).
+
+So: the hack buys "nix/flake/zig can read tracked files in-workspace" at the
+cost of "git_head()-relative commands lie." Adopt it per-repo only when a
+workspace truly needs native git in place; the pure-jj default (1) stays the
+fleet baseline.
 
 Sources:
 - [jj-vcs/jj#8052 Tracking issue for colocated workspaces](https://github.com/jj-vcs/jj/issues/8052)

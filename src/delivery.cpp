@@ -1231,24 +1231,20 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     if (blocking_ops_.contains(name)) continue;
     if (now < wake_next_allowed_ms_[name]) continue;  // cooldown
 
-    // READY at the prompt? Two wakeable shapes:
-    //  - Alive + Ready: Stop / Notification-idle / SessionStart resume+clear.
-    //  - Compacting: SessionStart(source=compact) is the LAST event. That
-    //    fires when /compact FINISHES (verified: PreCompact precedes it by
-    //    the whole compaction duration), so the agent is then idle at the
-    //    prompt — mid-compaction the last event is PreCompact => Working,
-    //    which stays excluded. A post-compaction idle off-TTY agent MUST be
-    //    woken or its mail strands forever: the SessionStart(compact)
-    //    additionalContext does not surface and no follow-up event comes.
-    //    Pairs with inbox-drain.sh NOT draining on source=compact, so the
-    //    mail is still queued here for this wake to deliver. The earlier
-    //    gate admitted resume/clear but missed compact — the live strand
-    //    that hung bast/elodin/kvothe. Excludes boot/working/stuck/needs-input.
-    const auto ax = computeAxes(info, 0, now, pane_exists);
-    const bool ready_at_prompt =
-        ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready;
-    const bool idle_after_compact = ax.process == ProcessAxis::Compacting;
-    if (!ready_at_prompt && !idle_after_compact) {
+    // Wakeable at the prompt? wakeReadyForMail covers Alive+Ready (Stop /
+    // idle / resume / clear), Compacting (post-/compact idle — the strand
+    // fix), AND a fresh-idle boot sitting at an INSERT prompt. That last
+    // shape is harness-gap #4: a fresh spawn's only event is
+    // SessionStart(startup), which reads Starting/Stuck — event-identical to
+    // a wedged boot — so the old Alive-Ready||Compacting gate never rang it
+    // and its first brief stranded until a manual nudge. The pane's INSERT
+    // mode disambiguates ready-prompt from wedged-modal; a modal boot stays
+    // excluded so BOOT_STUCK detection is intact. See
+    // docs/fresh-spawn-delivery.md. (Mid-compaction is PreCompact => Working,
+    // still excluded.)
+    const auto pane = paneStateCached(name);
+    const auto ax = computeAxes(info, 0, now, pane_exists, &pane);
+    if (!wakeReadyForMail(ax, &pane)) {
       continue;  // not at the prompt yet — retry next scan when ready
     }
 

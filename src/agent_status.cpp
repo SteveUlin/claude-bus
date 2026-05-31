@@ -342,6 +342,27 @@ auto computeState(const AgentInfo& a, std::size_t unread,
   return State::Starting;
 }
 
+auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool {
+  // Normal idle at the prompt.
+  if (ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready) {
+    return true;
+  }
+  // Post-compaction idle — SessionStart(source=compact) is the last event
+  // and no follow-up comes; the agent is idle at the prompt.
+  if (ax.process == ProcessAxis::Compacting) return true;
+  // Boot ambiguity: a fresh spawn / >30s-idle boot reads Starting/Stuck from
+  // events alone (indistinguishable from a wedged boot). An editable INSERT
+  // prompt is the ground truth that claude is ready for its first input; a
+  // wedged boot shows a modal (non-INSERT) and stays excluded — BOOT_STUCK
+  // preserved.
+  if ((ax.process == ProcessAxis::Starting ||
+       ax.process == ProcessAxis::Stuck) &&
+      pane != nullptr && pane->ok && pane->mode == "INSERT") {
+    return true;
+  }
+  return false;
+}
+
 auto readAgents(const std::string& log_path,
                 const std::set<std::string>& filter)
     -> std::map<std::string, AgentInfo> {

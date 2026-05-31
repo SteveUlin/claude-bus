@@ -180,6 +180,20 @@ auto computeState(const AgentInfo& a, std::size_t unread,
                   std::int64_t now_ms, bool pane_exists,
                   const PaneState* pane = nullptr) -> State;
 
+// Is an idle off-TTY agent wakeable for queued mail (the doorbell's
+// readiness predicate)? True when it's sitting at an input-ready prompt:
+//   - Alive + Ready          (Stop / idle / resume / clear)
+//   - Compacting             (post-/compact idle; SessionStart(compact) last)
+//   - (Starting | Stuck) AND pane mode INSERT — a fresh spawn or a >30s-idle
+//     boot is event-indistinguishable from a WEDGED boot ("SessionStart, no
+//     follow-up"), so it reads Starting/Stuck; the editable INSERT prompt is
+//     the ground truth that claude is ready for input. A genuinely wedged
+//     boot shows a modal (non-INSERT) and stays excluded, so BOOT_STUCK
+//     detection is preserved. Mirrors dispatchAgentInbox's Starting+INSERT
+//     gate. See docs/fresh-spawn-delivery.md.
+// pane may be null (no pane state) — then the INSERT-rescue can't fire.
+auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool;
+
 // Read /tmp/claude-bus/events.jsonl, return latest event per agent.
 // `filter` restricts to specific agents when non-empty.
 auto readAgents(const std::string& log_path,

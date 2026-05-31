@@ -144,11 +144,35 @@ auto tabNameExists(std::string_view name) -> bool {
 }  // namespace
 
 auto subSpawn(std::span<const char* const> args) -> int {
-  if (args.size() != 1) {
-    std::println(stderr, "usage: bus spawn NAME");
+  // bus spawn [--role ROLE] [--project-dir DIR] NAME
+  //   --role        passed through to agent-launch (role-injected peer).
+  //   --project-dir target repo for the agent's workspace + cwd (e.g.
+  //                 ~/taro); the agent stays a claude-bus citizen. Omitted =
+  //                 claude-bus, unchanged.
+  std::string name, role, project_dir;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string a{args[i]};
+    if (a == "--role" && i + 1 < args.size()) {
+      role = args[++i];
+    } else if (a == "--project-dir" && i + 1 < args.size()) {
+      project_dir = args[++i];
+    } else if (a.starts_with("--")) {
+      std::println(stderr,
+                   "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
+      return 2;
+    } else if (name.empty()) {
+      name = a;
+    } else {
+      std::println(stderr,
+                   "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
+      return 2;
+    }
+  }
+  if (name.empty()) {
+    std::println(stderr,
+                 "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
     return 2;
   }
-  const std::string name{args[0]};
 
   // Dedup: refuse if a tab with this name already exists. Calling
   // `zellij action new-tab` is non-idempotent — repeated invocations
@@ -173,6 +197,19 @@ auto subSpawn(std::span<const char* const> args) -> int {
   const std::string bus_bin = bin + "/bus";
   const std::string agent_launch = bin + "/agent-launch";
 
+  // agent-launch's arg line (KDL): forward --role / --project-dir when set,
+  // then NAME. agent-launch resolves BUS_ROOT from its own path, so the bus
+  // side stays claude-bus regardless of --project-dir.
+  std::string launch_args = "args";
+  if (!role.empty()) launch_args += " \"--role\" \"" + role + "\"";
+  if (!project_dir.empty())
+    launch_args += " \"--project-dir\" \"" + project_dir + "\"";
+  launch_args += " \"" + name + "\"";
+
+  // Pane cwd = the project repo when targeting one, else claude-bus. (agent-
+  // launch cd's into the per-agent workspace itself; this is just the start.)
+  const std::string pane_cwd = project_dir.empty() ? root : project_dir;
+
   // The layout-string mirrors layouts/fleet.kdl's agent_tab template:
   // tab-bar plugin, agent-bar strip, claude pane, status-bar plugin.
   const std::string layout = std::format(
@@ -192,12 +229,12 @@ layout {{
             args "agent-bar" "{0}"
         }}
         pane name="{0}" cwd="{3}" command="{2}" {{
-            args "{0}"
+            {4}
         }}
     }}
 }}
 )LAYOUT",
-      name, bus_bin, agent_launch, root);
+      name, bus_bin, agent_launch, pane_cwd, launch_args);
 
   const int rc = runSync({"zellij", "action", "new-tab", "--name",
                           name.c_str(), "--layout-string", layout.c_str()});

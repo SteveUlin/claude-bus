@@ -41,6 +41,12 @@ set -euo pipefail
 BUS_ROOT=${CLAUDE_BUS_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
 
 role=""
+# PROJECT_ROOT is the repo the agent WORKS in (gets a jj workspace + cwd).
+# Distinct from BUS_ROOT (claude-bus — the bus binary, hooks, roles, $STATE).
+# Defaults to BUS_ROOT, so a plain `agent-launch NAME` is unchanged: the agent
+# works in claude-bus, exactly as before. `--project-dir DIR` points it at a
+# SECOND repo (e.g. ~/taro) while it stays a full claude-bus bus citizen.
+project_dir=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --role)
@@ -50,6 +56,15 @@ while [ $# -gt 0 ]; do
             ;;
         --role=*)
             role=${1#--role=}
+            shift
+            ;;
+        --project-dir)
+            [ $# -lt 2 ] && { echo "agent-launch: --project-dir requires an argument" >&2; exit 2; }
+            project_dir=$2
+            shift 2
+            ;;
+        --project-dir=*)
+            project_dir=${1#--project-dir=}
             shift
             ;;
         --)
@@ -67,7 +82,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: agent-launch [--role ROLE] NAME" >&2
+    echo "usage: agent-launch [--role ROLE] [--project-dir DIR] NAME" >&2
     exit 2
 fi
 
@@ -76,54 +91,55 @@ cache_dir="$HOME/.cache/claude-bus/agents"
 color_file="$cache_dir/$name.color"
 mkdir -p "$cache_dir"
 
-# Per-agent jj workspace. Each agent operates on its own working copy
-# under $BUS_ROOT/.workspaces/$name, all backed by the shared .jj/repo
-# (commits, branches, op log). Removes the "scoop-bundle" pattern where
-# one agent's `jj describe` swept up another agent's uncommitted edits.
-# See docs/jj-workspace-workaround.md for why we're using pure-jj
-# workspaces (jj-vcs/jj#8052's colocated-workspaces feature isn't
-# released yet; native `git` commands only work in the main $BUS_ROOT
-# workspace).
+# The repo the agent WORKS in. Defaults to BUS_ROOT (claude-bus) — unchanged
+# for the existing fleet. With --project-dir it's a second repo (e.g. ~/taro);
+# the agent gets its workspace + cwd there but remains a claude-bus citizen
+# (config/hooks/roles/binary/$STATE all still come from BUS_ROOT below).
+PROJECT_ROOT=${project_dir:-$BUS_ROOT}
+
+# Per-agent jj workspace, in PROJECT_ROOT. Each agent operates on its own
+# working copy under $PROJECT_ROOT/.workspaces/$name, backed by that repo's
+# shared .jj/repo. Removes the "scoop-bundle" pattern where one agent's
+# `jj describe` swept up another's uncommitted edits. See
+# docs/jj-workspace-workaround.md for why we use pure-jj workspaces.
 #
 # Set up the workspace BEFORE session detection so claude's cwd —
 # which determines its project storage dir — is fixed before we look
 # for prior sessions.
-workspace_dir="$BUS_ROOT/.workspaces/$name"
+workspace_dir="$PROJECT_ROOT/.workspaces/$name"
 if [ ! -d "$workspace_dir" ]; then
-    mkdir -p "$BUS_ROOT/.workspaces"
-    if ! (cd "$BUS_ROOT" && jj workspace add ".workspaces/$name" 2>&1); then
-        echo "agent-launch: jj workspace add failed; launching in \$BUS_ROOT" >&2
+    mkdir -p "$PROJECT_ROOT/.workspaces"
+    if ! (cd "$PROJECT_ROOT" && jj workspace add ".workspaces/$name" 2>&1); then
+        echo "agent-launch: jj workspace add failed; launching in \$PROJECT_ROOT" >&2
     fi
 fi
-[ -d "$workspace_dir" ] || workspace_dir="$BUS_ROOT"
+[ -d "$workspace_dir" ] || workspace_dir="$PROJECT_ROOT"
 cd "$workspace_dir"
 
-# --- Deterministic config propagation (1b) -------------------------------
-# Materialize this workspace's Claude Code config from LANDED main on every
-# launch, into gitignored paths. This REPLACES the old symlink-to-default-
-# checkout, which went stale whenever the default workspace lagged main
-# (the recurring "config push doesn't reach agents" bug).
+# --- Deterministic config propagation (1b), sourced from CLAUDE-BUS --------
+# Materialize this workspace's Claude Code config from CLAUDE-BUS's LANDED
+# main on every launch, into gitignored paths. This makes every agent a full
+# bus citizen — same hooks/settings — regardless of which repo it WORKS in:
+# a --project-dir taro peer has no settings/ of its own, so config MUST come
+# from claude-bus (BUS_ROOT), not from PROJECT_ROOT's main. For a normal
+# claude-bus agent BUS_ROOT == its repo, so behavior is unchanged.
 #
-# Source of truth = jj's LOCAL main bookmark, read with --ignore-working-
-# copy: that skips the working-copy snapshot, so it works even though this
-# (or any) workspace is "stale" — workspaces go stale constantly under
-# concurrent ops, and a plain `jj`/symlink-to-a-checkout inherits that
-# staleness. Reading main directly does not. Config therefore == landed
-# main by construction; it propagates on land + relaunch, with zero
-# dependence on reconciling the default tree.
-#
-# Resolve main's commit once (staleness-immune), then:
-#  - claude-settings.json: a single `jj file show` into .claude/.
-#  - settings/hooks-shared/*: `git archive` the subtree by that commit id
-#    (one bulk export preserving examples/; reads the git object by sha, so
-#    it's independent of whether git refs track jj bookmarks). chmod +x
-#    since archive content is extracted mode-less here.
-# Both targets are gitignored (/.claude/settings.json, /settings/hooks), so
-# jj never sees these materialized copies. Touches only this workspace.
-main_rev=$(jj --ignore-working-copy log --no-graph -r main -T 'commit_id' 2>/dev/null)
+# Source of truth = claude-bus's main, resolved with `jj -R "$BUS_ROOT"
+# --ignore-working-copy` (staleness-immune: skips any working-copy snapshot,
+# and -R targets claude-bus regardless of our cwd / which repo we're in).
+# Then read each path BY COMMIT SHA through git --git-dir="$BUS_ROOT/.git":
+#  - claude-settings.json: `git show <sha>:path` (cwd-independent; byte-
+#    identical to the old `jj file show` — verified).
+#  - settings/hooks-shared/*: `git archive <sha>` (one bulk export preserving
+#    examples/; chmod +x since archive content is extracted mode-less).
+# Reading by SHA is also ref-lag-immune: jj writes the commit OBJECT to git
+# even when colocated refs/heads/main lags the jj bookmark (it does, when a
+# push comes from a secondary workspace). Both targets are gitignored, so jj
+# never sees these copies. Touches only this workspace.
+main_rev=$(jj --ignore-working-copy -R "$BUS_ROOT" log --no-graph -r main -T 'commit_id' 2>/dev/null)
 if [ -n "$main_rev" ]; then
     mkdir -p "$workspace_dir/.claude"
-    if ! jj --ignore-working-copy file show -r "$main_rev" settings/claude-settings.json \
+    if ! git --git-dir="$BUS_ROOT/.git" show "$main_rev:settings/claude-settings.json" \
             > "$workspace_dir/.claude/settings.json" 2>/dev/null; then
         echo "agent-launch: WARN failed to materialize claude-settings.json from main" >&2
     fi
@@ -136,7 +152,7 @@ if [ -n "$main_rev" ]; then
         echo "agent-launch: WARN failed to materialize settings/hooks from main" >&2
     fi
 else
-    echo "agent-launch: WARN could not resolve main; config not refreshed" >&2
+    echo "agent-launch: WARN could not resolve claude-bus main; config not refreshed" >&2
 fi
 # -------------------------------------------------------------------------
 
@@ -158,6 +174,11 @@ fi
 # `jj workspace update-stale` over uncommitted work (the data-loss trap). On
 # dirty: warn loudly, skip the rebuild, boot against the stale binary. Never
 # block boot, never clobber WIP.
+#
+# All of this is BUS_ROOT-scoped: it rebuilds claude-bus's bin/bus from
+# claude-bus's main, regardless of PROJECT_ROOT. A --project-dir taro peer
+# triggers exactly the same claude-bus rebuild (the shared binary it uses) —
+# it never reconciles or cmake's PROJECT_ROOT.
 if [ -n "$main_rev" ]; then
     built_commit=""
     [ -x "$BUS_ROOT/bin/bus" ] && built_commit=$("$BUS_ROOT/bin/bus" version \
@@ -324,7 +345,10 @@ export CLAUDE_BUS_AGENT_ID="$name"
 export CLAUDE_BUS_AGENT_ROLE="$role"
 export CLAUDE_BUS_AGENT_KIND="${CLAUDE_BUS_AGENT_KIND:-}"
 export CLAUDE_BUS_AGENT_WORKSPACE="${CLAUDE_BUS_AGENT_WORKSPACE:-$workspace_dir}"
-export CLAUDE_BUS_AGENT_PROJECT="${CLAUDE_BUS_AGENT_PROJECT:-}"
+# Which repo the agent works in (BUS_ROOT for the claude-bus fleet, else the
+# --project-dir target). Populates the existing register-hook field; not a
+# new tracking surface.
+export CLAUDE_BUS_AGENT_PROJECT="${CLAUDE_BUS_AGENT_PROJECT:-$PROJECT_ROOT}"
 export CLAUDE_BUS_AGENT_SESSION="${CLAUDE_BUS_AGENT_SESSION:-}"
 
 # After cd'ing into the workspace, `bin/bus` (relative) no longer

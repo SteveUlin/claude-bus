@@ -882,6 +882,116 @@ auto Loop::tick() -> void {
     else if (cfg.kind == std::string{kKindTuiCommands})
       dispatchTuiCommands(cfg);
   }
+  // D8 Part B: emit any overrun escalations + recompute next_deadline_ms_
+  // last, so it reflects post-dispatch in-flight state. The rpc loop reads
+  // it via nextDeadlineMs() to arm the timerfd.
+  maybeEscalateStuck();
+}
+
+// D8 Part B — the escalation deadline source. Emits a one-shot audit alarm
+// when a turn (turn_start_ms + stuck budget) or an open tool call
+// (open_tool_since_ms + tool budget) overruns, using the fold accumulator
+// Part A put on AgentInfo. Recomputes next_deadline_ms_ as the soonest
+// STILL-PENDING deadline (turn / tool / in-flight retry); the rpc loop arms
+// a timerfd to it so this fires at the deadline even with zero RPC traffic
+// (the quiet-fleet claim). The *_alarmed_ sets enforce escalate-once: an
+// already-fired condition is excluded from the deadline set, so a never-
+// clearing wedge can't pin the timerfd at its 1 ms floor and busy-loop.
+//
+// Observability ONLY — the recovery action (nudge / clear / respawn) is R1's
+// triage table. This run-on-every-tick scan (no rate-limit) is what lets a
+// timerfd fire translate into an alarm the instant the budget elapses.
+auto Loop::maybeEscalateStuck() -> void {
+  const auto now = nowMs();
+
+  std::int64_t stuck_budget = 5 * 60'000;  // turn open this long w/o Stop
+  std::int64_t tool_budget = 5 * 60'000;   // tool open this long w/o result
+  if (const char* e = std::getenv("CLAUDE_BUS_STUCK_BUDGET_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) stuck_budget = v;
+  }
+  if (const char* e = std::getenv("CLAUDE_BUS_TOOL_BUDGET_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) tool_budget = v;
+  }
+
+  // Live-pane gate keeps a crashed/gone agent's stale fold state from
+  // alarming. CLAUDE_BUS_ESCALATE_NO_PANE_GATE disables it for the
+  // hermetic timerfd test (no zellij to resolve a pane against).
+  const bool gate_on_pane =
+      std::getenv("CLAUDE_BUS_ESCALATE_NO_PANE_GATE") == nullptr;
+
+  std::int64_t next = 0;
+  auto consider = [&](std::int64_t d) {
+    if (d > 0 && (next == 0 || d < next)) next = d;
+  };
+  auto auditAlarm = [&](std::string_view protocol, const std::string& body) {
+    TopicConfig audit;
+    audit.name = "audit";
+    audit.kind = std::string{kKindAppendLog};
+    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
+    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+    topic::SendOpts a_opts;
+    a_opts.protocol = std::string{protocol};
+    stampEpoch(a_opts, current_epoch_);
+    auto _ = audit_log.append("broker", body, a_opts);
+  };
+
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  auto agents = readAgents(events_log, {});
+  for (const auto& [name, info] : agents) {
+    // Live pane only — ghost markers from dead sessions don't escalate.
+    if (gate_on_pane && paneId(name).empty()) {
+      turn_stuck_alarmed_.erase(name);
+      tool_wedged_alarmed_.erase(name);
+      continue;
+    }
+
+    // Turn-stuck: a turn open past budget with no progress.
+    if (info.turn_start_ms > 0) {
+      const auto dl = info.turn_start_ms + stuck_budget;
+      if (now >= dl) {
+        if (!turn_stuck_alarmed_.contains(name)) {
+          turn_stuck_alarmed_.insert(name);
+          auditAlarm("turn-stuck",
+                     std::format("turn-stuck agent={} open_ms={} budget_ms={}",
+                                 name, now - info.turn_start_ms, stuck_budget));
+        }
+      } else {
+        consider(dl);  // future, still pending
+      }
+    } else {
+      turn_stuck_alarmed_.erase(name);  // turn ended → re-arm next time
+    }
+
+    // Tool-wedged: a PreToolUse with no PostToolUse past budget.
+    if (!info.open_tool.empty()) {
+      const auto dl = info.open_tool_since_ms + tool_budget;
+      if (now >= dl) {
+        if (!tool_wedged_alarmed_.contains(name)) {
+          tool_wedged_alarmed_.insert(name);
+          auditAlarm("tool-wedged",
+                     std::format("tool-wedged agent={} tool={} open_ms={} "
+                                 "budget_ms={}",
+                                 name, info.open_tool,
+                                 now - info.open_tool_since_ms, tool_budget));
+        }
+      } else {
+        consider(dl);
+      }
+    } else {
+      tool_wedged_alarmed_.erase(name);
+    }
+  }
+
+  // In-flight TTY retries also stop riding viewer polling: wake at the
+  // soonest next_retry_at. Drain (off-TTY) entries carry next_retry_at=0
+  // and are skipped by the d>0 guard — they re-deliver via the drain cursor.
+  for (const auto& [id, f] : in_flight_) {
+    if (f.attempts <= kMaxAttempts) consider(f.next_retry_at);
+  }
+
+  next_deadline_ms_ = next;
 }
 
 // Auto-clear idle workers. Implements the trigger described in

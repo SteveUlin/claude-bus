@@ -47,9 +47,20 @@ class Server {
   // timeout and invokes `on_tick` whenever it fires (no connection
   // arrived in the window). Tick + RPC handlers run on the same
   // thread, so neither racing nor synchronization is needed.
+  //
+  // `next_deadline_ms` (D8 Part B) makes escalation deterministic instead
+  // of riding RPC/viewer-poll ticks: after every tick the loop calls it
+  // for the soonest pending deadline (absolute ms-since-epoch, matching
+  // bus::nowMs(); 0 = none) and arms a one-shot timerfd to it. The timerfd
+  // is just another readable fd in the pselect set — it fires via the r>0
+  // path even on a quiet fleet where the r==0 idle-timeout is unreliable.
+  // A past-due deadline is clamped to fire ~immediately (run-once-now);
+  // callers must stop re-emitting an already-handled deadline (escalate-
+  // once) so re-arm can't busy-loop. EINTR/pselect semantics unchanged.
   auto run(std::chrono::milliseconds tick_interval =
                std::chrono::milliseconds{0},
-           std::function<void()> on_tick = nullptr) -> int;
+           std::function<void()> on_tick = nullptr,
+           std::function<std::int64_t()> next_deadline_ms = nullptr) -> int;
 
   // Signal the run loop to exit. Safe to call from a signal handler
   // (sets a volatile atomic flag the accept loop polls).

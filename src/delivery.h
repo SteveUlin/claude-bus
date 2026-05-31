@@ -114,6 +114,12 @@ class Loop {
                          const std::string& agent,
                          std::int64_t cursor_after) -> void;
 
+  // Soonest pending escalation deadline (absolute ms-since-epoch; 0 =
+  // none). The rpc server arms a one-shot timerfd to this after each tick
+  // so escalation fires deterministically rather than riding RPC/viewer
+  // ticks (D8 Part B). Recomputed by maybeEscalateStuck every tick.
+  auto nextDeadlineMs() const -> std::int64_t { return next_deadline_ms_; }
+
  private:
   const BrokerConfig& cfg_;
   TopicRegistry& registry_;
@@ -171,6 +177,18 @@ class Loop {
   std::map<std::string, std::int64_t> mail_queued_since_ms_;
   std::set<std::string> strand_alarmed_;
 
+  // D8 Part B escalation deadline source. maybeEscalateStuck emits a
+  // one-shot audit alarm when a turn (turn_start_ms + stuck budget) or an
+  // open tool call (open_tool_since_ms + tool budget) overruns, and caches
+  // next_deadline_ms_ — the soonest still-pending deadline (turn / tool /
+  // in-flight retry) the rpc loop arms its timerfd to. The *_alarmed_ sets
+  // enforce escalate-once: an already-fired condition drops out of the
+  // deadline set, so a never-clearing wedge can't pin the timerfd at the
+  // 1 ms floor and busy-loop. Reset when the condition clears.
+  std::int64_t next_deadline_ms_{0};
+  std::set<std::string> turn_stuck_alarmed_;
+  std::set<std::string> tool_wedged_alarmed_;
+
   auto scanEvents() -> void;
   auto scanRetries() -> void;
   auto dispatchAgentInbox(const TopicConfig& cfg) -> void;
@@ -180,6 +198,7 @@ class Loop {
   auto maybeAutoClear() -> void;
   auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
+  auto maybeEscalateStuck() -> void;
 
   // In-tick log retention (roadmap D1+D2; see docs/log-retention.md).
   // maybeTrimLogs is the rate-limited entry from tick(); it rewrites

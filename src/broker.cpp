@@ -884,7 +884,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   });
 
   const int rc = server.run(std::chrono::milliseconds{250},
-                            [&dl]() { dl.tick(); });
+                            [&dl]() { dl.tick(); },
+                            [&dl]() { return dl.nextDeadlineMs(); });
 
   ::unlink(cfg.pid_path.c_str());
   ::close(pidfd);  // releases the singleton flock

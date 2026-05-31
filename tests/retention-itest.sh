@@ -89,9 +89,18 @@ for i in $(seq -w 1 400); do
   printf '{"ts":"x","agent":"a","event":"Stop","payload":{"m":"evt-%s"}}\n' "$i"
 done > "$CLAUDE_BUS_STATE/events.jsonl"
 before_evt="$(stat -c%s "$CLAUDE_BUS_STATE/events.jsonl")"
-"$BUS" msg mail poke "drive a tick" >/dev/null   # RPC → post-RPC sweep
-sleep 0.5
-after_evt="$(stat -c%s "$CLAUDE_BUS_STATE/events.jsonl")"
+# The trim runs on a post-RPC tick, but the 300ms trim-gate may be closed
+# right after section 3's rapid fetches, and idle ticks are unreliable. So
+# drive pokes spaced PAST the gate until the sweep fires (bounded ~3s) —
+# this mirrors the live fleet's steady viewer-poll cadence rather than
+# betting one tick lands gate-open.
+after_evt="$before_evt"
+for _ in $(seq 1 8); do
+  "$BUS" msg mail poke "drive a tick" >/dev/null
+  sleep 0.4
+  after_evt="$(stat -c%s "$CLAUDE_BUS_STATE/events.jsonl")"
+  [ "$after_evt" -lt "$before_evt" ] && break
+done
 ck "$([ "$after_evt" -lt "$before_evt" ] && [ "$after_evt" -le 4096 ] && echo ok)" \
    "ok" "events.jsonl shrank under the 4096 cap ($before_evt -> $after_evt)"
 ck "$(grep -c 'evt-400' "$CLAUDE_BUS_STATE/events.jsonl")" "1" "newest event line kept"

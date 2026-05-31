@@ -6,13 +6,16 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -119,8 +122,17 @@ auto Server::bind() -> bool {
   return true;
 }
 
+namespace {
+auto nowMsRt() -> std::int64_t {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(system_clock::now().time_since_epoch())
+      .count();
+}
+}  // namespace
+
 auto Server::run(std::chrono::milliseconds tick_interval,
-                 std::function<void()> on_tick) -> int {
+                 std::function<void()> on_tick,
+                 std::function<std::int64_t()> next_deadline_ms) -> int {
   if (listen_fd_ < 0) {
     std::println(stderr, "rpc: run() called before bind()");
     return 1;
@@ -129,25 +141,85 @@ auto Server::run(std::chrono::milliseconds tick_interval,
 
   const bool use_pselect = tick_interval.count() > 0 && on_tick;
 
+  // D8 Part B: a one-shot timerfd armed to the soonest pending deadline so
+  // escalation fires deterministically — via the r>0 readable-fd path, not
+  // the r==0 idle-timeout that a quiet (no-RPC) fleet never reaches. Only
+  // created when a deadline source is supplied; absence falls back to the
+  // pre-existing tick-driven behavior.
+  int timer_fd = -1;
+  if (use_pselect && next_deadline_ms) {
+    timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timer_fd < 0) {
+      std::println(stderr, "rpc: timerfd_create: {} (escalation rides ticks)",
+                   std::strerror(errno));
+    }
+  }
+  // Arm to the next deadline after every tick. Disarm (it_value all-zero)
+  // ONLY when nothing is pending; clamp a past-due deadline to ~immediate
+  // (run-once-now) rather than to 0 — 0 would disarm and silently drop the
+  // pending escalation. The deadline source must stop emitting an already-
+  // handled deadline (escalate-once) so a never-clearing condition can't
+  // pin the re-arm at 1 ms and busy-loop.
+  auto rearm = [&]() {
+    if (timer_fd < 0 || !next_deadline_ms) return;
+    const std::int64_t d = next_deadline_ms();
+    struct itimerspec its {};  // all-zero = disarmed
+    if (d > 0) {
+      std::int64_t rel = d - nowMsRt();
+      if (rel < 1) rel = 1;  // past-due → fire ~immediately, never 0/disarm
+      its.it_value.tv_sec = rel / 1000;
+      its.it_value.tv_nsec = (rel % 1000) * 1'000'000;
+    }
+    ::timerfd_settime(timer_fd, 0, &its, nullptr);  // relative arm
+  };
+  // Run one tick at boot so the first deadline is computed and the timerfd
+  // armed immediately — without this the timerfd can't arm until something
+  // ELSE ticks the loop (an RPC or the idle timeout), and on a quiet fleet
+  // the idle timeout is unreliable (EINTR-starved). The boot tick makes the
+  // fire→tick→re-arm chain self-sustaining with zero RPC traffic.
+  if (use_pselect && on_tick) {
+    on_tick();
+    rearm();
+  } else {
+    rearm();
+  }
+
   while (!gStopFlag.load(std::memory_order_acquire)) {
     if (use_pselect) {
       fd_set rfds;
       FD_ZERO(&rfds);
       FD_SET(listen_fd_, &rfds);
+      int maxfd = listen_fd_;
+      if (timer_fd >= 0) {
+        FD_SET(timer_fd, &rfds);
+        if (timer_fd > maxfd) maxfd = timer_fd;
+      }
       struct timespec ts {};
       ts.tv_sec = tick_interval.count() / 1000;
       ts.tv_nsec = (tick_interval.count() % 1000) * 1000000;
       sigset_t empty;
       sigemptyset(&empty);
       const int r =
-          ::pselect(listen_fd_ + 1, &rfds, nullptr, nullptr, &ts, &empty);
+          ::pselect(maxfd + 1, &rfds, nullptr, nullptr, &ts, &empty);
       if (r < 0) {
         if (errno == EINTR) continue;
         std::println(stderr, "rpc: pselect: {}", std::strerror(errno));
         return 1;
       }
+      // Timerfd fired: drain the expiration count, run the tick, re-arm.
+      // A ready listen_fd (if any) is served on the next iteration via the
+      // kernel backlog — no starvation.
+      if (timer_fd >= 0 && FD_ISSET(timer_fd, &rfds)) {
+        std::uint64_t expirations = 0;
+        [[maybe_unused]] ssize_t n =
+            ::read(timer_fd, &expirations, sizeof(expirations));
+        on_tick();
+        rearm();
+        continue;
+      }
       if (r == 0) {
         on_tick();
+        rearm();
         continue;
       }
       // r > 0: connection ready. Drain a backlog before the next tick,
@@ -192,6 +264,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
       // Run the tick after handling RPCs so delivery decisions see the
       // latest state.
       on_tick();
+      rearm();
       continue;
     }
 
@@ -204,6 +277,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
     serve(conn);
     ::close(conn);
   }
+  if (timer_fd >= 0) ::close(timer_fd);
   return 0;
 }
 

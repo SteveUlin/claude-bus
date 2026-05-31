@@ -1242,9 +1242,25 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // excluded so BOOT_STUCK detection is intact. See
     // docs/fresh-spawn-delivery.md. (Mid-compaction is PreCompact => Working,
     // still excluded.)
-    const auto pane = paneStateCached(name);
-    const auto ax = computeAxes(info, 0, now, pane_exists, &pane);
-    if (!wakeReadyForMail(ax, &pane)) {
+    //
+    // Cost discipline (broker-wedge fix): paneStateCached() forks a 5 s-capped
+    // `zellij dump-screen` on this single delivery-loop thread, so reading a
+    // pane for EVERY candidate every scan serializes into tens of seconds
+    // under a multi-agent fan-out and starves RPC (saturation wedge, recv-q
+    // backs up, never accept()s). The pane is ONLY needed to disambiguate the
+    // boot-ambiguous Starting/Stuck states; Alive+Ready / Compacting (the vast
+    // majority of idle agents) decide event-only. So classify event-only first
+    // and fork a pane read ONLY when boot-ambiguous — established idle agents
+    // never fork. Restores the pre-#4 risk profile while keeping fresh-spawn.
+    const auto ax0 = computeAxes(info, 0, now, pane_exists);
+    if (ax0.process == ProcessAxis::Starting ||
+        ax0.process == ProcessAxis::Stuck) {
+      const auto pane = paneStateCached(name);  // forks zellij — only here
+      if (!wakeReadyForMail(computeAxes(info, 0, now, pane_exists, &pane),
+                            &pane)) {
+        continue;  // booting but not yet at an INSERT prompt — retry next scan
+      }
+    } else if (!wakeReadyForMail(ax0, nullptr)) {
       continue;  // not at the prompt yet — retry next scan when ready
     }
 

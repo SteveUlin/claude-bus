@@ -437,18 +437,55 @@ auto parseInput(std::string_view ansi_line) -> InputParts {
   return parts;
 }
 
+// TTL for the cached list-panes snapshot. See listPanesJsonCached.
+auto listPanesJsonTtlMs() -> std::int64_t {
+  if (const char* e = std::getenv("CLAUDE_BUS_LISTPANES_TTL_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v >= 0) return v;
+  }
+  // 3 s: under a loaded zellij, list-panes itself runs ~1 s, so a 1 s TTL
+  // refetches back-to-back and barely helps. 3 s keeps the fetch <=~33% of
+  // the loop's time while staying well within the 5 s doorbell scan, so
+  // pane-existence staleness never delays a wake by more than one scan.
+  return 3000;
+}
+
+// Cached raw `zellij action list-panes --json`. paneId() runs this global
+// query — ~1 s under a loaded zellij — and the broker's delivery loop calls
+// paneId() once per agent per scan (pane_exists, paneState's internal
+// lookup, dispatch). That O(N) of identical global forks serializes into a
+// multi-second scan that wedges the single-threaded loop: it never returns
+// to accept(), recv-q backs up, RPC starves (the 2026-05-31 fan-out
+// broker-down). Collapse every call within a TTL window to one fork. The
+// loop owns this thread — no locking, same as PaneStateCache. TTL from
+// $CLAUDE_BUS_LISTPANES_TTL_MS (default 1000 ms).
+auto listPanesJsonCached() -> std::string {
+  static std::string cached;
+  static std::chrono::steady_clock::time_point at{};
+  static bool valid = false;
+  const auto now = std::chrono::steady_clock::now();
+  if (valid && (now - at) < std::chrono::milliseconds{listPanesJsonTtlMs()}) {
+    return cached;
+  }
+  const auto [rc, out] = runCapture({"zellij", "action", "list-panes",
+                                     "--json"});
+  cached = rc == 0 ? out : std::string{};
+  at = now;
+  valid = true;
+  return cached;
+}
+
 }  // namespace
 
 auto paneId(std::string_view name) -> std::string {
-  // zellij action list-panes --json — we parse it ourselves to avoid
-  // shelling out to jq. The output is pretty-printed (one field per
+  // list-panes --json (cached — see listPanesJsonCached) parsed inline to
+  // avoid shelling out to jq. The output is pretty-printed (one field per
   // line, `"key": value`), so the key/value separators carry a space.
   // We slice the output into per-object windows by walking `{` / `}`
   // brace depth, then check each window for matching title +
   // is_plugin=false and extract `id`.
-  const auto [rc, out] = runCapture({"zellij", "action", "list-panes",
-                                     "--json"});
-  if (rc != 0) return {};
+  const std::string out = listPanesJsonCached();
+  if (out.empty()) return {};
 
   std::vector<long> ids;
 

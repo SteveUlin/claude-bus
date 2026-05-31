@@ -310,13 +310,15 @@ if [ -n "$role" ]; then
 fi
 
 # Per-agent reasoning effort. comms is sulin's interface (converse / relay /
-# surface) — keep it snappy at LOW. Every other agent stays on claude's
-# DEFAULT: the flag is omitted (not hardcoded to a level), so coders + auri
-# are untouched. Levels: low|medium|high|xhigh|max.
+# surface) — keep it snappy at LOW. auri is the fleet PM/hub — give it the
+# most headroom at XHIGH. Every other agent (coders) stays on claude's
+# DEFAULT: the flag is omitted (not hardcoded), so they're untouched.
+# Levels: low|medium|high|xhigh|max.
 claude_effort_flag=()
-if [ "$name" = "comms" ]; then
-    claude_effort_flag=(--effort low)
-fi
+case "$name" in
+    comms) claude_effort_flag=(--effort low) ;;
+    auri)  claude_effort_flag=(--effort xhigh) ;;
+esac
 
 export CLAUDE_BUS_AGENT_ID="$name"
 export CLAUDE_BUS_AGENT_ROLE="$role"

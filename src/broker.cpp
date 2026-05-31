@@ -48,27 +48,8 @@ auto readFileTrimmed(const std::string& path) -> std::string {
   return s;
 }
 
-// C2 idempotency — the last msg_id delivered to a (topic, consumer),
-// persisted next to its cursor as `<consumer>.lastid`. Derived by
-// swapping the `.cursor` suffix so it inherits the exact namespace the
-// C1 fix collapses single-recipient kinds onto.
-auto lastIdPath(const std::string& cursor_path) -> std::string {
-  constexpr std::string_view kSuffix = ".cursor";
-  if (cursor_path.size() >= kSuffix.size() &&
-      cursor_path.compare(cursor_path.size() - kSuffix.size(),
-                          kSuffix.size(), kSuffix) == 0) {
-    return cursor_path.substr(0, cursor_path.size() - kSuffix.size()) +
-           ".lastid";
-  }
-  return cursor_path + ".lastid";
-}
-
-auto writeLastId(const std::string& path, const std::string& id) -> bool {
-  std::ofstream out{path, std::ios::trunc};
-  if (!out) return false;
-  out << id << '\n';
-  return out.good();
-}
+// (C2/D3 lastid helpers moved to topic:: in topic_log — shared with the
+// scanEvents bus-ack handler that stamps the marker at ack-time.)
 
 // Append one structured line to broker.log. Format:
 //   ISO8601 TAG key=val key=val ...
@@ -714,7 +695,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   //     hazard that the push path carries.
   // Returns {deferred: bool, messages: [...]}. Capped per call; the rest
   // drain on the agent's next turn.
-  server.on("drain", [&, messageToJson](const json::Value& req) {
+  server.on("drain", [&, messageToJson, &dl_ref = dl](const json::Value& req) {
     const auto agent = req.getOrString("agent");
     if (agent.empty()) return json::errorResponse("missing agent");
     const auto topic_name = std::string{"inbox-"} + agent;
@@ -753,42 +734,43 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     auto r = log.peek(start, kDrainCap);
     if (!r) return json::errorResponse(r.error().message);
 
-    // C2: idempotency floor. Persist the last msg_id handed to this inbox
-    // and skip any record carrying an already-seen id, so a record can't be
-    // injected twice when the cursor failed to advance (crash window) or a
-    // producer re-enqueues under the same id. This is the consecutive-dup
-    // guard the spec calls for; full set-based dedup is left to the PEL.
-    const auto lastid_p = lastIdPath(cursor_p);
-    const auto last_id = readFileTrimmed(lastid_p);
+    // C2 idempotency read — skip a record already acked (its bus-ack
+    // advanced the cursor and stamped this marker). Guards the boundary
+    // when a re-presented record momentarily sits at/before the cursor.
+    const auto last_id = topic::readLastId(topic::lastIdPath(cursor_p));
 
+    // D3: a DELIVERED record does NOT advance the cursor here — it is
+    // registered in-flight and acked later by {event:bus-ack,msg_id} the
+    // drain hook emits (scanEvents advances the cursor + stamps lastid at
+    // ACK-time). Only LEADING drops (TTL / stale-epoch / already-acked)
+    // advance the cursor; once a record is delivered, a trailing drop
+    // can't advance past it (that would consume the un-acked record), so
+    // advancement stops at the first delivery. No bus-ack ⇒ cursor stays
+    // ⇒ next drain re-delivers (at-least-once); the lastid marker (set
+    // only at ack) keeps dedup correct across that re-delivery.
     const auto now = nowMs();
     std::vector<json::Value> out;
     std::int64_t advance_to = -1;
-    std::string delivered_id;
+    bool delivered_any = false;
     for (const auto& m : *r) {
-      if (m.ttl_ms != 0 &&
-          m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now) {
-        advance_to = m.next_offset;  // expired — skip + advance past
-        continue;
-      }
-      if (delivery::recordEpoch(m) != current_epoch) {
-        advance_to = m.next_offset;  // stale epoch — drop + advance past
-        continue;
-      }
-      if (!last_id.empty() && m.id == last_id) {
-        advance_to = m.next_offset;  // already delivered — skip + advance past
+      const bool ttl_expired =
+          m.ttl_ms != 0 &&
+          m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now;
+      const bool stale_epoch = delivery::recordEpoch(m) != current_epoch;
+      const bool already_acked = !last_id.empty() && m.id == last_id;
+      if (ttl_expired || stale_epoch || already_acked) {
+        if (!delivered_any) advance_to = m.next_offset;  // leading drop only
         continue;
       }
       out.push_back(messageToJson(m));
-      advance_to = m.next_offset;
-      delivered_id = m.id;
+      dl_ref.noteDrainDelivery(m.id, topic_name, agent, m.next_offset);
+      delivered_any = true;
     }
     if (advance_to >= 0) {
       if (!topic::writeCursor(cursor_p, advance_to)) {
         return json::errorResponse("cursor write failed");
       }
     }
-    if (!delivered_id.empty()) writeLastId(lastid_p, delivered_id);
     resp.insert({"deferred", json::Value::from(false)});
     resp.insert({"messages", json::Value::fromArray(std::move(out))});
     return json::okResponse(std::move(resp));

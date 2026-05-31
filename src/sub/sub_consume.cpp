@@ -7,17 +7,50 @@
 #include "../rpc.h"
 #include "../sub.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <map>
 #include <print>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace bus {
 
 namespace {
+
+// ISO-8601 UTC millisecond timestamp, matching log-event.sh's `date -u
+// +%FT%T.%3NZ` so bus-ack lines read like every other events.jsonl line.
+auto isoNowMs() -> std::string {
+  using namespace std::chrono;
+  const auto now = system_clock::now();
+  const auto t = system_clock::to_time_t(now);
+  const auto ms =
+      duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
+  std::tm tm;
+  ::gmtime_r(&t, &tm);
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+  return std::format("{}.{:03d}Z", buf, static_cast<int>(ms));
+}
+
+// Append one line to events.jsonl atomically (single O_APPEND write,
+// well under the 4 KiB single-write atomicity bound), so it interleaves
+// safely with the shell hooks' concurrent appends.
+auto appendEventLine(const std::string& path, const std::string& line)
+    -> void {
+  const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+  if (fd < 0) return;
+  const std::string buf = line + "\n";
+  [[maybe_unused]] const auto n = ::write(fd, buf.data(), buf.size());
+  ::close(fd);
+}
 
 auto printMessage(const json::Value& m) -> void {
   if (!m.isObject()) return;
@@ -123,6 +156,7 @@ auto subDrain(std::span<const char* const> args) -> int {
   }
 
   std::string ctx;
+  std::vector<std::string> acked;  // msg_ids actually injected this drain
   for (const auto& m : msgs->asArray()) {
     if (!m.isObject()) continue;
     ctx += "## bus mail from ";
@@ -130,6 +164,7 @@ auto subDrain(std::span<const char* const> args) -> int {
     ctx += '\n';
     ctx += m.getOrString("body");
     ctx += "\n\n";
+    if (const auto id = m.getOrString("id"); !id.empty()) acked.push_back(id);
   }
   if (ctx.empty()) return 0;
 
@@ -139,6 +174,32 @@ auto subDrain(std::span<const char* const> args) -> int {
   std::map<std::string, json::Value> out;
   out.insert({"hookSpecificOutput", json::Value::fromObject(std::move(hso))});
   std::println("{}", json::serialize(json::Value::fromObject(std::move(out))));
+
+  // D3: now that the records are committed to the model as
+  // additionalContext, emit one {event:bus-ack,payload:{msg_id}} per
+  // delivered record to events.jsonl. The broker's scanEvents acks by id
+  // — advancing the inbox cursor + stamping the lastid marker — so a
+  // record is consumed only once the agent has actually been handed it
+  // (no bus-ack ⇒ the un-advanced cursor re-delivers next turn). stdout
+  // above stays clean (it IS the hook's additionalContext payload).
+  if (!acked.empty()) {
+    const char* sess = std::getenv("CLAUDE_BUS_AGENT_SESSION");
+    const auto ts = isoNowMs();
+    const auto log_path = cfg.state_dir + "/events.jsonl";
+    for (const auto& id : acked) {
+      std::map<std::string, json::Value> payload;
+      payload.insert({"msg_id", json::Value::from(id)});
+      std::map<std::string, json::Value> line;
+      line.insert({"ts", json::Value::from(ts)});
+      line.insert({"session",
+                   json::Value::from(std::string{sess ? sess : ""})});
+      line.insert({"agent", json::Value::from(agent)});
+      line.insert({"event", json::Value::from(std::string{"bus-ack"})});
+      line.insert({"payload", json::Value::fromObject(std::move(payload))});
+      appendEventLine(
+          log_path, json::serialize(json::Value::fromObject(std::move(line))));
+    }
+  }
   return 0;
 }
 

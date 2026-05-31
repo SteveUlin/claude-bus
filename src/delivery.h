@@ -104,6 +104,16 @@ class Loop {
   // audit trail), or std::nullopt otherwise.
   auto forgetInflight(const std::string& msg_id) -> std::optional<InFlight>;
 
+  // Register a record delivered via the off-TTY drain pull as in-flight,
+  // awaiting a {event:bus-ack,msg_id}. The cursor is NOT advanced here
+  // (the ack advances it); next_retry_at is 0 so scanRetries never
+  // TTY-re-dispatches it (off-TTY has no pane to type into) — re-delivery
+  // happens by the next drain re-reading the un-advanced cursor. Called
+  // from the broker's `drain` RPC handler. Idempotent per msg_id.
+  auto noteDrainDelivery(const std::string& msg_id, const std::string& topic,
+                         const std::string& agent,
+                         std::int64_t cursor_after) -> void;
+
  private:
   const BrokerConfig& cfg_;
   TopicRegistry& registry_;

@@ -2,6 +2,7 @@
 
 #include "agent_status.h"
 #include "dispatch.h"
+#include "event.h"
 #include "json_min.h"
 #include "pane.h"
 #include "retention.h"
@@ -282,6 +283,23 @@ auto Loop::forgetInflight(const std::string& msg_id)
   return snap;
 }
 
+auto Loop::noteDrainDelivery(const std::string& msg_id,
+                             const std::string& topic,
+                             const std::string& agent,
+                             std::int64_t cursor_after) -> void {
+  InFlight f;
+  f.msg_id = msg_id;
+  f.topic = topic;
+  f.agent = agent;
+  f.dispatched_at_ms = nowMs();
+  f.cursor_after = cursor_after;
+  f.attempts = 1;
+  f.next_retry_at = 0;  // scanRetries skips (<=0): drain re-delivers, never
+                        // TTY-re-dispatch an off-TTY record.
+  in_flight_.insert_or_assign(msg_id, f);
+  writeInflight(f);
+}
+
 auto Loop::scanEvents() -> void {
   const std::string log = cfg_.state_dir + "/events.jsonl";
   bus::TailReader reader{log};
@@ -300,11 +318,14 @@ auto Loop::scanEvents() -> void {
   // now live in one tested component.
   for (auto& line : reader.poll()) {
     if (line.empty()) continue;
-    auto v = json::parse(line);
-    if (!v || !v->isObject()) continue;
-
-    const auto event = v->getOrString("event");
-    const auto agent = v->getOrString("agent");
+    // D7: one typed parse per line (json_min under the hood), shared by
+    // every branch — payload.* fields (reason/source/msg_id) come out
+    // typed, killing the top-level-vs-payload misreads the flat scanners
+    // had (e.g. `reason` lived at payload.reason, never top-level).
+    const auto ev = parseEvent(line);
+    if (!ev) continue;
+    const auto& event = ev->event;
+    const auto& agent = ev->agent;
     if (agent.empty()) continue;
 
     // Blocking-op ACK: either Stop (normal slash completion) or
@@ -316,8 +337,7 @@ auto Loop::scanEvents() -> void {
     const bool is_blocking_op_ack =
         event == "Stop" ||
         (event == "SessionEnd" &&
-         (v->getOrString("reason") == "clear" ||
-          v->getOrString("reason") == "compact"));
+         (ev->reason == "clear" || ev->reason == "compact"));
     if (is_blocking_op_ack && blocking_ops_.contains(agent)) {
       // The blocking-op msg_id is also tracked as in-flight (the
       // dispatch wrote it there). Clear both atomically.
@@ -385,7 +405,7 @@ auto Loop::scanEvents() -> void {
         topic::SendOpts a_opts;
         a_opts.protocol = "agent-end";
         stampEpoch(a_opts, current_epoch_);
-        const auto reason = v->getOrString("reason");
+        const auto& reason = ev->reason;
         auto _ = audit_log.append(
             "broker",
             std::format("agent-end agent={} reason={} released={}",
@@ -402,12 +422,36 @@ auto Loop::scanEvents() -> void {
     // to "—" until the next mail with --title sets a new one.
     // /compact preserves a summary of context, so its title stays.
     if (event == "SessionStart") {
-      const auto* payload = v->get("payload");
-      if (payload != nullptr && payload->isObject() &&
-          payload->getOrString("source") == "clear") {
+      if (ev->source == "clear") {
         std::error_code ec;
         fs::remove(cfg_.state_dir + "/title/" + agent, ec);
       }
+      continue;
+    }
+
+    // bus-ack (D3): the off-TTY drain hook emits {event:bus-ack,
+    // payload:{msg_id}} after injecting a record as additionalContext.
+    // Ack BY ID — advance that topic's cursor past the record and forget
+    // the in-flight entry — replacing the positional UserPromptSubmit
+    // join below (which stays for TTY agents that have no drain hook to
+    // emit bus-ack). The C2 lastid marker is stamped HERE, at ack-time,
+    // not at drain — so a record whose bus-ack never lands re-drains and
+    // re-delivers (cursor never moved) without being dedup-skipped.
+    if (event == "bus-ack") {
+      const auto& msg_id = ev->msg_id;  // payload.msg_id, typed by parseEvent
+      if (msg_id.empty()) continue;
+      auto it = in_flight_.find(msg_id);
+      if (it == in_flight_.end()) continue;  // unknown / already acked
+      const auto cursor_p =
+          topic::cursorPath(cfg_.state_dir, it->second.topic, "");
+      // Monotonic: never move the cursor backwards (out-of-order or
+      // duplicate bus-ack from a re-delivery).
+      if (topic::readCursor(cursor_p) < it->second.cursor_after) {
+        topic::writeCursor(cursor_p, it->second.cursor_after);
+      }
+      topic::writeLastId(topic::lastIdPath(cursor_p), msg_id);
+      removeInflight(msg_id);
+      in_flight_.erase(it);
       continue;
     }
 

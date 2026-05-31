@@ -351,4 +351,45 @@ auto writeCursor(const std::string& path, std::int64_t offset) -> bool {
   return ::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
+auto lastIdPath(const std::string& cursor_path) -> std::string {
+  constexpr std::string_view kSuffix = ".cursor";
+  if (cursor_path.size() >= kSuffix.size() &&
+      cursor_path.compare(cursor_path.size() - kSuffix.size(),
+                          kSuffix.size(), kSuffix) == 0) {
+    return cursor_path.substr(0, cursor_path.size() - kSuffix.size()) +
+           ".lastid";
+  }
+  return cursor_path + ".lastid";
+}
+
+auto readLastId(const std::string& path) -> std::string {
+  Fd fd{::open(path.c_str(), O_RDONLY)};
+  if (!fd.valid()) return {};
+  std::array<char, 256> buf{};
+  const auto n = ::read(fd.get(), buf.data(), buf.size());
+  if (n <= 0) return {};
+  std::string id(buf.data(), static_cast<std::size_t>(n));
+  while (!id.empty() && (id.back() == '\n' || id.back() == '\r' ||
+                         id.back() == ' ')) {
+    id.pop_back();
+  }
+  return id;
+}
+
+auto writeLastId(const std::string& path, const std::string& id) -> bool {
+  std::error_code ec;
+  fs::create_directories(fs::path{path}.parent_path(), ec);
+  if (ec) return false;
+  const std::string tmp = path + ".tmp";
+  Fd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)};
+  if (!fd.valid()) return false;
+  const std::string line = id + "\n";
+  if (::write(fd.get(), line.data(), line.size()) !=
+      static_cast<ssize_t>(line.size())) {
+    return false;
+  }
+  fd.reset();
+  return ::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
 }  // namespace bus::topic

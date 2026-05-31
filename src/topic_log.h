@@ -125,4 +125,12 @@ auto writeCursor(const std::string& path, std::int64_t offset) -> bool;
 auto cursorPath(std::string_view state_root, std::string_view topic,
                 std::string_view consumer) -> std::string;
 
+// Last-acked msg_id marker, stored beside the cursor as
+// `<consumer>.lastid` (derived from the cursor path by suffix swap). The
+// C2/D3 idempotency floor: stamped when a record is acked, read at the
+// drain to skip an already-acked record that momentarily reappears.
+auto lastIdPath(const std::string& cursor_path) -> std::string;
+auto readLastId(const std::string& path) -> std::string;
+auto writeLastId(const std::string& path, const std::string& id) -> bool;
+
 }  // namespace bus::topic

@@ -330,15 +330,17 @@ if [ -n "$role" ]; then
     claude_role_flag=(--append-system-prompt-file "$stripped")
 fi
 
-# Per-agent reasoning effort. comms is sulin's interface (converse / relay /
-# surface) — keep it snappy at LOW. auri is the fleet PM/hub — give it the
-# most headroom at XHIGH. Every other agent (coders) stays on claude's
-# DEFAULT: the flag is omitted (not hardcoded), so they're untouched.
-# Levels: low|medium|high|xhigh|max.
+# Per-agent reasoning effort. comms is sulin's interface — LOW. auri is the
+# fleet PM/hub — XHIGH (reserved for the PM). Every other agent is a coder —
+# explicit HIGH. The coder default is set EXPLICITLY, not left to claude's
+# built-in default: that default is XHIGH for a fresh session, so a no-flag
+# peer (e.g. a fresh taro coder spawned via --project-dir) booted at xhigh
+# until this `*)` rule pinned it. Levels: low|medium|high|xhigh|max.
 claude_effort_flag=()
 case "$name" in
     comms) claude_effort_flag=(--effort low) ;;
     auri)  claude_effort_flag=(--effort xhigh) ;;
+    *)     claude_effort_flag=(--effort high) ;;
 esac
 
 export CLAUDE_BUS_AGENT_ID="$name"
@@ -361,5 +363,35 @@ case ":$PATH:" in
     *:"$BUS_ROOT/bin":*) ;;
     *) export PATH="$BUS_ROOT/bin:$PATH" ;;
 esac
+
+# Trust the project dir up front so claude doesn't HANG on the per-directory
+# "Is this a project you trust?" modal at boot. claude keys trust on the
+# project ROOT (the .git/.jj dir it finds walking up from cwd = PROJECT_ROOT),
+# stored in ~/.claude.json projects[<root>].hasTrustDialogAccepted; there is no
+# CLI/env bypass (only -p/print mode skips it), and --dangerously-skip-
+# permissions does NOT cover it. So pre-register PROJECT_ROOT as trusted — a
+# no-op for claude-bus (already trusted), and what lets a fresh second-repo
+# peer (e.g. ~/taro) boot clean with no manual accept. Idempotent (skip if
+# already true), flock'd against concurrent boots, atomic write; ~/.claude.json
+# is the shared global config so we touch it only when actually needed.
+cfg="$HOME/.claude.json"
+if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
+    (
+        flock 9
+        already=$(jq -r --arg d "$PROJECT_ROOT" \
+            '.projects[$d].hasTrustDialogAccepted // false' "$cfg" 2>/dev/null)
+        if [ "$already" != "true" ]; then
+            tmp="$cfg.bus-trust.$$"
+            if jq --arg d "$PROJECT_ROOT" \
+                    '.projects[$d].hasTrustDialogAccepted = true' \
+                    "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+                mv -f "$tmp" "$cfg"
+            else
+                rm -f "$tmp"
+                echo "agent-launch: WARN could not pre-trust $PROJECT_ROOT in ~/.claude.json" >&2
+            fi
+        fi
+    ) 9>"$HOME/.cache/claude-bus/claude-json.lock"
+fi
 
 exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" --dangerously-skip-permissions

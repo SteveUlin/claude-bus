@@ -23,6 +23,14 @@ ck() {  # ck ACTUAL EXPECTED LABEL
   if [ "$1" = "$2" ]; then echo "  ok: $3"; else
     echo "  FAIL: $3 (got [$1] want [$2])"; fail=1; fi
 }
+# Drive a broker tick so scanEvents consumes any pending {bus-ack,msg_id}
+# events the drain hook wrote to events.jsonl. D3 made off-TTY delivery
+# ack-by-id: the inbox cursor advances only when the broker processes the
+# ack, NOT on the drain itself — so before asserting "consumed", let the
+# ack land. Two pokes (RPC activity drives ticks) + a beat to be safe.
+tick_broker() {
+  "$BUS" state >/dev/null 2>&1; sleep 0.2; "$BUS" state >/dev/null 2>&1
+}
 
 # Isolated broker — inherits CLAUDE_BUS_TTY_AGENTS so its drain RPC sees
 # the opt-out list. NOT nohup/setsid/disown.
@@ -50,9 +58,15 @@ echo "$out" | grep -q '"hookEventName":"UserPromptSubmit"'; ck "$?" 0 "emits add
 echo "$out" | grep -q 'first off-tty message'; ck "$?" 0 "carries first record"
 echo "$out" | grep -q 'second one'; ck "$?" 0 "carries second record"
 
-note "3. drain again -> cursor advanced on consume = the ack; nothing left"
+note "3. ack-by-id: once the drain hook's {bus-ack,msg_id} is consumed, the cursor advances and the inbox is empty"
+# §2's `bus msg drain` emitted one {event:bus-ack,msg_id} per delivered
+# record to events.jsonl. D3 advances the cursor when the broker consumes
+# that ack (NOT on the drain itself) — so a re-drain BEFORE the ack lands
+# would correctly re-deliver (at-least-once). Let the ack land, then it's
+# empty.
+tick_broker
 out2="$("$BUS" msg drain tester)"
-ck "$out2" "" "second drain empty (consume advanced the cursor)"
+ck "$out2" "" "drain empty after bus-ack advanced the cursor (ack-by-id)"
 
 note "4. presence gate: attach, mail, drain DEFERS; detach delivers"
 mkdir -p "$CLAUDE_BUS_STATE/presence"; touch "$CLAUDE_BUS_STATE/presence/tester"
@@ -97,8 +111,9 @@ note "8. exactly one delivery path per agent (no double-delivery)"
 "$BUS" msg mail pathtest "single-path probe" >/dev/null
 op="$("$BUS" msg drain pathtest)"
 echo "$op" | grep -q 'single-path probe'; ck "$?" 0 "off-TTY agent: mail arrives via DRAIN"
+tick_broker  # consume the drain hook's bus-ack so the cursor advances (D3)
 op2="$("$BUS" msg drain pathtest)"
-ck "$op2" "" "off-TTY agent: consumed once, not redelivered"
+ck "$op2" "" "off-TTY agent: consumed once after bus-ack, not redelivered"
 "$BUS" msg mail comms "comms single-path probe" >/dev/null
 oc="$("$BUS" msg drain comms)"
 ck "$oc" "" "TTY agent (comms): drain empty — delivered by PUSH only"

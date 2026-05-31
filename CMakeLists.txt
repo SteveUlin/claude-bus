@@ -37,6 +37,26 @@ target_include_directories(bus_agent_status PUBLIC src)
 # json symbols must resolve after this archive on the link line.
 target_link_libraries(bus_agent_status PUBLIC bus_core)
 
+# Build-commit stamp (D4 code-drift detection). Capture the source commit at
+# configure time into a generated header; agent-launch compares it against
+# landed main and auto-rebuilds bin/bus on drift. Colocated git HEAD == the
+# jj commit_id, so this matches what agent-launch reads via `jj log -r main`.
+# Re-runs every configure — the auto-rebuild does `cmake -S . -B build` first,
+# so a deployed binary's stamp tracks the source it built from. A plain
+# incremental `cmake --build` won't refresh it (no re-configure); that only
+# affects local dev `bus version`, not the auto-rebuild path. "unknown" if
+# git is unavailable.
+execute_process(
+    COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse HEAD
+    OUTPUT_VARIABLE BUS_BUILD_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT BUS_BUILD_COMMIT)
+    set(BUS_BUILD_COMMIT "unknown")
+endif()
+configure_file(${CMAKE_SOURCE_DIR}/src/build_info.h.in
+               ${CMAKE_BINARY_DIR}/build_info.h @ONLY)
+
 # The unified `bus` binary. Owns the broker daemon, all subcommand
 # handlers, RPC, JSON, topic logs, and the delivery loop.
 add_executable(bus
@@ -65,7 +85,7 @@ add_executable(bus
     src/sub/sub_state.cpp
     src/sub/sub_topic.cpp
 )
-target_include_directories(bus PRIVATE src)
+target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})
 target_link_libraries(bus PRIVATE bus_core bus_agent_status)
 
 # Unit tests for the pure logic (json::parse, topic::parseFrom,

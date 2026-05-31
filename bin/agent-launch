@@ -140,6 +140,79 @@ else
 fi
 # -------------------------------------------------------------------------
 
+# --- Deterministic CODE propagation: auto-rebuild on drift (D4) ----------
+# 1b (above) keeps CONFIG fresh per launch. CODE — this binary, this
+# launcher, fleet.kdl — is a SINGLE shared artifact built from / run out of
+# the default-tree checkout, which only advances when rebuilt. We detect
+# drift by comparing the installed binary's build-commit stamp (`bus
+# version`, full 40-hex) to landed main (main_rev, already resolved above —
+# so the fast path adds only one `bus version` call + a string compare, no
+# build). On drift, rebuild ONCE, flock-guarded, so N agents booting at once
+# don't spawn N cmakes (first wins, the rest skip). The fresh binary lands on
+# disk but the running broker + fleet ADOPT it only on restart/relaunch
+# (printed below, never taken here — sulin's keyboard + the broker lifetime
+# contract).
+#
+# SAFETY (unattended, so this matters more than for a manual step): the
+# reconcile default-tree -> main step ABORTS if that tree is dirty — never
+# `jj workspace update-stale` over uncommitted work (the data-loss trap). On
+# dirty: warn loudly, skip the rebuild, boot against the stale binary. Never
+# block boot, never clobber WIP.
+if [ -n "$main_rev" ]; then
+    built_commit=""
+    [ -x "$BUS_ROOT/bin/bus" ] && built_commit=$("$BUS_ROOT/bin/bus" version \
+        2>/dev/null | grep -oE '[0-9a-f]{40}' | head -1)
+    if [ "$built_commit" != "$main_rev" ]; then
+        disp=${built_commit:0:12}; [ -n "$disp" ] || disp="none"
+        echo "agent-launch: code drift — bin/bus @ $disp, main @ ${main_rev:0:12}; rebuilding (flock-guarded)..." >&2
+        rebuild_lock="$HOME/.cache/claude-bus/build.lock"
+        (
+            if flock -n 9; then
+                # Re-check under the lock: a peer boot may have just rebuilt.
+                cur=$("$BUS_ROOT/bin/bus" version 2>/dev/null \
+                    | grep -oE '[0-9a-f]{40}' | head -1)
+                [ "$cur" = "$main_rev" ] && exit 0
+                # git-clean gate (reads the filesystem, so it works even when
+                # jj reports the workspace stale). Never reconcile over WIP.
+                if [ -n "$(git -C "$BUS_ROOT" status --porcelain 2>/dev/null)" ]; then
+                    echo "agent-launch: WARN default tree dirty — skipping rebuild; booting STALE binary. Commit/land the WIP and relaunch to refresh." >&2
+                    exit 0
+                fi
+                old_hash=none
+                [ -x "$BUS_ROOT/bin/bus" ] && old_hash=$(sha256sum "$BUS_ROOT/bin/bus" | cut -d' ' -f1)
+                # Reconcile only if the source itself lags (minimise touching
+                # the default @). jj new main -> empty child of main; clean per
+                # the gate, so no data loss.
+                head=$(git -C "$BUS_ROOT" rev-parse HEAD 2>/dev/null)
+                if [ "$head" != "$main_rev" ]; then
+                    if ! ( cd "$BUS_ROOT" && jj new main ) >/dev/null 2>&1; then
+                        echo "agent-launch: WARN reconcile to main failed — skipping rebuild (stale binary)" >&2
+                        exit 0
+                    fi
+                fi
+                # Re-configure (refreshes the build-commit stamp) then build.
+                if ( cd "$BUS_ROOT" && nix develop --command bash -c \
+                        'cmake -S . -B build >/dev/null && cmake --build build' ) \
+                        >/dev/null 2>&1; then
+                    new_commit=$("$BUS_ROOT/bin/bus" version 2>/dev/null \
+                        | grep -oE '[0-9a-f]{40}' | head -1)
+                    new_hash=$(sha256sum "$BUS_ROOT/bin/bus" | cut -d' ' -f1)
+                    if [ "$old_hash" = "$new_hash" ]; then
+                        echo "agent-launch: bin/bus reconfigured to ${new_commit:0:12} (no binary delta)" >&2
+                    else
+                        echo "agent-launch: *** bin/bus REBUILT ${old_hash:0:12} -> ${new_hash:0:12} (now @ ${new_commit:0:12}). RESTART the broker + RELAUNCH the fleet to ADOPT it (sulin's keyboard; broker lifetime contract — direct zellij child, never nohup/setsid). ***" >&2
+                    fi
+                else
+                    echo "agent-launch: WARN rebuild FAILED — booting against the stale binary" >&2
+                fi
+            else
+                echo "agent-launch: another boot holds the rebuild lock — proceeding; this pane picks up the fresh binary on its next 'bus' call." >&2
+            fi
+        ) 9>"$rebuild_lock"
+    fi
+fi
+# -------------------------------------------------------------------------
+
 # claude-code encodes the project's absolute path into the session
 # storage dir by replacing '/', '.', and '_' all with '-'. The encoded
 # path itself begins with '-' (from the leading '/' of cwd); the literal

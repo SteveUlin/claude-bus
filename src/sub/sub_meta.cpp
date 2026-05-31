@@ -2,6 +2,7 @@
 
 #include "../bus.h"
 #include "../sub.h"
+#include "build_info.h"
 
 #include <cstdio>
 #include <print>
@@ -18,7 +19,9 @@ auto subHelp(std::span<const char* const>) -> int {
 }
 
 auto subVersion(std::span<const char* const>) -> int {
-  std::println("claude-bus 0.4.0-alpha");
+  // The build commit (BUS_BUILD_COMMIT) is the full 40-hex git/jj id; D4's
+  // drift check in agent-launch greps it back out to compare with main.
+  std::println("claude-bus 0.4.0-alpha ({})", BUS_BUILD_COMMIT);
   return 0;
 }
 

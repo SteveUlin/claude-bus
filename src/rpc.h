@@ -40,23 +40,31 @@ class Server {
   // permission error). The error is logged to stderr.
   auto bind() -> bool;
 
-  // Block accepting + serving connections until requestStop() is
-  // called from a signal handler. Returns 0 on clean shutdown.
+  // Block until requestStop() is called (signal handler or `stop` RPC).
+  // Returns 0 on clean shutdown.
   //
-  // When `tick_interval > 0`, the accept loop uses pselect with that
-  // timeout and invokes `on_tick` whenever it fires (no connection
-  // arrived in the window). Tick + RPC handlers run on the same
-  // thread, so neither racing nor synchronization is needed.
+  // Producer/consumer split (Pillar D / W23): THIS thread is intake — it
+  // accept()s, reads + parses one request per connection, and hands the
+  // live fd to a single PROCESSING thread via an internal bounded queue.
+  // Processing owns ALL broker state, runs every handler + `on_tick`, and
+  // writes each reply. So handlers + the tick stay single-threaded (no
+  // locking needed; atomicity by construction) while a slow tick can never
+  // starve intake's accept() and vice-versa. A full queue is shed with a
+  // "broker busy" error rather than blocking intake. One request per
+  // connection (the client half-closes after writing — see call()).
   //
-  // `next_deadline_ms` (D8 Part B) makes escalation deterministic instead
-  // of riding RPC/viewer-poll ticks: after every tick the loop calls it
-  // for the soonest pending deadline (absolute ms-since-epoch, matching
-  // bus::nowMs(); 0 = none) and arms a one-shot timerfd to it. The timerfd
-  // is just another readable fd in the pselect set — it fires via the r>0
-  // path even on a quiet fleet where the r==0 idle-timeout is unreliable.
-  // A past-due deadline is clamped to fire ~immediately (run-once-now);
-  // callers must stop re-emitting an already-handled deadline (escalate-
-  // once) so re-arm can't busy-loop. EINTR/pselect semantics unchanged.
+  // When `tick_interval > 0`, processing runs `on_tick` every tick_interval
+  // as a base-cadence floor, plus immediately after draining any queued
+  // requests (prompt dispatch).
+  //
+  // `next_deadline_ms` (D8 Part B, generalized to W24): the processing
+  // reactor arms a one-shot timerfd to the soonest pending deadline
+  // (absolute ms-since-epoch, matching bus::nowMs(); 0 = none) so
+  // escalation/retry fire deterministically even with ZERO RPC traffic —
+  // the timerfd is a readable fd in processing's pselect set, independent
+  // of viewer polling. A past-due deadline is clamped to fire ~immediately;
+  // callers must stop re-emitting a handled deadline (escalate-once) so
+  // re-arm can't busy-loop.
   auto run(std::chrono::milliseconds tick_interval =
                std::chrono::milliseconds{0},
            std::function<void()> on_tick = nullptr,
@@ -77,7 +85,10 @@ class Server {
   std::uint64_t bound_ino_{0};
   std::map<std::string, Handler, std::less<>> handlers_;
 
-  auto serve(int conn_fd) -> void;
+  // Resolve `req`'s "op" to a registered handler and invoke it, or return a
+  // structured error. Runs on the processing thread only (it reaches into
+  // handler-captured broker state).
+  auto dispatch(const json::Value& req) -> json::Value;
 };
 
 // One-shot client. Connect, send `req` as a single JSON line, read the

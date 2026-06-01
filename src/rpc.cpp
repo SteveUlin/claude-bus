@@ -4,6 +4,7 @@
 #include "state_paths.h"
 
 #include <fcntl.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
@@ -19,9 +20,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <print>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace bus::rpc {
@@ -31,6 +35,65 @@ namespace {
 std::atomic<int> gStopFlag{0};
 
 auto onStop(int) -> void { gStopFlag.store(1, std::memory_order_release); }
+
+// One parsed request handed from the intake thread to the single
+// processing thread, carrying the live connection fd. Processing runs
+// the handler, writes the reply to conn_fd, and closes it. Intake never
+// touches conn_fd after the handoff (except the backpressure-reject path,
+// where the request was never enqueued).
+struct QueuedReq {
+  json::Value req;
+  int conn_fd{-1};
+};
+
+// Bounded, mutex-guarded MPSC queue: many intake pushes (one thread today,
+// but the bound + locking make it safe regardless), one processing drain.
+// This is the ONLY synchronized object in the broker — all broker state
+// stays exclusively on the processing thread, so atomicity holds by
+// construction (see docs/broker-intake-decouple.md §6).
+class CmdQueue {
+ public:
+  explicit CmdQueue(std::size_t max) : max_{max} {}
+
+  // Push one request. Returns false when full — the caller (intake) then
+  // rejects with a constant string, never blocking (a blocked intake would
+  // stop draining accept() and re-wedge; §4).
+  auto push(QueuedReq qr) -> bool {
+    std::lock_guard lk{m_};
+    if (q_.size() >= max_) return false;
+    q_.push_back(std::move(qr));
+    return true;
+  }
+
+  // Drain everything pending in one swap (processing thread only).
+  auto drain() -> std::deque<QueuedReq> {
+    std::lock_guard lk{m_};
+    std::deque<QueuedReq> out;
+    out.swap(q_);
+    return out;
+  }
+
+ private:
+  std::mutex m_;
+  std::deque<QueuedReq> q_;
+  std::size_t max_;
+};
+
+// Max queued-but-unprocessed RPCs before intake sheds load. Override via
+// $CLAUDE_BUS_RPC_QUEUE_MAX (tests). 256 is well above the real fleet's
+// concurrent-RPC rate (a handful of agents + ~1 Hz viewer polls); a flood
+// past it means processing is wedged, and shedding promptly gives the client
+// a fast "busy" instead of parking it behind a deep backlog that may outlast
+// its own wait (auri's depth note — keep it shallow rather than 1024-deep).
+auto queueMax() -> std::size_t {
+  if (const char* e = std::getenv("CLAUDE_BUS_RPC_QUEUE_MAX");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) {
+      return static_cast<std::size_t>(v);
+    }
+  }
+  return 256;
+}
 
 }  // namespace
 
@@ -130,6 +193,31 @@ auto nowMsRt() -> std::int64_t {
 }
 }  // namespace
 
+auto Server::dispatch(const json::Value& req) -> json::Value {
+  const auto handler_name = req.getOrString("op");
+  if (handler_name.empty()) {
+    return json::errorResponse("missing \"op\" field");
+  }
+  auto it = handlers_.find(handler_name);
+  if (it == handlers_.end()) {
+    return json::errorResponse(std::string{"unknown op: "} + handler_name);
+  }
+  return it->second(req);
+}
+
+// Phase 1 (Pillar D / W23 + W24): producer/consumer split. The INTAKE
+// thread (this function's outer loop) only accept()s, reads + parses one
+// request per connection, and hands the live conn_fd to the PROCESSING
+// thread via CmdQueue. Processing — the sole owner of all broker state —
+// runs the handler, writes the reply, closes the fd, and drives the
+// self-driven tick off its own timerfd. See docs/broker-intake-decouple.md.
+//
+// Why this shape: handlers and the delivery tick BOTH mutate registry /
+// cursors / in-flight / topic logs. Keeping them on one thread (processing)
+// preserves today's lock-free atomicity by construction. Intake touches
+// only listen_fd, the queue, and constant strings, so it can never starve
+// processing AND processing can never starve intake's accept() — the
+// fan-out wedge (a slow tick parking the only accept()ing thread) is gone.
 auto Server::run(std::chrono::milliseconds tick_interval,
                  std::function<void()> on_tick,
                  std::function<std::int64_t()> next_deadline_ms) -> int {
@@ -139,185 +227,212 @@ auto Server::run(std::chrono::milliseconds tick_interval,
   }
   installInterruptHandlers(onStop);
 
-  const bool use_pselect = tick_interval.count() > 0 && on_tick;
+  CmdQueue queue{queueMax()};
 
-  // D8 Part B: a one-shot timerfd armed to the soonest pending deadline so
-  // escalation fires deterministically — via the r>0 readable-fd path, not
-  // the r==0 idle-timeout that a quiet (no-RPC) fleet never reaches. Only
-  // created when a deadline source is supplied; absence falls back to the
-  // pre-existing tick-driven behavior.
-  int timer_fd = -1;
-  if (use_pselect && next_deadline_ms) {
-    timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (timer_fd < 0) {
-      std::println(stderr, "rpc: timerfd_create: {} (escalation rides ticks)",
-                   std::strerror(errno));
-    }
-  }
-  // Arm to the next deadline after every tick. Disarm (it_value all-zero)
-  // ONLY when nothing is pending; clamp a past-due deadline to ~immediate
-  // (run-once-now) rather than to 0 — 0 would disarm and silently drop the
-  // pending escalation. The deadline source must stop emitting an already-
-  // handled deadline (escalate-once) so a never-clearing condition can't
-  // pin the re-arm at 1 ms and busy-loop.
-  auto rearm = [&]() {
-    if (timer_fd < 0 || !next_deadline_ms) return;
-    const std::int64_t d = next_deadline_ms();
-    struct itimerspec its {};  // all-zero = disarmed
-    if (d > 0) {
-      std::int64_t rel = d - nowMsRt();
-      if (rel < 1) rel = 1;  // past-due → fire ~immediately, never 0/disarm
-      its.it_value.tv_sec = rel / 1000;
-      its.it_value.tv_nsec = (rel % 1000) * 1'000'000;
-    }
-    ::timerfd_settime(timer_fd, 0, &its, nullptr);  // relative arm
-  };
-  // Run one tick at boot so the first deadline is computed and the timerfd
-  // armed immediately — without this the timerfd can't arm until something
-  // ELSE ticks the loop (an RPC or the idle timeout), and on a quiet fleet
-  // the idle timeout is unreliable (EINTR-starved). The boot tick makes the
-  // fire→tick→re-arm chain self-sustaining with zero RPC traffic.
-  if (use_pselect && on_tick) {
-    on_tick();
-    rearm();
-  } else {
-    rearm();
+  // eventfd the intake thread signals after each push so processing wakes
+  // promptly to drain + dispatch (rather than waiting out its base-cadence
+  // poll). Counting semaphore semantics; we drain the counter and then
+  // drain the whole queue, so a coalesced signal still processes every push.
+  const int event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (event_fd < 0) {
+    std::println(stderr, "rpc: eventfd: {}", std::strerror(errno));
+    return 1;
   }
 
-  while (!gStopFlag.load(std::memory_order_acquire)) {
-    if (use_pselect) {
+  // ---- processing thread: sole owner of broker state + the tick ----
+  auto process_main = [&]() {
+    // D8 Part B timerfd, now owned by the processing reactor: armed to the
+    // soonest pending deadline so escalation/retry fire deterministically
+    // even with zero RPC traffic (the quiet-fleet fix, generalized to the
+    // whole tick — W24). Only created when a deadline source is supplied.
+    int timer_fd = -1;
+    if (on_tick && next_deadline_ms) {
+      timer_fd = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+      if (timer_fd < 0) {
+        std::println(stderr,
+                     "rpc: timerfd_create: {} (deadlines ride base cadence)",
+                     std::strerror(errno));
+      }
+    }
+    // Arm to the next deadline. Disarm only when nothing is pending; clamp a
+    // past-due deadline to ~immediate (never 0 — 0 disarms and drops it). The
+    // deadline source must stop re-emitting a handled deadline (escalate-once)
+    // so a never-clearing condition can't pin the re-arm at 1 ms and busy-loop.
+    auto rearm = [&]() {
+      if (timer_fd < 0 || !next_deadline_ms) return;
+      const std::int64_t d = next_deadline_ms();
+      struct itimerspec its {};  // all-zero = disarmed
+      if (d > 0) {
+        std::int64_t rel = d - nowMsRt();
+        if (rel < 1) rel = 1;  // past-due → fire ~immediately, never 0/disarm
+        its.it_value.tv_sec = rel / 1000;
+        its.it_value.tv_nsec = (rel % 1000) * 1'000'000;
+      }
+      ::timerfd_settime(timer_fd, 0, &its, nullptr);  // relative arm
+    };
+
+    // Drain + answer every queued request in one batch per wake. Runs the
+    // handler on THIS thread (the state owner), writes the reply, closes the fd.
+    //
+    // FD-OWNERSHIP CONTRACT (auri's refinement #1): once a request is
+    // ENQUEUED, the processing thread owns close() on EVERY path — normal
+    // reply here, or the "shutting down" drain below. The intake side closes
+    // only fds it never enqueued (parse/read error, or a backpressure reject).
+    // So a conn is closed exactly once, by exactly one side. If the client
+    // disconnected while queued, writeAll's ::write yields EPIPE (SIGPIPE is
+    // SIG_IGN'd in installInterruptHandlers) → writeAll returns false → we
+    // still ::close. No leak (→ EMFILE) and no crash.
+    auto serve_queue = [&]() {
+      for (auto& qr : queue.drain()) {
+        const auto resp = json::serialize(dispatch(qr.req));
+        writeAll(qr.conn_fd, resp);
+        ::close(qr.conn_fd);
+      }
+    };
+
+    // Boot tick so the first deadline is computed + the timerfd armed without
+    // waiting for an external event (the quiet-fleet self-sustaining chain).
+    if (on_tick) {
+      on_tick();
+      rearm();
+    }
+
+    // Base cadence: keep a periodic floor so the self-rate-limited scans
+    // (doorbell/token/trim/auto-clear) still get polled on a silent fleet,
+    // and so the stop flag is rechecked promptly. 250 ms by default (the
+    // historical tick interval); falls back to 250 ms when no tick is wired,
+    // purely for stop responsiveness.
+    const auto base = tick_interval.count() > 0 ? tick_interval
+                                                : std::chrono::milliseconds{250};
+
+    while (!gStopFlag.load(std::memory_order_acquire)) {
       fd_set rfds;
       FD_ZERO(&rfds);
-      FD_SET(listen_fd_, &rfds);
-      int maxfd = listen_fd_;
+      FD_SET(event_fd, &rfds);
+      int maxfd = event_fd;
       if (timer_fd >= 0) {
         FD_SET(timer_fd, &rfds);
         if (timer_fd > maxfd) maxfd = timer_fd;
       }
       struct timespec ts {};
-      ts.tv_sec = tick_interval.count() / 1000;
-      ts.tv_nsec = (tick_interval.count() % 1000) * 1000000;
+      ts.tv_sec = base.count() / 1000;
+      ts.tv_nsec = (base.count() % 1000) * 1'000'000;
       sigset_t empty;
       sigemptyset(&empty);
-      const int r =
-          ::pselect(maxfd + 1, &rfds, nullptr, nullptr, &ts, &empty);
+      const int r = ::pselect(maxfd + 1, &rfds, nullptr, nullptr, &ts, &empty);
       if (r < 0) {
         if (errno == EINTR) continue;
-        std::println(stderr, "rpc: pselect: {}", std::strerror(errno));
-        return 1;
+        std::println(stderr, "rpc: pselect(proc): {}", std::strerror(errno));
+        break;
       }
-      // Timerfd fired: drain the expiration count, run the tick, re-arm.
-      // A ready listen_fd (if any) is served on the next iteration via the
-      // kernel backlog — no starvation.
+      // Drain the eventfd counter if it fired (coalesced signals are fine —
+      // serve_queue drains the WHOLE queue regardless of the count).
+      if (event_fd >= 0 && FD_ISSET(event_fd, &rfds)) {
+        std::uint64_t v = 0;
+        [[maybe_unused]] ssize_t n = ::read(event_fd, &v, sizeof(v));
+      }
       if (timer_fd >= 0 && FD_ISSET(timer_fd, &rfds)) {
         std::uint64_t expirations = 0;
         [[maybe_unused]] ssize_t n =
             ::read(timer_fd, &expirations, sizeof(expirations));
+      }
+      // Answer any pending RPCs FIRST so handlers see current state, then
+      // tick so delivery decisions see the just-applied mutations. Drain
+      // unconditionally (not only on the eventfd path) to absorb a push that
+      // raced in after the last drain.
+      serve_queue();
+      if (on_tick) {
         on_tick();
         rearm();
-        continue;
       }
-      if (r == 0) {
-        on_tick();
-        rearm();
-        continue;
-      }
-      // r > 0: connection ready. Drain a backlog before the next tick,
-      // but cap the inner-loop duration so on_tick is guaranteed to
-      // fire at least every kInnerBudget regardless of RPC volume.
-      //
-      // History: without this cap, sustained 1-Hz polling from viewer
-      // panes (monitor + per-agent agent-bar) combined with slow
-      // per-RPC paneState calls (zellij dump-screen sometimes blocks
-      // for seconds) kept the inner loop indefinitely topped up. The
-      // broker stayed alive, RPCs returned, but the delivery tick
-      // never fired — records sat un-acked, in-flight retries never
-      // re-armed.
-      constexpr auto kInnerBudget = std::chrono::milliseconds{100};
-      const auto inner_deadline =
-          std::chrono::steady_clock::now() + kInnerBudget;
-      while (true) {
-        const int conn = ::accept(listen_fd_, nullptr, nullptr);
-        if (conn < 0) {
-          if (errno == EINTR) continue;
-          if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-          break;
-        }
-        serve(conn);
-        ::close(conn);
-        if (std::chrono::steady_clock::now() >= inner_deadline) {
-          // Yield to the tick. Any queued connections will be picked
-          // up by the next outer pselect; the listen socket's kernel
-          // backlog keeps them safe.
-          break;
-        }
-        // poll for another pending connection without blocking
-        fd_set rfds2;
-        FD_ZERO(&rfds2);
-        FD_SET(listen_fd_, &rfds2);
-        struct timespec zero {};
-        if (::pselect(listen_fd_ + 1, &rfds2, nullptr, nullptr, &zero,
-                      &empty) <= 0) {
-          break;
-        }
-      }
-      // Run the tick after handling RPCs so delivery decisions see the
-      // latest state.
-      on_tick();
-      rearm();
-      continue;
     }
 
-    const int conn = ::accept(listen_fd_, nullptr, nullptr);
-    if (conn < 0) {
+    // Clean shutdown: answer any still-queued requests with a constant error
+    // so in-flight clients get a reply instead of a connection reset.
+    for (auto& qr : queue.drain()) {
+      writeAll(qr.conn_fd,
+               json::serialize(json::errorResponse("broker shutting down")));
+      ::close(qr.conn_fd);
+    }
+    if (timer_fd >= 0) ::close(timer_fd);
+  };
+
+  std::thread proc_thread{process_main};
+
+  // ---- intake thread (this thread): accept, parse, hand off ----
+  // pselect on the listen fd with the base poll so we recheck gStopFlag
+  // even when no connection arrives (stop responsiveness). Intake NEVER
+  // runs a handler and NEVER blocks on processing — a full queue is shed
+  // with a constant string, not a block (a blocked intake would stop
+  // draining accept() and reintroduce the wedge).
+  const auto intake_poll = std::chrono::milliseconds{250};
+  while (!gStopFlag.load(std::memory_order_acquire)) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(listen_fd_, &rfds);
+    struct timespec ts {};
+    ts.tv_sec = intake_poll.count() / 1000;
+    ts.tv_nsec = (intake_poll.count() % 1000) * 1'000'000;
+    sigset_t empty;
+    sigemptyset(&empty);
+    const int r =
+        ::pselect(listen_fd_ + 1, &rfds, nullptr, nullptr, &ts, &empty);
+    if (r < 0) {
       if (errno == EINTR) continue;
-      std::println(stderr, "rpc: accept: {}", std::strerror(errno));
-      return 1;
+      std::println(stderr, "rpc: pselect(intake): {}", std::strerror(errno));
+      break;
     }
-    serve(conn);
-    ::close(conn);
-  }
-  if (timer_fd >= 0) ::close(timer_fd);
-  return 0;
-}
+    if (r == 0) continue;  // poll timeout — recheck stop flag
 
-auto Server::serve(int conn_fd) -> void {
-  while (true) {
-    auto line = readLine(conn_fd);
-    if (!line) {
-      // EOF or read error; client disconnected or socket failed.
-      if (line.error().message != "EOF before newline") {
-        const auto resp = json::serialize(json::errorResponse(line.error().message));
-        writeAll(conn_fd, resp);
+    // Drain the accept backlog. Each connection carries exactly one request
+    // (the client half-closes after writing — see call()), so we read one
+    // line, parse it, and hand the fd to processing.
+    while (true) {
+      const int conn = ::accept(listen_fd_, nullptr, nullptr);
+      if (conn < 0) {
+        if (errno == EINTR) continue;
+        break;  // EAGAIN/EWOULDBLOCK or error → backlog drained
       }
-      return;
-    }
-    auto req = json::parse(*line);
-    if (!req) {
-      const auto resp = json::serialize(json::errorResponse(req.error()));
-      writeAll(conn_fd, resp);
-      continue;
-    }
-    auto handler_name = req->getOrString("op");
-    if (handler_name.empty()) {
-      const auto resp =
-          json::serialize(json::errorResponse("missing \"op\" field"));
-      writeAll(conn_fd, resp);
-      continue;
-    }
-    auto it = handlers_.find(handler_name);
-    if (it == handlers_.end()) {
-      const auto resp = json::serialize(
-          json::errorResponse(std::string{"unknown op: "} + handler_name));
-      writeAll(conn_fd, resp);
-      continue;
-    }
-    auto resp = it->second(*req);
-    const auto resp_str = json::serialize(resp);
-    if (!writeAll(conn_fd, resp_str)) {
-      return;
+      auto line = readLine(conn);
+      if (!line) {
+        if (line.error().message != "EOF before newline") {
+          writeAll(conn,
+                   json::serialize(json::errorResponse(line.error().message)));
+        }
+        ::close(conn);
+        continue;
+      }
+      auto req = json::parse(*line);
+      if (!req) {
+        // Parse error is derived from the input, not from broker state —
+        // safe for intake to answer directly.
+        writeAll(conn, json::serialize(json::errorResponse(req.error())));
+        ::close(conn);
+        continue;
+      }
+      if (!queue.push(QueuedReq{std::move(*req), conn})) {
+        // Backpressure: queue full → processing is wedged or slammed. Shed
+        // with a constant string (no broker-state access) and close. CLI
+        // RPCs are idempotent one-shots, so a retry is safe.
+        writeAll(conn,
+                 json::serialize(json::errorResponse("broker busy, retry")));
+        ::close(conn);
+        std::println(stderr, "rpc: queue full — shed one request (busy)");
+        continue;
+      }
+      // Wake processing to drain promptly.
+      std::uint64_t one = 1;
+      [[maybe_unused]] ssize_t n = ::write(event_fd, &one, sizeof(one));
     }
   }
+
+  // Stop requested (signal or `stop` RPC). Kick processing out of its
+  // pselect and join it before tearing down fds.
+  std::uint64_t one = 1;
+  [[maybe_unused]] ssize_t n = ::write(event_fd, &one, sizeof(one));
+  proc_thread.join();
+  ::close(event_fd);
+  return 0;
 }
 
 auto readLine(int fd, std::size_t max_bytes)

@@ -37,6 +37,8 @@ auto subAgentBar(std::span<const char* const>) -> int;
 
 // Lifecycle (defined in src/sub/sub_lifecycle.cpp).
 auto subSpawn(std::span<const char* const>) -> int;
+auto subRestorePeers(std::span<const char* const>) -> int;
+auto subDespawn(std::span<const char* const>) -> int;
 
 // Broker daemon (defined in src/sub/sub_broker.cpp).
 auto subBroker(std::span<const char* const>) -> int;

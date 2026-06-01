@@ -5,6 +5,7 @@
 // bin/agent-launch; this only ports the outer "create a tab" wrapper.
 
 #include "../sub.h"
+#include "../state_paths.h"
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -12,7 +13,9 @@
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <print>
 #include <sstream>
 #include <span>
@@ -242,10 +245,97 @@ layout {{
     std::println(stderr, "bus spawn: zellij action new-tab failed (rc={})", rc);
     return rc < 0 ? 1 : rc;
   }
+  // P4 — persist this dynamic peer so a fleet-layout relaunch restores it.
+  // fleet.kdl agents never come through `bus spawn`, so the registry holds
+  // exactly the dynamically-spawned peers (kilvin, the taro spokes, ...).
+  // One file per peer under $STATE/dynamic-peers/ — atomic add/remove, no
+  // rewrite races. Records the respawn spec (role + project_dir); session
+  // continuity is free (agent-launch --continue resumes by name+workspace).
+  {
+    namespace fs = std::filesystem;
+    const std::string reg_dir = stateRoot() + "/dynamic-peers";
+    std::error_code ec;
+    fs::create_directories(reg_dir, ec);
+    std::ofstream out{reg_dir + "/" + name};
+    if (out) {
+      out << "role=" << role << "\n"
+          << "project_dir=" << project_dir << "\n";
+    }
+  }
+
   // Silent success used to leave callers unsure whether anything
   // happened. One-line confirmation on stdout matches the rest of the
   // bus CLI's "did the thing" voice.
   std::println("spawned tab \"{}\"", name);
+  return 0;
+}
+
+// P4 — re-spawn every persisted dynamic peer. Run automatically at fleet
+// startup (a step in fleet.kdl) so a layout relaunch restores kilvin + the
+// taro spokes with no manual re-spawn. Safe to re-run: subSpawn dedups on
+// tab-name-exists, so peers already up are skipped. Each re-spawn RESUMES
+// the peer's prior session (agent-launch --continue keys on name+workspace),
+// bringing back its in-progress context, not a fresh agent.
+auto subRestorePeers(std::span<const char* const>) -> int {
+  namespace fs = std::filesystem;
+  const std::string reg_dir = stateRoot() + "/dynamic-peers";
+  std::error_code ec;
+  if (!fs::exists(reg_dir, ec)) {
+    std::println("restore-peers: no dynamic peers registered");
+    return 0;
+  }
+  int registered = 0, spawned = 0;
+  for (const auto& entry : fs::directory_iterator(reg_dir, ec)) {
+    if (!entry.is_regular_file()) continue;
+    const std::string name = entry.path().filename().string();
+    std::string role, project_dir, line;
+    std::ifstream in{entry.path()};
+    while (std::getline(in, line)) {
+      if (line.starts_with("role=")) role = line.substr(5);
+      else if (line.starts_with("project_dir=")) project_dir = line.substr(12);
+    }
+    ++registered;
+    std::vector<std::string> a;
+    if (!role.empty()) { a.emplace_back("--role"); a.push_back(role); }
+    if (!project_dir.empty()) {
+      a.emplace_back("--project-dir");
+      a.push_back(project_dir);
+    }
+    a.push_back(name);
+    std::vector<const char*> argv;
+    argv.reserve(a.size());
+    for (const auto& s : a) argv.push_back(s.c_str());
+    // subSpawn returns 0 on a fresh spawn, non-zero when the tab already
+    // exists (dedup) — both are fine; count the fresh ones.
+    if (subSpawn(argv) == 0) ++spawned;
+  }
+  std::println("restore-peers: {} registered, {} newly spawned ({} already up)",
+               registered, spawned, registered - spawned);
+  return 0;
+}
+
+// P4 — explicit teardown verb. Prunes the registry entry (so the peer is NOT
+// restored on the next relaunch) and, if its tab is still up, closes it.
+// "done" is not machine-detectable, so persistence is the default and removal
+// is explicit. Also the building block for agent-culling (P6).
+auto subDespawn(std::span<const char* const> args) -> int {
+  if (args.size() != 1) {
+    std::println(stderr, "usage: bus despawn NAME");
+    return 2;
+  }
+  const std::string name{args[0]};
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const bool pruned = fs::remove(stateRoot() + "/dynamic-peers/" + name, ec);
+  // Close the tab only if it exists AND we can focus it first — gating the
+  // close on go-to-tab-name succeeding avoids ever closing the wrong (merely
+  // focused) tab if this peer's tab already vanished.
+  if (tabNameExists(name) &&
+      runSync({"zellij", "action", "go-to-tab-name", name.c_str()}) == 0) {
+    runSync({"zellij", "action", "close-tab"});
+  }
+  std::println("despawned {}{}", name,
+               pruned ? "" : " (was not in the dynamic-peer registry)");
   return 0;
 }
 

@@ -84,7 +84,16 @@ layout {
                 // runs on 1M, so set it here to report CTX% exactly from
                 // zero instead of under-reporting until an agent crosses
                 // 200k.
-                args "-c" "export CLAUDE_BUS_CTX_WINDOW=1000000; exec \"${CLAUDE_BUS_ROOT:-$PWD}/bin/bus\" broker run"
+                // P4 auto-restore: a relaunch recreates only the fleet tabs,
+                // so dynamically-spawned peers (kilvin, taro spokes) would be
+                // dropped. Background `bus restore-peers` once at startup
+                // (after a short settle so the session + broker are up) to
+                // re-spawn every peer in $STATE/dynamic-peers/ — dedup-safe
+                // (skips any already up), resumes each session. Backgrounded
+                // so the broker still exec's as this pane's direct child
+                // (lifetime contract). No-op on a fresh session (empty
+                // registry).
+                args "-c" "export CLAUDE_BUS_CTX_WINDOW=1000000; B=\"${CLAUDE_BUS_ROOT:-$PWD}\"; ( sleep 3; \"$B/bin/bus\" restore-peers ) >/dev/null 2>&1 & exec \"$B/bin/bus\" broker run"
             }
         }
         // comms-bar at the top: same 1-row strip every agent tab has.

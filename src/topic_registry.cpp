@@ -170,20 +170,44 @@ auto TopicRegistry::getOrAutoCreate(std::string_view name)
     return std::unexpected{Error{std::string{"invalid topic name \""} +
                            std::string{name} + "\""}};
   }
+  // Reject auto-creating a topic whose derived agent is ITSELF a topic
+  // name (begins with inbox-/commands-). This is the only place malformed
+  // nested-prefix topics are born: a caller that passes a topic name where
+  // an agent name is expected — e.g. `bus msg mail inbox-human` does
+  // "inbox-" + "inbox-human" — would otherwise silently create
+  // `inbox-inbox-human` with agent "inbox-human". Fail loudly instead.
+  const auto rejectNested = [&](std::string_view agent) -> bool {
+    return agent.starts_with("inbox-") || agent.starts_with("commands-");
+  };
+
   TopicConfig cfg;
   cfg.name = std::string{name};
   if (name.starts_with("inbox-")) {
+    const auto agent = std::string{name.substr(6)};
+    if (rejectNested(agent)) {
+      return std::unexpected{Error{
+          std::string{"refusing to auto-create nested-prefix topic \""} +
+          std::string{name} + "\" (agent \"" + agent +
+          "\" is itself a topic name); pass a bare agent name"}};
+    }
     cfg.kind = std::string{kKindAgentInbox};
     std::map<std::string, json::Value> kc;
-    kc.insert({"agent", json::Value::from(std::string{name.substr(6)})});
+    kc.insert({"agent", json::Value::from(agent)});
     cfg.kind_config = json::Value::fromObject(std::move(kc));
-    cfg.parsed_config = AgentInboxConfig{std::string{name.substr(6)}};
+    cfg.parsed_config = AgentInboxConfig{agent};
   } else if (name.starts_with("commands-")) {
+    const auto agent = std::string{name.substr(9)};
+    if (rejectNested(agent)) {
+      return std::unexpected{Error{
+          std::string{"refusing to auto-create nested-prefix topic \""} +
+          std::string{name} + "\" (agent \"" + agent +
+          "\" is itself a topic name); pass a bare agent name"}};
+    }
     cfg.kind = std::string{kKindTuiCommands};
     std::map<std::string, json::Value> kc;
-    kc.insert({"agent", json::Value::from(std::string{name.substr(9)})});
+    kc.insert({"agent", json::Value::from(agent)});
     cfg.kind_config = json::Value::fromObject(std::move(kc));
-    cfg.parsed_config = TuiCommandsConfig{std::string{name.substr(9)}};
+    cfg.parsed_config = TuiCommandsConfig{agent};
   } else {
     return std::unexpected{Error{
         std::string{"topic \""} + std::string{name} +

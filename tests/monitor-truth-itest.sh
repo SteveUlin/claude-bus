@@ -16,7 +16,9 @@
 # WHAT THE MONITOR DOES (sub_monitor contextStatsFor / formatCtx / formatEffort,
 # 27af25bc): reads the capture first; CTX = "{used_percentage}%/{window}" with
 # window = context_window_size (formatCtxSize: 1e6→"1M", 200000→"200K"); EFFORT
-# = effort_level verbatim, or "—" when empty (the honest gap).
+# = effort_level verbatim, or "—" when empty (NOT-CAPTURED: pre-relaunch, or a
+# model with no effort field — NOT a harness gap per sulin; .effort.level is a
+# real, live statusline field).
 #
 # Gotchas baked in (project_broker_itest_gotchas + project_fake_zellij_delivery
 # _harness): isolated $STATE; assert on the rendered frame; wait only on named
@@ -82,13 +84,13 @@ echo "2. CTX NUMERATOR (pct) traces to used_percentage, not synthesized"
 fixture 1000000 880000 88 high; r=$(row)
 ck "$(printf '%s' "$r" | grep -cE '88%/1M' || true)" "1" "used_percentage=88 renders '88%' verbatim"
 
-echo "3. EFFORT column reflects LIVE effort, and surfaces a GAP (never a faked launch flag)"
+echo "3. EFFORT column reflects LIVE effort, and shows '—' when not-captured (never a faked launch flag)"
 fixture 1000000 500000 37 high; r=$(row)
 ck "$(printf '%s' "$r" | grep -cE 'opus-4-8[[:space:]]+high[[:space:]]+37%/1M' || true)" "1" "effort_level=high -> EFFORT cell 'high'"
 fixture 1000000 500000 37 max;  r=$(row)
 ck "$(printf '%s' "$r" | grep -cE 'opus-4-8[[:space:]]+max[[:space:]]+37%/1M' || true)" "1" "live change to effort_level=max -> EFFORT cell 'max' (not the stale launch flag)"
 fixture 1000000 500000 37 "";   r=$(row)
-ck "$(printf '%s' "$r" | grep -cE 'opus-4-8[[:space:]]+—[[:space:]]+37%/1M' || true)" "1" "effort_level='' -> EFFORT cell '—' (honest GAP, never faked)"
+ck "$(printf '%s' "$r" | grep -cE 'opus-4-8[[:space:]]+—[[:space:]]+37%/1M' || true)" "1" "effort_level='' -> EFFORT cell '—' (not-captured, never a faked launch flag)"
 
 echo
 if [ "$fail" = 0 ]; then

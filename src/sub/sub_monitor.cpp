@@ -354,9 +354,10 @@ auto ctxColorFor(const CtxStats& s) -> std::string_view {
   return kDim;
 }
 
-// EFFORT column — the live reasoning level. '—' when the statusline capture
-// didn't carry .effort.level (pre-rollout pane, or the field genuinely
-// absent — a surfaced gap, never synthesized).
+// EFFORT column — the live reasoning level from .effort.level (a real
+// statusline-stdin field that reflects /effort changes; authoritative per
+// sulin). '—' means simply not-yet-captured (pre-relaunch) or a model that
+// doesn't support effort — not a harness gap, and never the launch flag.
 auto formatEffort(std::string_view effort) -> std::string {
   if (effort.empty()) return "—";
   return std::string{effort};

@@ -60,12 +60,13 @@ about that framing.)
   is best-effort; nothing can break the render. Project-scoped, so sulin's
   own (non-bus) sessions are untouched (their user `statusLine` still wins).
   Keyed by `$CLAUDE_BUS_AGENT_ID` (exported at agent-launch:388).
-- **The FILE is the stable contract; the wrapper is swappable.**
-  `$STATE/statusline/<agent>.json` is the low-regret interim contract. If
-  OTel later carries `context_window_size` + `effort.level` as attributes,
-  an OTel-derived writer becomes **producer v2** and the monitor read path
-  NEVER changes. Keep the wrapper minimal — do not over-invest in a
-  potentially-interim producer.
+- **The FILE is the stable contract; the producer can change.**
+  `$STATE/statusline/<agent>.json` is the low-regret contract. effort /
+  tokens / model *could* later be sourced from an OTel-derived writer
+  (producer v2) with the monitor read path NEVER changing — but
+  `context_window_size` cannot (OTel doesn't export it; statusline-only), so
+  a window producer is permanent. Keep the wrapper minimal regardless; its
+  irreplaceable job is the window. See the OTel checkpoint below.
 
 ### The contract — `$STATE/statusline/<agent>.json` (PRODUCER-AGNOSTIC)
 
@@ -90,7 +91,7 @@ the v1→v2 swap cheap.
 | `context_window_size` | int | **yes** | → CTX denominator. **AUTHORITATIVE-GATE: a record is honored only when this is > 0**; else the consumer falls back to the broker's `$STATE/status`. A v2 producer that can't supply a real window MUST omit the record, not write 0. |
 | `total_input_tokens` | int | yes | → drives the 200k POLICY color marker (red ≥200k, yellow ≥170k). |
 | `used_percentage` | int | yes | → CTX pct (`25%/1M`). Against the real window. |
-| `effort_level` | string | yes | → EFFORT cell. `""` ⇒ `—` (a surfaced GAP, never the launch flag). |
+| `effort_level` | string | yes | → EFFORT cell. Real live field (reflects `/effort`). `""` ⇒ `—` = not-yet-captured / model-without-effort — NOT a gap, never the launch flag. |
 | `exceeds_200k` | bool | no | Carried for contract; not yet rendered. |
 
 Producer obligations: **atomic write** (tmp + rename — concurrent reader);
@@ -107,24 +108,21 @@ zero monitor change.
   "past the compact line" stays salient even at 25%/1M — the marker, never
   the denominator. EFFORT column shows the live level or `—`.
 
-## OTel checkpoint — OTel is the declared backbone; wrapper is interim
+## OTel checkpoint — RESOLVED: OTel cannot retire the wrapper
 
-sulin's steer (2026-06-02): OTel is the intended home for fleet
-token+cost+model (ideally window+effort) data. This wrapper is officially
-the INTERIM bridge — keep it minimal, expect it to be replaced.
+Answered authoritatively (sulin via claude-code-guide, 2026-06-02 — no
+elodin checkpoint needed): **OTel emits effort + tokens + cost + model, but
+does NOT export `context_window_size`.** The true per-session window
+(200k-vs-1M) is exposed by Claude Code ONLY via statusline stdin — not the
+transcript, not OTel.
 
-**bast is running the OTel empirical eval IN PARALLEL now** (dup-fix has
-landed). Gating question: does OTel emit `context_window_size` +
-`effort.level` as metric/event attributes?
-
-- IF YES for both → an OTel-derived writer becomes **producer v2** targeting
-  the contract above, the wrapper retires fully (retire-v1 finding).
-- IF only token/cost (not window/effort) → OTel replaces the numerator/cost
-  layer, the wrapper stays for window+effort (the CC surface-area gap).
-
-Either way the monitor read path is unchanged. My job: keep the
-`$STATE/statusline` contract clean + documented so the OTel writer can
-target it. Coordinating the field list with bast's eval.
+So the wrapper **STAYS**, narrowed to its one irreplaceable job: capturing
+`context_window_size`. The other fields (effort/tokens/model) *could* later
+be sourced from an OTel-derived writer — but the window cannot, so a window
+producer is permanent unless we accept a fleet CONSTANT instead (sulin
+sub-decision; auri folding it into the OTel fork). The
+`$STATE/statusline/<agent>.json` contract is unchanged either way; this
+wrapper keeps producing the full file as the single producer v1.
 
 ## Next increment — STOP PANE-READING (kvothe champions the monitor side)
 

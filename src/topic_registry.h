@@ -84,6 +84,11 @@ class TopicRegistry {
   // Persists to disk on success.
   auto create(TopicConfig cfg) -> Result<void>;
 
+  // Drop a topic from the registry (broker-GC reap). Errors if absent.
+  // Persists to disk on success. Removes only the registry entry — the
+  // caller is responsible for the topic's log + cursor files.
+  auto remove(std::string_view name) -> Result<void>;
+
   // Existence check.
   auto contains(std::string_view name) const -> bool;
 

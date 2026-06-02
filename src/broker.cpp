@@ -1,6 +1,7 @@
 #include "broker.h"
 
 #include "agent_status.h"
+#include "build_info.h"
 #include "delivery.h"
 #include "json_min.h"
 #include "rpc.h"
@@ -376,6 +377,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     m.insert({"uptime_ms", json::Value::from(nowMs() - started_ms)});
     m.insert({"socket", json::Value::from(cfg.socket_path)});
     m.insert({"state_dir", json::Value::from(cfg.state_dir)});
+    // The commit this broker binary was BUILT from — the same 40-hex stamp
+    // `bus version` prints (build_info.h). Lets a live-vs-canonical check
+    // (gap #11) read the running broker's provenance over one RPC instead
+    // of /proc/<pid>/exe forensics on a binary whose path may be deleted.
+    m.insert({"build_commit", json::Value::from(std::string{BUS_BUILD_COMMIT})});
     m.insert({"topic_count",
               json::Value::from(
                   static_cast<std::int64_t>(registry.list().size()))});
@@ -955,6 +961,130 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"in_flight", json::Value::fromArray(std::move(arr))});
+    return json::okResponse(std::move(resp));
+  });
+
+  // Broker-GC reap: drop orphaned agent-inbox / tui-commands topics whose
+  // agent is gone AND whose log is fully drained. The broker GCs its OWN
+  // $STATE — never an external rm under the live daemon. Two modes:
+  //   - no `agent`: sweep every topic, gated on (not-a-live-agent) AND
+  //     (drained: no in-flight + cursor at log EOF).
+  //   - `agent=NAME`: targeted reap of inbox-NAME + commands-NAME for an
+  //     explicitly despawned peer. Operator intent skips the live-agent
+  //     gate, but the drained gate STILL holds — never drop unread mail.
+  // Explicit-only (no periodic auto-reaper): a booting agent's not-yet-
+  // registered inbox must never be reapable out from under it.
+  // Returns {reaped:[name], skipped:[{name,reason}]}.
+  server.on("gc", [&, &dl_ref = dl](const json::Value& req) {
+    namespace fs = std::filesystem;
+    const auto only_agent = req.getOrString("agent");
+
+    // Live-agent set: registered sessions (agents/*.json, written by
+    // agent-register.sh on SessionStart/End) + dynamic-peers + the
+    // reserved infra inboxes (human/ops) that have no agent session.
+    std::set<std::string> live{"human", "ops"};
+    {
+      std::error_code ec;
+      for (const auto& e :
+           fs::directory_iterator(cfg.state_dir + "/agents", ec)) {
+        if (e.path().extension() == ".json") {
+          live.insert(e.path().stem().string());
+        }
+      }
+      for (const auto& e :
+           fs::directory_iterator(cfg.state_dir + "/dynamic-peers", ec)) {
+        live.insert(e.path().filename().string());
+      }
+    }
+
+    std::vector<json::Value> reaped;
+    std::vector<json::Value> skipped;
+    auto skip = [&](const std::string& name, const std::string& reason) {
+      std::map<std::string, json::Value> o;
+      o.insert({"name", json::Value::from(name)});
+      o.insert({"reason", json::Value::from(reason)});
+      skipped.push_back(json::Value::fromObject(std::move(o)));
+    };
+
+    // list() returns a snapshot by value, so removing from the live
+    // registry mid-iteration is safe.
+    for (const auto& tc : registry.list()) {
+      std::string agent;
+      if (tc.kind == std::string{kKindAgentInbox} &&
+          tc.name.starts_with("inbox-")) {
+        agent = tc.name.substr(6);
+      } else if (tc.kind == std::string{kKindTuiCommands} &&
+                 tc.name.starts_with("commands-")) {
+        agent = tc.name.substr(9);
+      } else {
+        continue;  // not a reapable kind (audit / pubsub / …)
+      }
+
+      if (!only_agent.empty() && agent != only_agent) continue;
+      if (only_agent.empty() && live.contains(agent)) {
+        skip(tc.name, "live-agent");
+        continue;
+      }
+
+      // Drained gate — never drop unread mail.
+      bool inflight = false;
+      for (const auto& [id, f] : dl_ref.inFlight()) {
+        if (f.topic == tc.name) {
+          inflight = true;
+          break;
+        }
+      }
+      if (inflight) {
+        skip(tc.name, "in-flight");
+        continue;
+      }
+      const auto log_path = cfg.state_dir + "/topics/" + tc.name + ".log";
+      const auto cursor_p = topic::cursorPath(cfg.state_dir, tc.name, "");
+      const auto cursor = topic::readCursor(cursor_p);
+      const auto start =
+          cursor > 0 ? cursor
+                     : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+      topic::TopicLog log{log_path};
+      auto pend = log.peek(start);
+      if (pend && !pend->empty()) {
+        skip(tc.name,
+             std::format("undrained ({} unread)", pend->size()));
+        continue;
+      }
+
+      // Eligible — reap registry entry + cursor dir + log file.
+      if (auto r = registry.remove(tc.name); !r) {
+        skip(tc.name, "registry remove failed");
+        continue;
+      }
+      std::error_code ec;
+      fs::remove_all(cfg.state_dir + "/cursors/" + tc.name, ec);
+      fs::remove(log_path, ec);
+      logs.erase(tc.name);  // drop any cached open handle
+      reaped.push_back(json::Value::from(tc.name));
+
+      if (!registry.contains("audit")) {
+        TopicConfig audit;
+        audit.name = "audit";
+        audit.kind = std::string{kKindAppendLog};
+        auto _ig = registry.create(audit);
+      }
+      auto& audit_log = getOrOpenLog("audit");
+      topic::SendOpts opts;
+      opts.protocol = "gc-reap";
+      delivery::stampEpoch(opts, current_epoch);
+      auto _ig2 = audit_log.append(
+          "broker",
+          std::format("gc-reap topic={} agent={} mode={}", tc.name, agent,
+                      only_agent.empty() ? "sweep" : "targeted"),
+          opts);
+      logEvent(cfg.state_dir, "GC-REAP",
+               std::format("topic={} agent={}", tc.name, agent));
+    }
+
+    std::map<std::string, json::Value> resp;
+    resp.insert({"reaped", json::Value::fromArray(std::move(reaped))});
+    resp.insert({"skipped", json::Value::fromArray(std::move(skipped))});
     return json::okResponse(std::move(resp));
   });
 

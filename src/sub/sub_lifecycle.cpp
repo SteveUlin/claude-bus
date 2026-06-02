@@ -5,6 +5,9 @@
 // bin/agent-launch; this only ports the outer "create a tab" wrapper.
 
 #include "../sub.h"
+#include "../broker.h"
+#include "../json_min.h"
+#include "../rpc.h"
 #include "../state_paths.h"
 
 #include <sys/wait.h>
@@ -16,6 +19,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <map>
 #include <print>
 #include <sstream>
 #include <span>
@@ -334,8 +338,30 @@ auto subDespawn(std::span<const char* const> args) -> int {
       runSync({"zellij", "action", "go-to-tab-name", name.c_str()}) == 0) {
     runSync({"zellij", "action", "close-tab"});
   }
-  std::println("despawned {}{}", name,
-               pruned ? "" : " (was not in the dynamic-peer registry)");
+
+  // Reap the peer's broker topics (inbox-NAME / commands-NAME) so a
+  // despawn leaves no broker residue. Best-effort: a down broker or a
+  // peer with unread mail (the gc drained-gate skips that) must not fail
+  // the despawn — the prune + tab-close already happened. Targeted mode
+  // (agent=NAME) is explicit operator intent, so it skips the live-agent
+  // gate but still honors the drained gate.
+  int reaped = 0;
+  {
+    const auto cfg = resolveConfig();
+    std::map<std::string, json::Value> m;
+    m.insert({"op", json::Value::from("gc")});
+    m.insert({"agent", json::Value::from(name)});
+    if (auto resp = rpc::call(cfg.socket_path,
+                              json::Value::fromObject(std::move(m)));
+        resp && resp->getOrBool("ok")) {
+      if (const auto* r = resp->get("reaped"); r && r->isArray()) {
+        reaped = static_cast<int>(r->asArray().size());
+      }
+    }
+  }
+  std::println("despawned {}{} ({} broker topic(s) reaped)", name,
+               pruned ? "" : " (was not in the dynamic-peer registry)",
+               reaped);
   return 0;
 }
 

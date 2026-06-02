@@ -147,6 +147,17 @@ auto TopicRegistry::create(TopicConfig cfg)
   return {};
 }
 
+auto TopicRegistry::remove(std::string_view name) -> Result<void> {
+  auto it = topics_.find(name);
+  if (it == topics_.end()) {
+    return std::unexpected{Error{std::string{"no such topic \""} +
+                           std::string{name} + "\""}};
+  }
+  topics_.erase(it);
+  if (auto r = save(); !r) return std::unexpected{r.error()};
+  return {};
+}
+
 auto TopicRegistry::contains(std::string_view name) const -> bool {
   return topics_.find(name) != topics_.end();
 }

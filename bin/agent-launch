@@ -47,6 +47,15 @@ role=""
 # works in claude-bus, exactly as before. `--project-dir DIR` points it at a
 # SECOND repo (e.g. ~/taro) while it stays a full claude-bus bus citizen.
 project_dir=""
+# SEC-1 isolation profile (docs/research-isolation.md):
+#   worker   = bypass-permissions, caged in the claude-worker netns (egress
+#              dropped except to the api.anthropic.com-only squid tier).
+#   research = NON-bypass scholar, caged in claude-research (anthropic + a
+#              curated read-only research allowlist). The ONLY web path.
+# Default worker keeps the existing fleet's bypass behavior; the cage activates
+# only once the NixOS module is applied (guarded on /run/netns below), so this
+# flag is a safe no-op until then.
+profile="worker"
 while [ $# -gt 0 ]; do
     case "$1" in
         --role)
@@ -67,6 +76,15 @@ while [ $# -gt 0 ]; do
             project_dir=${1#--project-dir=}
             shift
             ;;
+        --profile)
+            [ $# -lt 2 ] && { echo "agent-launch: --profile requires an argument" >&2; exit 2; }
+            profile=$2
+            shift 2
+            ;;
+        --profile=*)
+            profile=${1#--profile=}
+            shift
+            ;;
         --)
             shift
             break
@@ -82,9 +100,14 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: agent-launch [--role ROLE] [--project-dir DIR] NAME" >&2
+    echo "usage: agent-launch [--role ROLE] [--project-dir DIR] [--profile worker|research] NAME" >&2
     exit 2
 fi
+
+case "$profile" in
+    worker|research) ;;
+    *) echo "agent-launch: unknown --profile: $profile (want worker|research)" >&2; exit 2 ;;
+esac
 
 name=$1
 cache_dir="$HOME/.cache/claude-bus/agents"
@@ -394,4 +417,42 @@ if [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
     ) 9>"$HOME/.cache/claude-bus/claude-json.lock"
 fi
 
-exec claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" --dangerously-skip-permissions
+# --- SEC-1 network cage (docs/research-isolation.md) ----------------------
+# Map profile -> bypass-ness + cage netns + squid proxy IP. worker is bypass
+# and caged to the api.anthropic.com-only squid tier; research is NON-bypass (a
+# gated auto-mode scholar) caged to the research allowlist tier — the fleet's
+# only sanctioned web path.
+case "$profile" in
+    worker)   netns="claude-worker";   proxy="http://10.200.0.1:3128"; bypass_flag=(--dangerously-skip-permissions) ;;
+    research) netns="claude-research";  proxy="http://10.200.0.5:3129"; bypass_flag=() ;;
+esac
+claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}")
+
+if [ -e "/run/netns/$netns" ]; then
+    # Cage present (NixOS module applied). Enter the netns via PID 1, then DROP
+    # to this uid before exec — so a bypass worker holds CAP_SYS_ADMIN at NO
+    # instant (the one place netns would leak; design §6). --scope keeps the
+    # zellij pane's TTY; polkit (the module) makes this passwordless for the
+    # cage-* unit only. --system starts a near-empty env, so forward exactly
+    # what claude + the hooks need. NOTE: exercised only once the module is
+    # live — validate on the first real caged launch.
+    exec systemd-run --system --scope --quiet --collect \
+        --unit="cage-${name}-$$" \
+        -p "NetworkNamespacePath=/run/netns/$netns" \
+        -p "User=$(id -un)" \
+        -p "WorkingDirectory=$workspace_dir" \
+        -E "HTTPS_PROXY=$proxy" -E "HTTP_PROXY=$proxy" \
+        -E "TERM=${TERM:-xterm-256color}" -E HOME -E PATH -E USER \
+        -E CLAUDE_BUS_ROOT -E CLAUDE_BUS_AGENT_ID -E CLAUDE_BUS_AGENT_ROLE \
+        -E CLAUDE_BUS_AGENT_KIND -E CLAUDE_BUS_AGENT_WORKSPACE \
+        -E CLAUDE_BUS_AGENT_PROJECT -E CLAUDE_BUS_AGENT_SESSION \
+        -- "${claude_cmd[@]}"
+fi
+
+# No cage (module not applied) — behavior is byte-identical to pre-SEC-1: a
+# plain worker launch with --dangerously-skip-permissions, a research launch
+# without it. The barrier is dormant until sulin applies nixos/research-
+# isolation.nix and the /run/netns cages exist; only then does the branch above
+# take over. (No per-boot warning on purpose — pre-rollout this is the expected
+# state, not an error.)
+exec "${claude_cmd[@]}"

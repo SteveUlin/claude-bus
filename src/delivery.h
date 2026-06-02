@@ -145,6 +145,12 @@ class Loop {
   // the scan doesn't fire on every 250 ms broker tick.
   std::int64_t auto_clear_last_scan_ms_{0};
 
+  // P2 auto-recovery triage (observe-only Phase A). Rate-limit for the
+  // would-recover scan + a per-(agent,signature) cooldown so a persistently
+  // wedged agent logs once, not every scan. See docs/broker-auto-recovery.md.
+  std::int64_t auto_recover_last_scan_ms_{0};
+  std::map<std::string, std::int64_t> would_recover_next_log_ms_;
+
   // Last time the log-retention sweep ran (events.jsonl rewrite +
   // per-topic head trim). Rate-limited; see maybeTrimLogs.
   std::int64_t trim_last_scan_ms_{0};
@@ -160,6 +166,9 @@ class Loop {
     std::string path;
     std::int64_t offset{0};
     std::int64_t last_tokens{-1};
+    std::string last_model;  // last non-<synthetic> assistant model seen;
+                             // emitted into $STATE/status for kvothe's MODEL
+                             // column + P2's token-rate consumer.
   };
   std::map<std::string, TokenScanState> token_scan_;
   std::int64_t token_scan_last_ms_{0};
@@ -196,6 +205,7 @@ class Loop {
   auto escalate(const InFlight& f, std::string_view reason,
                 std::string_view body) -> void;
   auto maybeAutoClear() -> void;
+  auto maybeAutoRecover() -> void;
   auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;

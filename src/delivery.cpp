@@ -874,6 +874,7 @@ auto Loop::tick() -> void {
   scanEvents();
   scanRetries();
   maybeAutoClear();
+  maybeAutoRecover();
   maybeScanTokens();
   maybeWakeIdleOffTty();
   maybeTrimLogs();
@@ -1120,6 +1121,175 @@ auto Loop::maybeAutoClear() -> void {
   }
 }
 
+// P2 auto-recovery triage — Phase A (OBSERVE-ONLY). Evaluates the recovery
+// signature table for every live agent and logs what it WOULD do
+// ("would-recover ...") to the audit topic, taking NO action. This is the
+// false-positive shakedown on the live stream (auri's gate before any action
+// ships in Phase B/C). The 2-signals-agree requirement for the would-relaunch
+// row lives in its predicate, so the log is honest about what would fire.
+//
+// Gated by CLAUDE_BUS_AUTO_RECOVERY (default "observe"; "off"/"0" disables).
+// Caveat (Phase A): ages are wall-clock-derived event timestamps, so this WILL
+// emit suspend/resume false positives — an intentional shakedown signal, and
+// exactly why Phase B/C must add the monotonic-clock gate before any action
+// fires. The Δtokens/Δt progress signal is consumed from kvothe's token-monitor
+// once available; until then transcript staleness is the stand-in. See
+// docs/broker-auto-recovery.md.
+auto Loop::maybeAutoRecover() -> void {
+  const char* mode_env = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
+  const std::string mode = (mode_env != nullptr && *mode_env != '\0')
+                               ? mode_env
+                               : "observe";
+  if (mode == "off" || mode == "0") return;
+
+  const auto now = nowMs();
+  if (now - auto_recover_last_scan_ms_ < 30'000) return;  // every 30 s
+  auto_recover_last_scan_ms_ = now;
+
+  // Budgets (env-tunable; reuse the escalation budget where it matches).
+  std::int64_t stuck_budget = 5 * 60'000;
+  if (const char* e = std::getenv("CLAUDE_BUS_STUCK_BUDGET_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) stuck_budget = v;
+  }
+  std::int64_t wedge_budget = 5 * 60'000;  // transcript-stale threshold
+  if (const char* e = std::getenv("CLAUDE_BUS_WEDGE_BUDGET_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) wedge_budget = v;
+  }
+  std::int64_t idle_clear_ms = 10 * 60'000;
+  if (const char* e = std::getenv("CLAUDE_BUS_AUTO_CLEAR_MIN");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) idle_clear_ms = v * 60'000;
+  }
+
+  // would-recover audit logger with a per-(agent,signature) cooldown so a
+  // persistently-wedged agent logs once, not every scan. Sets the cooldown
+  // only when it actually logs.
+  auto logWould = [&](const std::string& agent, std::string_view sig,
+                      std::string_view action, const std::string& signals) {
+    const std::string key = agent + "\x1f" + std::string{sig};
+    if (now < would_recover_next_log_ms_[key]) return;
+    would_recover_next_log_ms_[key] = now + 5 * 60'000;  // per-sig cooldown
+    TopicConfig audit;
+    audit.name = "audit";
+    audit.kind = std::string{kKindAppendLog};
+    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
+    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+    topic::SendOpts opts;
+    opts.protocol = "would-recover";
+    stampEpoch(opts, current_epoch_);
+    auto _ = audit_log.append(
+        "broker",
+        std::format(
+            "would-recover agent={} signature={} action={} signals=[{}]",
+            agent, sig, action, signals),
+        opts);
+  };
+
+  // Inbox-pending probe (a head record exists past the cursor).
+  auto inboxPending = [&](const std::string& agent) -> bool {
+    const auto cursor_p =
+        topic::cursorPath(cfg_.state_dir, "inbox-" + agent, "");
+    const auto cursor = topic::readCursor(cursor_p);
+    const auto start = cursor > 0 ? cursor
+                                  : static_cast<std::int64_t>(
+                                        topic::kFileHeaderBytes);
+    topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + agent + ".log"};
+    auto r = inbox.peek(start, 1);
+    return r && !r->empty();
+  };
+
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  auto agents = readAgents(events_log, {});
+
+  for (const auto& [name, info] : agents) {
+    // Live pane only; defer if the human is attached or mid blocking-op.
+    if (paneId(name).empty()) continue;
+    if (hasPresenceFile(name)) continue;
+    if (blocking_ops_.contains(name)) continue;
+
+    const bool pending = inboxPending(name);
+    bool has_in_flight = false;
+    for (const auto& [id, f] : in_flight_) {
+      (void)id;
+      if (f.agent == name) { has_in_flight = true; break; }
+    }
+    const auto ax = computeAxes(info, pending ? 1 : 0, now, true);
+
+    // Transcript-staleness (cheap stat; the progress proxy until kvothe's
+    // Δtokens/Δt is wired). transcript_age < 0 = unknown (no path / stat fail).
+    std::int64_t transcript_age = -1;
+    if (!info.last.transcript_path.empty()) {
+      struct stat st{};
+      if (::stat(info.last.transcript_path.c_str(), &st) == 0) {
+        transcript_age = now - static_cast<std::int64_t>(st.st_mtime) * 1000;
+      }
+    }
+    const bool transcript_stale =
+        transcript_age >= 0 && transcript_age > wedge_budget;
+
+    // R1 idle-context → clear (already acted by maybeAutoClear; logged here
+    // for table completeness so the would-recover stream is whole).
+    if (ax.turn == TurnAxis::Ready && !pending && !has_in_flight &&
+        info.last.event == "Stop" &&
+        (now - info.last.ts_ms) >= idle_clear_ms) {
+      logWould(name, "idle-context", "clear",
+               std::format("idle_min={},inbox=empty,in_flight=0",
+                           (now - info.last.ts_ms) / 60'000));
+    }
+
+    // R2 relaunch-idle → nudge: at a ready prompt with queued mail not
+    // draining (the doorbell's condition, surfaced as a recovery row).
+    if (ax.turn == TurnAxis::Ready && pending) {
+      logWould(name, "relaunch-idle", "nudge",
+               std::format("turn=ready,mail=pending,in_flight={}",
+                           has_in_flight ? 1 : 0));
+    }
+
+    // R3 hung-turn → nudge: an OPEN turn past 2x budget with no transcript
+    // progress (fork-free — event + transcript signals only).
+    if (info.turn_start_ms > 0 &&
+        (now - info.turn_start_ms) > 2 * stuck_budget && transcript_stale) {
+      logWould(name, "hung-turn", "nudge",
+               std::format("turn_open_ms={},transcript_stale_ms={}",
+                           now - info.turn_start_ms, transcript_age));
+    }
+
+    // R4 wedged → relaunch: the agent LOOKS busy/stuck by events AND its
+    // transcript is stale (cheap, event-only pre-filter — idle agents at a
+    // ready prompt are excluded WITHOUT a fork) AND the pane is NOT at an
+    // input-ready prompt (the second, independent signal). Two signals must
+    // agree — the cardinal relaunch rule; never on transcript-staleness alone.
+    // Fork the pane only after the cheap signals match and only when the
+    // cooldown would let us log (so a confirmed-wedged agent forks ~once per
+    // cooldown, not every scan).
+    const bool looks_busy = ax.turn == TurnAxis::Working ||
+                            ax.turn == TurnAxis::Stuck ||
+                            ax.process == ProcessAxis::Stuck;
+    if (transcript_stale && looks_busy) {
+      const std::string wkey = name + "\x1f" + std::string{"wedged"};
+      if (now >= would_recover_next_log_ms_[wkey]) {
+        const auto pane = paneStateCached(name);  // forks zellij — gated above
+        const auto ax_pane =
+            computeAxes(info, pending ? 1 : 0, now, true, &pane);
+        const bool awaiting_input = wakeReadyForMail(ax_pane, &pane) ||
+                                    ax_pane.turn == TurnAxis::NeedsInput;
+        if (!awaiting_input) {
+          logWould(name, "wedged", "relaunch",
+                   std::format("transcript_stale_ms={},looks_busy=true,"
+                               "pane_awaiting_input=false",
+                               transcript_age));
+        }
+      }
+    }
+
+    // R5 thinking-block (#10) needs an error-signature source (TBD); R6
+    // context-100% needs P5 output-verification. Both are documented
+    // placeholders, not yet evaluated. See docs/broker-auto-recovery.md.
+  }
+}
+
 // Doorbell — wake an idle off-TTY agent that has queued mail.
 //
 // Off-TTY delivery is pull-on-turn: the drain hook fires on
@@ -1351,6 +1521,12 @@ auto Loop::maybeScanTokens() -> void {
       sc.last_tokens = usage->getOrInt("input_tokens", 0) +
                        usage->getOrInt("cache_creation_input_tokens", 0) +
                        usage->getOrInt("cache_read_input_tokens", 0);
+      // Model rides the same assistant turn. Skip <synthetic> turns (they
+      // carry no real model) so the column sticks to the last real model.
+      if (const auto m = msg->getOrString("model");
+          !m.empty() && m != "<synthetic>") {
+        sc.last_model = m;
+      }
     }
     sc.offset = reader.offset();
 
@@ -1379,10 +1555,16 @@ auto Loop::maybeScanTokens() -> void {
     {
       std::ofstream out{tmp_path, std::ios::trunc};
       if (!out) continue;
+      // context_tokens = the RAW occupancy numerator (kvothe's producer
+      // contract): un-rounded so P2 can compute a token-granular Δtokens/Δt
+      // over its own window (used_percentage's integer %s are too coarse — at
+      // a 1M window 1% = 10k tokens, so a slow agent reads as 0% delta).
+      // model feeds kvothe's MODEL column. Both pair with the existing ts.
       out << std::format(
-          "{{\"agent\":\"{}\",\"ts\":{},\"context_window\":"
+          "{{\"agent\":\"{}\",\"ts\":{},\"model\":\"{}\",\"context_tokens\":{},"
+          "\"context_window\":"
           "{{\"used_percentage\":{},\"context_window_size\":{}}}}}\n",
-          name, now, pct, window);
+          name, now, sc.last_model, sc.last_tokens, pct, window);
     }
     fs::rename(tmp_path, final_path, ec);
     if (ec) fs::remove(tmp_path, ec);

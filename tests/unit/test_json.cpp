@@ -1,5 +1,6 @@
 #include "harness.h"
 #include "json_min.h"
+#include <string>
 
 using namespace bus;
 
@@ -84,4 +85,20 @@ TEST(json_rejects_malformed) {
 TEST(json_floats_fail_whole_parse) {
   CHECK(!json::parse("1.5").has_value());
   CHECK(!json::parse(R"({"ratio":0.25})").has_value());
+}
+
+// Broker-hardening CRIT #1: unbounded recursion blows the stack → SIGSEGV.
+// The depth cap (256) must turn pathological nesting into a clean parse
+// error, never a crash. A balanced nest under the cap still parses.
+TEST(json_rejects_deep_nesting_no_crash) {
+  // ~100K open brackets: pre-fix this recurses ~100K deep and SIGSEGVs.
+  // Post-fix it returns an error (the depth cap trips long before the
+  // stack does).
+  CHECK(!json::parse(std::string(100000, '[')).has_value());
+  // A balanced array nested past the cap also errors.
+  CHECK(!json::parse(std::string(300, '[') + std::string(300, ']'))
+             .has_value());
+  // A balanced nest comfortably under the cap parses fine.
+  CHECK(json::parse(std::string(200, '[') + std::string(200, ']'))
+            .has_value());
 }

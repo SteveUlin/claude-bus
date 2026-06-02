@@ -43,6 +43,15 @@ class Parser {
   explicit Parser(std::string_view src) : src_{src} {}
 
   auto parseValue() -> std::expected<Value, std::string> {
+    // RAII depth guard — every nested container recurses through here.
+    struct DepthGuard {
+      int& d;
+      explicit DepthGuard(int& dd) : d{dd} { ++d; }
+      ~DepthGuard() { --d; }
+    } guard{depth_};
+    if (depth_ > kMaxDepth) {
+      return std::unexpected{"max nesting depth exceeded"};
+    }
     skipWs();
     if (atEnd()) return std::unexpected{"unexpected end of input"};
     const char c = peek();
@@ -64,6 +73,14 @@ class Parser {
  private:
   std::string_view src_;
   std::size_t pos_{0};
+  int depth_{0};
+  // Recursion-depth cap. parseValue is the single funnel every nested
+  // container passes through, so guarding it bounds mutual recursion
+  // (parseValue→parseArray/parseObject→parseValue). Without this, a long
+  // run of '[' on the local broker.sock recurses one frame per level and
+  // blows the 8 MiB stack → SIGSEGV (broker-hardening CRIT #1). 256 is
+  // ~25× the deepest real RPC payload, ~2000× below the crash threshold.
+  static constexpr int kMaxDepth = 256;
 
   auto atEnd() const -> bool { return pos_ >= src_.size(); }
   auto peek() const -> char { return src_[pos_]; }

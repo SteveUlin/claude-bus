@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -93,6 +94,21 @@ auto queueMax() -> std::size_t {
     }
   }
   return 256;
+}
+
+// Per-direction timeout on an ACCEPTED connection (broker-hardening
+// CRIT #2). A legit call() connects, writes, and half-closes within ms;
+// 5 s is generous headroom for a slow-but-legit client, while bounding a
+// STALLED client that would otherwise park the single intake thread
+// forever (RCVTIMEO) or the error-write-back on a full send buffer
+// (SNDTIMEO). SO_RCVTIMEO is per-read, so a progressing large body keeps
+// getting fresh windows — only a stalled peer is cut.
+auto connTimeoutMs() -> std::int64_t {
+  if (const char* e = std::getenv("CLAUDE_BUS_CONN_TIMEOUT_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) return v;
+  }
+  return 5000;
 }
 
 }  // namespace
@@ -397,6 +413,16 @@ auto Server::run(std::chrono::milliseconds tick_interval,
         if (errno == EINTR) continue;
         break;  // EAGAIN/EWOULDBLOCK or error → backlog drained
       }
+      // CRIT #2: the listen fd is non-blocking, but the accepted conn is
+      // not — bound both directions so a silent/stalled client cannot park
+      // the single intake thread (read) or the error-write-back (write).
+      {
+        const auto ms = connTimeoutMs();
+        const struct timeval tv{.tv_sec = ms / 1000,
+                                .tv_usec = (ms % 1000) * 1000};
+        ::setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ::setsockopt(conn, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+      }
       auto line = readLine(conn);
       if (!line) {
         if (line.error().message != "EOF before newline") {
@@ -454,6 +480,11 @@ auto readLine(int fd, std::size_t max_bytes)
           return std::unexpected{Error{"interrupted by shutdown"}};
         }
         continue;
+      }
+      // SO_RCVTIMEO expiry (CRIT #2): a stalled client. Bail so the intake
+      // thread is never parked waiting on a half-sent request.
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return std::unexpected{Error{"read timeout"}};
       }
       return std::unexpected{Error{std::string{"read: "} + std::strerror(errno)}};
     }

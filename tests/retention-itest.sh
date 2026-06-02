@@ -66,6 +66,20 @@ done
 sleep 0.8
 ck "$(seen inbox-zinbox 'mail-')" "20" "all 20 unread inbox records preserved"
 
+note "2b. reserved sink (inbox-ops) IS trimmed despite a stuck cursor (CRIT #3)"
+# inbox-ops is agent-inbox with no live consumer (nothing drains it), so the
+# clamp would pin retention forever. The reserved-sink exemption lets the
+# size cap trim it — oldest dropped, newest kept — unlike zinbox above.
+for i in $(seq -w 1 20); do
+  "$BUS" msg mail ops "ops-$i-paddingpaddingpaddingpaddingpaddingpaddingpad" >/dev/null
+done
+sleep 0.8
+surv_ops="$(seen inbox-ops 'ops-')"
+ck "$([ "$surv_ops" -lt 20 ] && [ "$surv_ops" -gt 0 ] && echo trimmed)" "trimmed" \
+   "inbox-ops trimmed past its stuck cursor ($surv_ops of 20 survive)"
+ck "$(seen inbox-ops 'ops-20')" "1" "newest ops record (ops-20) survives"
+ck "$(seen inbox-ops 'ops-01')" "0" "oldest ops record (ops-01) was dropped"
+
 note "3. cursor rebase keeps consumption seamless across a trim"
 for i in $(seq -w 1 10); do
   "$BUS" msg mail zseq "seq-$i-paddingpaddingpaddingpaddingpaddingpaddingpad" >/dev/null

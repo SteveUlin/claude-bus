@@ -1686,8 +1686,18 @@ auto Loop::maybeTrimLogs() -> void {
     // Delivery-guaranteed kinds clamp to the consumer floor so undelivered
     // / in-flight mail is never dropped; fire-and-forget kinds expire
     // regardless (lets audit.log, which has no persistent consumer, shrink).
-    const bool guaranteed = tc.kind == std::string{kKindAgentInbox} ||
-                            tc.kind == std::string{kKindTuiCommands};
+    //
+    // CRIT #3: inbox-ops / inbox-human are broker-produced escalation sinks
+    // with NO live draining consumer — their consumer cursor sits at the
+    // header forever, so the clamp pins retention and they grow unbounded.
+    // Exempt them: bound by size/age like a fire-and-forget log (newest
+    // kept). The GC reaper still PROTECTS these topics (same {human,ops}
+    // reserved set) — we bound the log, never reap the topic.
+    const bool reserved_sink =
+        tc.name == "inbox-ops" || tc.name == "inbox-human";
+    const bool guaranteed = !reserved_sink &&
+                            (tc.kind == std::string{kKindAgentInbox} ||
+                             tc.kind == std::string{kKindTuiCommands});
     const auto min_cursor = guaranteed ? minConsumerCursor(tc.name) : 0;
 
     const auto plan =
@@ -1725,6 +1735,57 @@ auto Loop::maybeTrimLogs() -> void {
           a_opts);
     }
   }
+
+  // CRIT #4: evict soft per-agent state for vanished agents on the same 60 s
+  // cadence as the log trim — same "GC my own $STATE" sweep.
+  pruneDeadAgents();
+}
+
+// Erase a vanished agent's SOFT per-agent state (cooldown/alarm maps). These
+// only gate logging/wake/clear frequency, so dropping a still-live agent's
+// entry merely re-arms it — safe to be slightly aggressive. Never touches
+// in_flight_/blocking_ops_ (delivery state, lifecycle-managed elsewhere).
+auto Loop::forgetAgent(std::string_view name) -> void {
+  const std::string n{name};
+  token_scan_.erase(n);
+  auto_clear_next_allowed_ms_.erase(n);
+  wake_next_allowed_ms_.erase(n);
+  mail_queued_since_ms_.erase(n);
+  strand_alarmed_.erase(n);
+  turn_stuck_alarmed_.erase(n);
+  tool_wedged_alarmed_.erase(n);
+  // would_recover_next_log_ms_ is keyed by "<agent>\x1f<sig>" — drop every
+  // signature entry for this agent.
+  const std::string prefix = n + "\x1f";
+  std::erase_if(would_recover_next_log_ms_, [&](const auto& kv) {
+    return kv.first.starts_with(prefix);
+  });
+}
+
+// Prune soft per-agent state for agents no longer present in the events log.
+// events.jsonl is retention-bounded (D1), so a long-despawned dynamic peer
+// ages out of readAgents and its cooldown/alarm entries are reclaimed.
+auto Loop::pruneDeadAgents() -> void {
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  const auto live = readAgents(events_log, {});
+  const auto isDead = [&](const std::string& agent) {
+    return !live.contains(agent);
+  };
+  // Collect dead agents across the maps, then forget each once.
+  std::set<std::string> dead;
+  for (const auto& [k, _] : token_scan_) if (isDead(k)) dead.insert(k);
+  for (const auto& [k, _] : auto_clear_next_allowed_ms_) if (isDead(k)) dead.insert(k);
+  for (const auto& [k, _] : wake_next_allowed_ms_) if (isDead(k)) dead.insert(k);
+  for (const auto& [k, _] : mail_queued_since_ms_) if (isDead(k)) dead.insert(k);
+  for (const auto& k : strand_alarmed_) if (isDead(k)) dead.insert(k);
+  for (const auto& k : turn_stuck_alarmed_) if (isDead(k)) dead.insert(k);
+  for (const auto& k : tool_wedged_alarmed_) if (isDead(k)) dead.insert(k);
+  for (const auto& [k, _] : would_recover_next_log_ms_) {
+    const auto sep = k.find('\x1f');
+    const auto agent = sep == std::string::npos ? k : k.substr(0, sep);
+    if (isDead(agent)) dead.insert(agent);
+  }
+  for (const auto& agent : dead) forgetAgent(agent);
 }
 
 }  // namespace bus::delivery

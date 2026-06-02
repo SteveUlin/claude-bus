@@ -217,6 +217,12 @@ class Loop {
   // tracker.
   auto maybeTrimLogs() -> void;
   auto trimEventsLog() -> void;
+  // Evict a vanished agent's soft per-agent state (cooldown/alarm maps) so
+  // P4 dynamic-peer churn can't grow them unbounded. Cooldown/alarm state
+  // only, never in-flight/blocking (those are lifecycle-managed). Driven by
+  // pruneDeadAgents from the trim sweep.
+  auto forgetAgent(std::string_view name) -> void;
+  auto pruneDeadAgents() -> void;
   auto rebaseTopicCursors(std::string_view topic, std::int64_t dropped_bytes,
                           std::int64_t header_bytes) -> void;
   auto minConsumerCursor(std::string_view topic) const -> std::int64_t;

@@ -1,12 +1,14 @@
 # monitor-truth — real context window + live effort (kvothe lane)
 
 Author: kvothe · 2026-06-02 · For: sulin's "the monitor must not lie" mandate
-Status: **LANDED on origin/main (27af25bc); deploy is relaunch-gated.**
-Producer v1 (statusline wrapper) + monitor consumer verified on a seeded
-frame. No live captures emit until agents RELAUNCH (config materializes from
-landed main on launch); monitor falls back to broker status until then.
-sulin RULING: PATH 1 ("a state file sounds good"). See [[monitor_truth]]
-memory + docs/p3-trigger-feed.md.
+Status: **LIVE-VERIFIED post-relaunch (2026-06-02).** All fleet agents emit
+real captures to `$STATE/statusline/<agent>.json`; the monitor renders real
+per-model window (1M, not the 200k constant), real tokens/pct, and real
+varying effort (observed xhigh / high / low across the fleet). The
+effort-live question is SETTLED: effort is observable and rendered — NOT a
+gap. Producer v1 (statusline wrapper) deployed via config materialization on
+relaunch; monitor consumer via D4 auto-rebuild. sulin RULING: PATH 1 ("a
+state file sounds good"). See [[monitor_truth]] memory + docs/p3-trigger-feed.md.
 
 Durable anchor (survives /clear).
 
@@ -147,6 +149,6 @@ any pane-read onto a file. After it lands:
 4. **LAND + relaunch** to deploy (config materialization + the new hook take
    effect on agent relaunch; viewer code via D4 auto-rebuild — no broker
    restart).
-5. effort-live: confirm `.effort.level` populates on real JSON post-rollout
-   (with bast's harness); if always empty → surface the Claude Code gap.
+5. ~~effort-live: confirm `.effort.level` populates on real JSON~~ — DONE.
+   Post-relaunch all agents emit it; observed xhigh/high/low. NOT a gap.
 6. OTel checkpoint (4) + stop-pane-reading audit (next increment).

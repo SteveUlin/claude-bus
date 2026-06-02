@@ -1,9 +1,12 @@
 # monitor-truth — real context window + live effort (kvothe lane)
 
 Author: kvothe · 2026-06-02 · For: sulin's "the monitor must not lie" mandate
-Status: **BUILT + verified (seeded frame).** Producer v1 (statusline wrapper)
-+ monitor consumer landed-pending. sulin RULING: PATH 1 ("a state file
-sounds good"). See [[monitor_truth]] memory + docs/p3-trigger-feed.md.
+Status: **LANDED on origin/main (27af25bc); deploy is relaunch-gated.**
+Producer v1 (statusline wrapper) + monitor consumer verified on a seeded
+frame. No live captures emit until agents RELAUNCH (config materializes from
+landed main on launch); monitor falls back to broker status until then.
+sulin RULING: PATH 1 ("a state file sounds good"). See [[monitor_truth]]
+memory + docs/p3-trigger-feed.md.
 
 Durable anchor (survives /clear).
 
@@ -64,14 +67,37 @@ about that framing.)
   NEVER changes. Keep the wrapper minimal — do not over-invest in a
   potentially-interim producer.
 
-### File schema (`$STATE/statusline/<agent>.json`)
+### The contract — `$STATE/statusline/<agent>.json` (PRODUCER-AGNOSTIC)
+
+This file IS the interface. Any producer — the wrapper-tee (v1) or a future
+OTel-derived writer (v2) — MUST satisfy this exactly; the monitor read path
+never changes. OTel is the intended backbone; this contract is what makes
+the v1→v2 swap cheap.
 
 ```json
-{ "agent": "kvothe", "ts": <ms>, "model_id": "claude-opus-4-8",
+{ "agent": "kvothe", "ts": 1780380200000, "model_id": "claude-opus-4-8",
   "model_display": "Opus 4.8", "context_window_size": 1000000,
   "total_input_tokens": 53213, "used_percentage": 5,
   "effort_level": "high", "exceeds_200k": false }
 ```
+
+| Field | Type | Req | Semantics / consumer use |
+| --- | --- | --- | --- |
+| `agent` | string | yes | Agent name (== filename stem). |
+| `ts` | int (ms epoch) | yes | When captured. For future staleness gating (not yet enforced). |
+| `model_id` | string | yes | → MODEL cell (`claude-` prefix stripped). |
+| `model_display` | string | no | Carried for contract; not yet rendered. |
+| `context_window_size` | int | **yes** | → CTX denominator. **AUTHORITATIVE-GATE: a record is honored only when this is > 0**; else the consumer falls back to the broker's `$STATE/status`. A v2 producer that can't supply a real window MUST omit the record, not write 0. |
+| `total_input_tokens` | int | yes | → drives the 200k POLICY color marker (red ≥200k, yellow ≥170k). |
+| `used_percentage` | int | yes | → CTX pct (`25%/1M`). Against the real window. |
+| `effort_level` | string | yes | → EFFORT cell. `""` ⇒ `—` (a surfaced GAP, never the launch flag). |
+| `exceeds_200k` | bool | no | Carried for contract; not yet rendered. |
+
+Producer obligations: **atomic write** (tmp + rename — concurrent reader);
+one JSON object per file; overwrite each update. Consumer obligations:
+prefer this file, fall back to broker `$STATE/status` when absent or
+gate-failed. A v2 (OTel) writer targeting these eight fields drops in with
+zero monitor change.
 
 - **Consumer** — `src/sub/sub_monitor.cpp` `contextStatsFor`: prefers the
   statusline file (real window + effort), falls back to the broker
@@ -81,13 +107,24 @@ about that framing.)
   "past the compact line" stays salient even at 25%/1M — the marker, never
   the denominator. EFFORT column shows the live level or `—`.
 
-## OTel checkpoint (with elodin, post dup-fix)
+## OTel checkpoint — OTel is the declared backbone; wrapper is interim
 
-Determine whether OTel emits `context_window_size` + `effort.level` as
-metric/event attributes. IF YES, OTel is the true outside-the-render-path
-tap sulin wants — it SUPERSEDES this wrapper (producer v2, retire v1). The
-monitor read path is unchanged either way. Report as a retire-the-wrapper
-finding when the OTel fork reaches sulin.
+sulin's steer (2026-06-02): OTel is the intended home for fleet
+token+cost+model (ideally window+effort) data. This wrapper is officially
+the INTERIM bridge — keep it minimal, expect it to be replaced.
+
+**bast is running the OTel empirical eval IN PARALLEL now** (dup-fix has
+landed). Gating question: does OTel emit `context_window_size` +
+`effort.level` as metric/event attributes?
+
+- IF YES for both → an OTel-derived writer becomes **producer v2** targeting
+  the contract above, the wrapper retires fully (retire-v1 finding).
+- IF only token/cost (not window/effort) → OTel replaces the numerator/cost
+  layer, the wrapper stays for window+effort (the CC surface-area gap).
+
+Either way the monitor read path is unchanged. My job: keep the
+`$STATE/statusline` contract clean + documented so the OTel writer can
+target it. Coordinating the field list with bast's eval.
 
 ## Next increment — STOP PANE-READING (kvothe champions the monitor side)
 

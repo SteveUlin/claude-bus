@@ -845,28 +845,29 @@ auto Loop::scanRetries() -> void {
       continue;
     }
 
-    // Re-dispatch. For agent-inbox: rewrite the inline body / pointer.
-    // For tui-commands: re-run the state machine. Both are idempotent
-    // enough that duplicate writes are harmless.
-    bool ok = false;
+    // An agent-inbox record is in-flight ONLY because deliverInline
+    // already SUCCEEDED at dispatch — dispatchAgentInbox returns WITHOUT
+    // marking in-flight when the write is deferred — so an in-flight
+    // record has already landed on the recipient's pane. Re-delivering it
+    // would be a guaranteed duplicate, and on a live TTY a second push
+    // appends into the input buffer (garbled / double submit). So for
+    // agent-inbox the retry timer is an ACK DEADLINE, not a re-delivery
+    // trigger: we only advance the deadline clock (`attempts`) here and
+    // let the kMaxAttempts branch above escalate to inbox-ops/audit if no
+    // ack ever arrives. Deferred deliveries never reach in-flight, so this
+    // loses no legitimate retry. (See docs/dup-delivery-fix.md.)
+    //
+    // tui-commands DO re-dispatch: their in-flight semantics differ (a
+    // not-ready slash that never landed should legitimately retry), so
+    // that path keeps re-running the state machine. Slash re-dispatch
+    // dedup is tracked as a separate follow-up.
     const auto* tcfg = registry_.get(f.topic);
-    if (tcfg != nullptr) {
-      if (tcfg->kind == std::string{kKindAgentInbox}) {
-        std::string payload;
-        if (m.body.size() <= kInlineMaxBytes) {
-          payload = formatInlineBody(m);
-        } else {
-          payload = formatPointerBody(m);
-        }
-        ok = deliverInline(cfg_, f.agent, payload);
-      } else if (tcfg->kind == std::string{kKindTuiCommands}) {
-        ok = dispatch::dispatchTui(cfg_, f.agent, m.body);
-      }
+    if (tcfg != nullptr && tcfg->kind == std::string{kKindTuiCommands}) {
+      dispatch::dispatchTui(cfg_, f.agent, m.body);
     }
-    f.attempts += 1;
+    f.attempts += 1;  // deadline tick (agent-inbox) / re-dispatch count (tui)
     f.next_retry_at = now + ackTimeoutMs();
     writeInflight(f);
-    (void)ok;  // attempt counted whether the write succeeded or not
   }
 }
 

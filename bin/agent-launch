@@ -26,8 +26,10 @@
 # that the agent-register hook picks up. ROLE comes from --role; the
 # others are inherited from the caller's env if set.
 #
-# With --role NAME, $BUS_ROOT/roles/NAME.md is stripped of YAML
-# frontmatter and passed to claude as --append-system-prompt-file.
+# With --role NAME, roles/NAME.md is read from LANDED main (same deterministic
+# SHA-read as the config materialization), stripped of YAML frontmatter, and
+# passed to claude as --append-system-prompt-file. Unlanded roles fall back to
+# the working copy with a warning. Land a role to propagate it fleet-wide.
 #
 # Used by bin/spawn-agent (live spawn) and by layouts/fleet.kdl (boot-
 # time spawn). Same identity rules apply either way.
@@ -337,19 +339,36 @@ fi
 
 claude_role_flag=()
 if [ -n "$role" ]; then
-    role_file="$BUS_ROOT/roles/$role.md"
-    if [ ! -f "$role_file" ]; then
-        echo "agent-launch: role file not found: $role_file" >&2
-        exit 1
-    fi
     roles_cache="$HOME/.cache/claude-bus/roles"
     mkdir -p "$roles_cache"
+    raw="$roles_cache/${role}.raw.md"
     stripped="$roles_cache/${role}.stripped.md"
+    # Source the role from LANDED main (deterministic, staleness-immune) — the
+    # same SHA-read pattern the 1b config materialization above uses (git
+    # --git-dir show <sha>:path, ref-lag-immune). This closes gap #5: roles were
+    # read from the default checkout's WORKING COPY, which lags main, so a role
+    # authored + landed but not yet reconciled into the default tree silently
+    # did NOT apply — unlike settings/hooks, which always equal main. Now a
+    # landed role propagates fleet-wide by construction. Fall back to the
+    # working copy with a LOUD warning when the role isn't on main yet (that's
+    # the unlanded == non-deterministic case the gap was about).
+    role_src=""
+    if [ -n "$main_rev" ] \
+            && git --git-dir="$BUS_ROOT/.git" show "$main_rev:roles/$role.md" \
+                > "$raw" 2>/dev/null; then
+        role_src="$raw"
+    elif [ -f "$BUS_ROOT/roles/$role.md" ]; then
+        echo "agent-launch: WARN role '$role' not on main — using the working copy (UNLANDED, non-deterministic). Land roles/$role.md to propagate it fleet-wide." >&2
+        role_src="$BUS_ROOT/roles/$role.md"
+    else
+        echo "agent-launch: role not found on main or in working copy: $role" >&2
+        exit 1
+    fi
     awk 'BEGIN { in_fm = 0; done = 0 }
          NR == 1 && /^---$/ { in_fm = 1; next }
          in_fm && /^---$/ { in_fm = 0; done = 1; next }
          in_fm && !done { next }
-         { print }' "$role_file" > "$stripped"
+         { print }' "$role_src" > "$stripped"
     claude_role_flag=(--append-system-prompt-file "$stripped")
 fi
 

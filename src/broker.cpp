@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <print>
 #include <set>
@@ -120,6 +121,54 @@ auto procStartedMs(long pid) -> std::int64_t {
   return static_cast<std::int64_t>(started_secs) * 1000;
 }
 
+// Parent PID of `pid` from /proc/<pid>/status. -1 when unavailable.
+auto procPpid(long pid) -> long {
+  std::ifstream st{std::format("/proc/{}/status", pid)};
+  if (!st) return -1;
+  std::string line;
+  while (std::getline(st, line)) {
+    if (line.rfind("PPid:", 0) == 0) return std::atol(line.c_str() + 5);
+  }
+  return -1;
+}
+
+// Full argv of `pid` (NULs flattened to spaces) from /proc/<pid>/cmdline.
+auto procCmdline(long pid) -> std::string {
+  std::ifstream in{std::format("/proc/{}/cmdline", pid), std::ios::binary};
+  if (!in) return {};
+  std::string s{std::istreambuf_iterator<char>(in), {}};
+  for (auto& c : s) {
+    if (c == '\0') c = ' ';
+  }
+  return s;
+}
+
+// True when `pid` is a broker that outlived its launching zellij session:
+// reparented to init (PPID 1) and its argv still looks like `bus broker`.
+// Such a process is a stale singleton — it holds the flock and answers the
+// socket, but its `zellij action` calls target a dead session, so it can
+// no longer deliver. Safe to reap and take over. A *live* broker keeps a
+// real launcher (PPID != 1), so this returns false and we DEFER to it. The
+// argv check guards against PID reuse: never signal a recycled PID that is
+// no longer our broker.
+auto isOrphanBroker(long pid) -> bool {
+  if (pid <= 1) return false;
+  if (procPpid(pid) != 1) return false;
+  const auto cmd = procCmdline(pid);
+  return cmd.find("broker") != std::string::npos &&
+         cmd.find("bus") != std::string::npos;
+}
+
+// Poll flock(LOCK_EX|LOCK_NB) until held or `timeout_ms` elapses. Used
+// after signalling an orphan holder to wait for it to release the lock.
+auto waitForLock(int fd, int timeout_ms) -> bool {
+  for (int waited = 0; waited < timeout_ms; waited += 100) {
+    if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return true;
+    ::usleep(100 * 1000);
+  }
+  return ::flock(fd, LOCK_EX | LOCK_NB) == 0;
+}
+
 // Broker epoch. A small unsigned counter bumped on every successful
 // boot, persisted to $STATE/broker.epoch. Stamped onto each record at
 // enqueue and checked at dispatch — a record whose epoch doesn't
@@ -186,18 +235,44 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto holder_str = readFileTrimmed(cfg.pid_path);
     const long holder =
         holder_str.empty() ? 0 : std::atol(holder_str.c_str());
-    std::int64_t alive_ms = 0;
-    if (holder > 0) {
-      const auto started = procStartedMs(holder);
-      if (started > 0) alive_ms = nowMs() - started;
+
+    // Orphan takeover. PR_SET_PDEATHSIG (below) ties a broker's life to
+    // its launching pane, but the signal is lost when the whole zellij
+    // session dies at once (crash, suspend/resume): the broker reparents
+    // to init (PPID 1) and lives on, still holding this flock and still
+    // answering the socket — yet its `zellij action` calls now target a
+    // dead session, so it can no longer deliver. A fresh session's broker
+    // would then DEFER to that corpse forever. Detect it (PPID 1 + broker
+    // argv) and reap it so we take over. A *live* broker keeps a real
+    // launcher (PPID != 1) and is left untouched — we still DEFER to it.
+    bool have_lock = false;
+    if (holder > 0 && holder != ::getpid() && isOrphanBroker(holder)) {
+      logEvent(cfg.state_dir, "REAP",
+               std::format("pid={} orphan_pid={} reason=ppid1-dead-session",
+                           ::getpid(), holder));
+      ::kill(holder, SIGTERM);
+      have_lock = waitForLock(pidfd, 3000);
+      if (!have_lock) {
+        ::kill(holder, SIGKILL);
+        have_lock = waitForLock(pidfd, 2000);
+      }
     }
-    logEvent(cfg.state_dir, "DEFER",
-             std::format("pid={} holder_pid={} holder_alive_ms={}",
-                         ::getpid(),
-                         holder_str.empty() ? "?" : holder_str,
-                         alive_ms));
-    ::close(pidfd);
-    return 1;
+
+    if (!have_lock) {
+      std::int64_t alive_ms = 0;
+      if (holder > 0) {
+        const auto started = procStartedMs(holder);
+        if (started > 0) alive_ms = nowMs() - started;
+      }
+      logEvent(cfg.state_dir, "DEFER",
+               std::format("pid={} holder_pid={} holder_alive_ms={}",
+                           ::getpid(),
+                           holder_str.empty() ? "?" : holder_str,
+                           alive_ms));
+      ::close(pidfd);
+      return 1;
+    }
+    // Reaped the orphan and acquired the lock — fall through and take over.
   }
 
   // Parent-death signal. Tie the broker's lifetime to the launcher's:

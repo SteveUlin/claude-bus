@@ -1,6 +1,8 @@
 # Research isolation — the SEC-1 network barrier
 
-**Status:** design — surfaced to auri/sulin for bless before any build.
+**Status:** design **blessed** (auri, 2026-06-01) — §4 mechanism = **netns cage
+(4c)**; the **GATE (§7) passed: Claude Code HONORS `HTTPS_PROXY`** (evidence
+in §7). Building the drafts next.
 **Owner:** bast. **Scope:** `bin/agent-launch` (`--profile` wiring), a new
 `bus research` routing verb (broker topic), a `roles/scholar.md`, and a
 **NixOS module** (nftables + a CONNECT proxy + the isolation primitive) that
@@ -129,7 +131,15 @@ by the NixOS module**; entering it per-launch needs one privileged hop
 That privileged hop *is* the boundary — by construction the agent can't set it
 up or tear it down.
 
-### 4d. Recommendation and the seam to bless
+### 4d. Recommendation and the seam to bless — BLESSED: netns (4c)
+
+> **Decision (auri, 2026-06-01): netns cage (4c).** Rationale confirmed: uid-match
+> is unforgeable but too coarse (all of sulin is uid-1000 → it cages the whole
+> session, not the worker); cgroup-delegated is forgeable (§4b); netns is the
+> only option both unforgeable *and* surgical. **Build invariant to protect:**
+> entering the netns itself needs `CAP_SYS_ADMIN`, so the launcher must enter
+> the netns *then* drop to uid-1000 before `exec`-ing claude — **the worker must
+> never hold `CAP_SYS_ADMIN` at any instant** (see §6).
 
 I recommend **4c (netns cage)** as the soundest match to "same uid + full
 filesystem + unforgeable," with **4b-hardened (`systemd-run --system` scope,
@@ -194,8 +204,16 @@ exec claude --name "$name" … --dangerously-skip-permissions
 `--profile` forks that tail into two shapes (default `worker`, so the existing
 fleet is unchanged):
 
+**The CAP_SYS_ADMIN invariant.** Entering the netns needs `CAP_SYS_ADMIN`, which
+a uid-1000 `--dangerously-skip-permissions` shell does *not* have (skip-perms is
+app-level, zero kernel caps). So the privileged hop must **enter the netns, then
+drop to uid-1000, then `exec`** — the worker holds the cap at *no* instant. Two
+clean mechanisms (preferring (a), no setuid binary to get wrong):
+  - **(a) `systemd-run --system --pty -p NetworkNamespacePath=/run/netns/claude-worker -p User=sulin …`** — PID 1 enters the netns and drops the user; the scope is also root-owned (non-delegated) for free. polkit-gated to sulin for this one unit.
+  - **(b)** a small root-owned setuid wrapper: `setns(netns_fd)` → `setgid/setuid(1000)` → `execve(claude)`. More moving parts; only if systemd-run proves awkward inside a zellij pane.
+
 - **`--profile worker`** (bypass + contained):
-  - enter the cage / root-owned scope (the privileged hop, §4);
+  - enter the cage via the privileged hop above (enter-netns → drop-to-1000 → exec);
   - export `HTTPS_PROXY=http://127.0.0.1:3128` / `HTTP_PROXY` as the *cooperative*
     path (claude is honest; the nftables drop is the *enforcement* backstop if
     it isn't — see §7);
@@ -211,7 +229,27 @@ The flag selects the **profile object** (uid/cgroup/netns target + proxy port +
 bypass-or-not). Wiring is mechanical once §4 is blessed; the launcher already
 has the arg-parse loop (`agent-launch:50-82`) to extend.
 
-## 7. The GATE — does claude honor HTTPS_PROXY? (step 3, pre-build)
+## 7. The GATE — does claude honor HTTPS_PROXY? (step 3) — PASSED
+
+> **Result (2026-06-01): HONORED.** Three converging probes against a child
+> `claude -p` (run from `/tmp` with the bus env stripped so no project hooks
+> fire):
+> - **A — no proxy:** returns `ok`, exit 0 (baseline works).
+> - **B — `HTTPS_PROXY=http://127.0.0.1:9` (dead port):** hung the full 90 s,
+>   exit 124. claude does **not** silently fall back to a direct connection — it
+>   blocks on the unreachable proxy. This is precisely the fail-closed property
+>   the cage relies on.
+> - **C — capturing listener on :8899:** claude sent, verbatim,
+>   `CONNECT api.anthropic.com:443 HTTP/1.1` / `Host: api.anthropic.com:443`.
+>   Positive proof it tunnels the Anthropic API through `HTTPS_PROXY` as a
+>   standard HTTP CONNECT.
+>
+> **Consequence:** the host rides in **cleartext** in the CONNECT line (before
+> TLS), so squid's `dstdomain` allowlist enforces **without** terminating TLS.
+> The clean proxy-only netns route is viable; the transparent-SNI fallback below
+> is **not needed**.
+
+
 
 The whole barrier's *delivery path* assumes claude reaches `api.anthropic.com`
 **through the proxy**, because direct egress is dropped. If claude ignores
@@ -291,12 +329,12 @@ working as designed.
   round-trips. Default stays `worker`, so unflagged launches inherit the
   barrier the moment the module is live.
 
-## 11. Open decisions for the bless
+## 11. Decisions
 
-1. **§4 mechanism:** netns cage (4c, recommended) vs root-owned cgroup scope
-   (4d-hardened). *Plain user-cgroup is off the table — forgeable (§4b).*
-2. **§5 worker allowlist:** strictly `api.anthropic.com`, or does claude need
-   statsig/sentry telemetry hosts to function? (Determined empirically during
-   the §7 gate.)
-3. **§7 gate outcome** gates everything after it — env-proxy path vs the
-   transparent-SNI fallback.
+1. **§4 mechanism:** ✅ **RESOLVED — netns cage (4c)** (auri, 2026-06-01). Plain
+   user-cgroup is off the table (forgeable, §4b); uid-match is too coarse.
+2. **§5 worker allowlist:** OPEN — strictly `api.anthropic.com`, or does claude
+   need statsig/sentry telemetry hosts to function? Pin down while building the
+   squid allowlist; start tight and widen only if claude visibly degrades.
+3. **§7 gate outcome:** ✅ **RESOLVED — HONORED.** Clean env-proxy/netns route;
+   transparent-SNI fallback not needed.

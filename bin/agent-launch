@@ -498,7 +498,19 @@ case "$profile" in
         # in-pane human (the gate IS the safety for the dangerous post-web write).
         # Agent/Task/Workflow granted so fan-out itself doesn't prompt.
         perm_flag=(--permission-mode default \
-                   --allowedTools 'Read,Grep,Glob,WebSearch,WebFetch,Bash(bus *),Agent,Task,Workflow') ;;
+                   --allowedTools 'Read,Grep,Glob,WebSearch,WebFetch,Bash(bus *),Agent,Task,Workflow')
+        # ultracode = the Claude Code setting that sends xhigh AND turns ON
+        # automatic workflow orchestration. It is session-only-rejected in
+        # settings.json; the ONLY permanent mechanism is this env var, read at
+        # claude startup. PROFILE-tied (not name-tied): the orchestrator profile
+        # IS a workflow-orchestrator by definition, so workflow-on by construction
+        # every relaunch. The orchestrator is never caged (netns=""), so it always
+        # takes the plain `exec` below and inherits this export — no -E forwarding
+        # needed. CLEAR the name-based --effort flag: an explicit --effort would
+        # OVERRIDE the env (flag > env), pinning high and defeating ultracode's
+        # xhigh; dropping it lets CLAUDE_CODE_EFFORT_LEVEL drive effort.
+        export CLAUDE_CODE_EFFORT_LEVEL=ultracode
+        claude_effort_flag=() ;;
 esac
 claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}" "${perm_flag[@]}")
 

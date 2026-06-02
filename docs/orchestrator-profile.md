@@ -93,6 +93,8 @@ orchestrator)
     perm_flag=(--permission-mode default \
                --allowedTools 'Read,Grep,Glob,WebSearch,WebFetch,Bash(bus *),Agent,Task,Workflow')
     # (no --disallowedTools: Edit/Write must remain AVAILABLE, just gated)
+    export CLAUDE_CODE_EFFORT_LEVEL=ultracode   # xhigh + workflow-orchestration ON
+    claude_effort_flag=()                        # drop --effort so the env wins
     ;;
 ```
 
@@ -100,6 +102,21 @@ Network: the orchestrator needs web, so it is **not** caged to the
 anthropic-only worker tier. Either no cage (auto-gate is the defense) or the
 `research`/scholar squid allowlist tier — auri's call; default to **no netns
 cage** for v1 since auto-gate is primary and SEC-1 is optional.
+
+**Workflow orchestration ON (the `ultracode` env).** `ultracode` is the Claude
+Code setting that sends `xhigh` effort **and** turns on automatic workflow
+orchestration — the orchestrator profile's whole point. It is *session-only-
+rejected* in `settings.json`; the **only permanent mechanism** is the env var
+`CLAUDE_CODE_EFFORT_LEVEL=ultracode`, read at claude startup. We set it
+**profile-tied, not name-tied** — the orchestrator profile *is* a workflow-
+orchestrator by definition, so it gets workflow-on by construction every relaunch
+(satisfies "only the orchestrator-profile agent gets it," and is future-proof vs
+hardcoding a name). The orchestrator is never caged (`netns=""`), so it always
+takes the plain `exec` and inherits the export — no `-E` forwarding needed. We
+also **clear `claude_effort_flag`** (drop the name-based `--effort`): an explicit
+`--effort` would **override** the env (flag > env) and pin `high`, defeating
+ultracode's `xhigh`. Precedence (flag > env) is confirmed at the §7 first-launch
+gate.
 
 Semantics this relies on (gated in §7): under `--permission-mode default`,
 `--allowedTools` *pre-approves* the listed tools while a tool in **neither**
@@ -214,6 +231,12 @@ so the empty-netns orchestrator never mis-enters the `/run/netns/` cage path.
    actually works — and, separately, that a NON-pre-approved write attempt
    **auto-denies and continues** (no hang). Run by the auto-mode orchestrator once
    it exists; a bypass peer must not (web-under-bypass).
+4. **`ultracode` took effect (orchestrator-run).** Confirm the launched
+   orchestrator REPORTS `ultracode` / workflow-orchestration-ON and `xhigh` effort —
+   i.e. `CLAUDE_CODE_EFFORT_LEVEL=ultracode` drove startup and was **not** overridden
+   (this is the flag>env precedence check: clearing `--effort` let the env win). If
+   it reports `high`, the `--effort` clear didn't take and the name-based flag is
+   still leaking in. **Confirms §4's ultracode fold.**
 
 ## 8. v1 scope
 

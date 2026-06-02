@@ -102,13 +102,13 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: agent-launch [--role ROLE] [--project-dir DIR] [--profile worker|research] NAME" >&2
+    echo "usage: agent-launch [--role ROLE] [--project-dir DIR] [--profile worker|research|orchestrator] NAME" >&2
     exit 2
 fi
 
 case "$profile" in
-    worker|research) ;;
-    *) echo "agent-launch: unknown --profile: $profile (want worker|research)" >&2; exit 2 ;;
+    worker|research|orchestrator) ;;
+    *) echo "agent-launch: unknown --profile: $profile (want worker|research|orchestrator)" >&2; exit 2 ;;
 esac
 
 name=$1
@@ -185,6 +185,18 @@ if [ -n "$main_rev" ]; then
         chmod +x "$workspace_dir/settings/hooks"/*.sh 2>/dev/null
     else
         echo "agent-launch: WARN failed to materialize settings/hooks from main" >&2
+    fi
+    # Subagent definitions (.claude/agents/) — same #15-hardened frozen-copy as
+    # hooks: rm -rf + fresh export from main, so the orchestrator's read-only
+    # ro-worker type (docs/orchestrator-profile.md) is frozen-at-launch, never a
+    # live view. strip-components=2 drops `settings/agents-shared/` → bare *.md
+    # into .claude/agents/. Harmless for non-orchestrator agents (a defined type
+    # only matters if invoked). Absent at main pre-land ⇒ graceful WARN.
+    rm -rf "$workspace_dir/.claude/agents"
+    mkdir -p "$workspace_dir/.claude/agents"
+    if ! git --git-dir="$BUS_ROOT/.git" archive "$main_rev" settings/agents-shared 2>/dev/null \
+            | tar -x --strip-components=2 -C "$workspace_dir/.claude/agents" 2>/dev/null; then
+        echo "agent-launch: WARN failed to materialize .claude/agents from main" >&2
     fi
 else
     echo "agent-launch: WARN could not resolve claude-bus main; config not refreshed" >&2
@@ -469,10 +481,28 @@ case "$profile" in
         perm_flag=(--permission-mode default \
                    --allowedTools 'Bash(bus *),WebSearch,WebFetch,Read,Grep,Glob' \
                    --disallowedTools 'Edit,Write,NotebookEdit') ;;
+    orchestrator)
+        # Web-capable PM that FANS OUT read-only subagents (docs/orchestrator-
+        # profile.md). NON-bypass is required BY THE MECHANISM, not policy: a
+        # bypass/acceptEdits parent OVERRIDES its subagents' permission mode, so
+        # they'd inherit bypass = ungated write-capable headless subagents = the
+        # exact web-injection hole. --permission-mode default is what makes the
+        # read-only-subagent restriction hold at all. No cage (web-capable; the
+        # auto-gate is the defense, SEC-1 is optional defense-in-depth).
+        netns="";  proxy=""
+        bypass_flag=()
+        # Pre-GRANT the safe read/web/coordinate set (auto-approve, no prompt).
+        # Subagents inherit these grants -> a headless Explore/ro-worker's web
+        # call auto-approves (never prompts, never auto-denies). Edit/Write/
+        # NotebookEdit are in NEITHER list -> they fall to default = PROMPT the
+        # in-pane human (the gate IS the safety for the dangerous post-web write).
+        # Agent/Task/Workflow granted so fan-out itself doesn't prompt.
+        perm_flag=(--permission-mode default \
+                   --allowedTools 'Read,Grep,Glob,WebSearch,WebFetch,Bash(bus *),Agent,Task,Workflow') ;;
 esac
 claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}" "${perm_flag[@]}")
 
-if [ -e "/run/netns/$netns" ]; then
+if [ -n "$netns" ] && [ -e "/run/netns/$netns" ]; then
     # Cage present (NixOS module applied). Enter the netns via PID 1, then DROP
     # to this uid before exec — so a bypass worker holds CAP_SYS_ADMIN at NO
     # instant (the one place netns would leak; design §6). NoNewPrivileges=yes +

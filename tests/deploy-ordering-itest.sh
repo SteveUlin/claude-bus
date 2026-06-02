@@ -81,6 +81,32 @@ else
   ck "rm=${rm_line:-none},show=${show_line:-none}" "ok" "agent-launch must rm -f .claude/settings.json before materializing it (#15 runtime fix; a revert reintroduces the live-symlink bar-blank)"
 fi
 
+echo "4. AGENTS materialize (#15 guard, orchestrator profile) — the read-only"
+echo "   ro-worker subagent type must materialize settings/agents-shared/ ->"
+echo "   .claude/agents/. #15's lesson: never ship a materialize surface unguarded."
+# 4a AUTHORING — the canonical def exists and carries its security-critical deny.
+roW="$ROOT/settings/agents-shared/ro-worker.md"
+ck "$([ -f "$roW" ] && echo yes || echo no)" "yes" "settings/agents-shared/ro-worker.md present (canonical subagent def)"
+ck "$(grep -cE '^disallowedTools:.*Edit.*Write.*NotebookEdit' "$roW" 2>/dev/null)" "1" "ro-worker denies Edit/Write/NotebookEdit (read-only enforced by toolset)"
+# 4b WIRING — agent-launch materializes settings/agents-shared into .claude/agents
+#    as a frozen copy (same #15-hardened pattern as hooks).
+ck "$(grep -cE 'archive .*settings/agents-shared' "$AL" 2>/dev/null)" "1" "agent-launch materializes settings/agents-shared (git archive)"
+ck "$(grep -cE 'strip-components=2 -C[^#]*\.claude/agents' "$AL" 2>/dev/null)" "1" "agent-launch extracts it into .claude/agents/ (strip-2 frozen copy)"
+# 4c DEPLOY replay — once landed, the materialize actually lands ro-worker.md from
+#    main. Skips pre-land (agents-shared not yet in main), like check 2's skip.
+if [ -n "${main_rev:-}" ] && git --git-dir="$GITDIR" cat-file -e "$main_rev:settings/agents-shared/ro-worker.md" 2>/dev/null; then
+  amat="$(mktemp -d /tmp/agents-mat.XXXXXX)"
+  if git --git-dir="$GITDIR" archive "$main_rev" settings/agents-shared 2>/dev/null \
+        | tar -x --strip-components=2 -C "$amat" 2>/dev/null; then
+    ck "$([ -f "$amat/ro-worker.md" ] && echo yes || echo no)" "yes" "ro-worker.md materializes from main into .claude/agents/ (deploy replay)"
+  else
+    echo "  FAIL: agents materialize (git archive | tar) failed"; fail=1
+  fi
+  rm -rf "$amat"
+else
+  echo "  (deploy replay skipped: settings/agents-shared not yet in main — pre-land)"
+fi
+
 echo
 if [ "$fail" = 0 ]; then
   echo -e "\033[1mDEPLOY-ORDERING OK: settings.json refs ⊆ materialized hooks (no dangling deploy)\033[0m"

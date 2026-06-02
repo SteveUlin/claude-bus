@@ -163,9 +163,15 @@ The earlier "hangs loud-and-stuck" framing is retracted (§3). The flip side is 
 §5 auto-deny consequence: a needed tool that isn't pre-approved gets silently
 skipped — so pre-approve the subagents' real needs (web, `Bash(bus *)`).
 
-**Bash:** path A (`ro-worker`) omits `Bash` entirely — no scoping question. Path B
-(`Explore`) carries `Bash`; the session `permissions.allow` scopes which Bash
-auto-approves (`Bash(bus *)`), and anything else just auto-denies (harmless).
+**Bash (steer subagents to native read tools):** path A (`ro-worker`) omits `Bash`
+entirely — no scoping question. Path B (`Explore`) carries `Bash`; the session
+`permissions.allow` scopes which Bash auto-approves (`Bash(bus *)`), and anything
+else auto-denies (harmless). Under §4 only `Bash(bus *)` is granted, so a subagent's
+arbitrary `Bash` (e.g. `rg`/`find`) auto-denies and the read silently fails.
+**Mitigation: the orchestrator's prompt must steer subagents to the granted native
+tools — `Read`/`Grep`/`Glob` (all auto-approved, both paths) — over `Bash` for
+read-only work.** Path A enforces this structurally (no Bash); path B relies on the
+prompt. A line in the orchestrator role/prompt covers it.
 
 **Nesting vector:** path A omits `Agent`/`Workflow` → no nesting at all. Path B
 (`Explore`) excludes `Agent` but carries `Workflow`, so "could an Explore subagent
@@ -178,9 +184,21 @@ point. Path A enforces this structurally.
 ## 7. Pre-land empirical GATE (SEC-1-style: verify, don't trust the docs)
 
 The mechanism is now authoritative (guide), so the gate just confirms it fires as
-documented before land (SEC-1 precedent). Checks 1–2 are **local, web-free** — a
-bypass peer can run them. Check 3 needs web/auto behavior and is therefore the
-**non-bypass orchestrator's** to run (NOT this bypass peer).
+documented before land (SEC-1 precedent). **HONEST FINDING (bast, build time): a
+bypass peer cannot actually run any of these** — check 1 needs *interactive*
+prompt observation (headless auto-denies, so the prompt can't be seen), and check 2
+would require spawning a web-capable `Explore` subagent = web-under-bypass (the very
+hole). So all three fold into the **first non-bypass orchestrator launch**. This
+recursively reinforces the thesis: a bypass peer can't even safely *test* the
+read-only envelope — only the non-bypass orchestrator can. What bast DID verify is
+static (below the list). The build is static-clean; the semantic gate runs at first
+orchestrator launch (auri/sulin's, the same gate as land sign-off).
+
+Static build-verification bast ran (web-free, bypass-safe):
+`bash -n` clean; `--profile orchestrator` assembles `claude … --permission-mode
+default --allowedTools 'Read,Grep,Glob,WebSearch,WebFetch,Bash(bus *),Agent,Task,
+Workflow'` with **no** `--dangerously-skip-permissions`; netns guard `-n "$netns"`
+so the empty-netns orchestrator never mis-enters the `/run/netns/` cage path.
 
 1. **Gated-write semantics (local).** Session with `--permission-mode default
    --allowedTools 'Read,Grep,Glob'`: confirm an `Edit` attempt **prompts** (not a

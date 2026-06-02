@@ -72,6 +72,7 @@ delivery or restarting the broker.
 - **C++23 for the bus internals.** New tools land as C++23 in `src/`, built by CMake into `bin/`. Flat `bus::` namespace. The reproducible dev env is `flake.nix` + `.envrc` (direnv); `nix develop` drops you in if direnv isn't enabled. Existing shell scripts will be rewritten as time permits.
 - **One ruleset per session.** Don't let agents drift into per-agent `settings.json` overrides unless a role genuinely requires it — the shared `settings/` is the point.
 - **Layouts are the API.** A new use case usually means a new layout in `layouts/`, not new flags on existing scripts.
+- **Stamp completions.** On completing a task, stamp a durable claim: `bus done "<task>" "<artifact>"` — `bus verify` + the broker recovery check read it to catch claimed-but-absent.
 
 ## Code changes
 

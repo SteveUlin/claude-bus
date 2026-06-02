@@ -111,13 +111,27 @@ lone). Cosmetic polish deferred: the multibyte status glyphs (✓/✗/?) make
    the moment it's on main + the broker's rebuilt.
 2. ~~W1 vs W2~~ — SETTLED: W1. (done)
 3. ~~P5 verify-viewer build~~ — DONE (95d22533: `bus done` + `bus verify`).
-4. **me** — token-rate column: once elodin's `context_tokens` emit is on
-   main, compute Δtokens/Δt across monitor ticks and write it back to
-   `$STATE/status/<agent>.json` as `"token_rate_per_min"` (synced format to
-   elodin — he consumes it as the 2nd corroborating signal for P2 R3/R4).
-5. **me (land)** — land the MODEL column + verify-viewer stack to main when
-   comms opens a window (stack: MODEL → doc → verify-viewer, on main now).
-6. **auri** — roll out `bus done` usage fleet-wide (role-prompt or Stop-hook).
+4. ~~me (land)~~ — DONE. MODEL + doc + verify-viewer stack LANDED on
+   main@origin (commit 1bf0438f). Live fleet-wide after the next relaunch.
+5. **rate-routing — SETTLED: option (c), NO write-back.** Do NOT write a
+   rate field into `$STATE/status` — elodin owns that file (atomic-rename
+   full-overwrite every ~5s); a 2nd writer = lost updates (he caught this).
+   The rate is a window-dependent derivation, not a shareable artifact, so:
+   elodin stays SINGLE producer of `$STATE/status` (raw `context_tokens`
+   +`ts`+`model`); each consumer derives its OWN rate. P2 R3/R4 derives its
+   detection rate internally from the token history `maybeScanTokens`
+   already keeps (its own smoothed window) — that's elodin's Phase B/C, not
+   mine. The token-rate MONITOR column is now an OPTIONAL human-display
+   follow-up (its P2 consumer self-serves) — derive Δtokens/Δt in-memory
+   across the monitor's 1Hz ticks (track last-seen `ts`, recompute only when
+   elodin's ~5s emit bumps it), render like MODEL (`—` until present). Build
+   only if pulled. Fallback if P2 ever needs the human's EXACT number:
+   separate `$STATE/token-rate/<agent>.json` I own, elodin reads.
+6. **auri** — roll out `bus done` fleet-wide: a ROLE-PROMPT convention line,
+   NOT a Stop-hook (the claim is agent-authored semantic knowledge only the
+   agent has; a Stop-hook knows neither task nor artifact). Sequence: I
+   land (done) → relaunch so binaries have the verbs → I wire the
+   completion-protocol line into shared agent guidance (I own the surface).
 
 ## Pointers
 - Monitor render + `$STATE/status` read: `src/sub/sub_monitor.cpp`

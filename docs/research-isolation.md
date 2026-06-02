@@ -343,3 +343,15 @@ working as designed.
    squid allowlist; start tight and widen only if claude visibly degrades.
 3. **§7 gate outcome:** ✅ **RESOLVED — HONORED.** Clean env-proxy/netns route;
    transparent-SNI fallback not needed.
+4. **Scholar tool envelope:** ✅ **wired** in `--profile research` — non-bypass
+   read-only (allow `WebSearch,WebFetch,Read,Grep,Glob,Bash(bus *)`; deny
+   `Edit,Write,NotebookEdit`; `--permission-mode default`, so an unlisted tool
+   prompts → fail-safe *visible* hang, not silent-continue). `auto`/`dontAsk`
+   modes rejected for v1 unless verified to auto-DENY (an auto-allow mode would
+   be a hole). **Deferred launch-time hardening** (auri, 2026-06-01 — do NOT act
+   until a scholar actually launches): narrow `Bash(bus *)` →
+   `Bash(bus msg mail *)` + `Bash(bus done *)` + `Bash(bus research *)`, so a
+   compromised scholar can only reply to requesters and stamp done — not address
+   arbitrary peers or spawn. Closes the injection-laundering residual vector (a
+   scholar emitting a malicious bus message a worker then acts on); v1 covers it
+   with the mandate + the human gate.

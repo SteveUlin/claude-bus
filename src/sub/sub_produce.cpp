@@ -197,20 +197,39 @@ auto subTask(std::span<const char* const> args) -> int {
 //   - a path                    (verified via filesystem exists)
 //   - `test:<name>`             (manual until a test harness lands)
 auto subDone(std::span<const char* const> args) -> int {
-  if (args.size() < 2) {
+  // Optional `--id ID` (task-model B): links this terminal claim to a
+  // task minted at dispatch, so the reader matches open→done by id.
+  // Omitting it keeps the A-style anonymous claim — purely additive.
+  std::string task_id;
+  std::vector<std::string_view> positional;
+  positional.reserve(args.size());
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a{args[i]};
+    if (a == "--id") {
+      if (++i >= args.size()) {
+        std::println(stderr, "bus done: --id needs a value");
+        return 2;
+      }
+      task_id = args[i];
+    } else {
+      positional.emplace_back(a);
+    }
+  }
+  if (positional.size() < 2) {
     std::println(stderr,
-                 "usage: bus done \"<task>\" \"<artifact>\"  "
+                 "usage: bus done [--id ID] \"<task>\" \"<artifact>\"  "
                  "(artifact = commit id | path | test:<name>)");
     return 2;
   }
   const std::string agent = senderFromEnv();
-  const std::string task{args[0]};
-  const std::string artifact{args[1]};
+  const std::string task{positional[0]};
+  const std::string artifact{positional[1]};
 
   std::map<std::string, json::Value> rec;
   rec.insert({"agent", json::Value::from(agent)});
   rec.insert({"task", json::Value::from(task)});
   rec.insert({"claimed_artifact", json::Value::from(artifact)});
+  if (!task_id.empty()) rec.insert({"task_id", json::Value::from(task_id)});
   rec.insert({"ts", json::Value::from(nowMs())});
   const std::string line =
       json::serialize(json::Value::fromObject(std::move(rec)));

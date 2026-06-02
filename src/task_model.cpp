@@ -5,11 +5,14 @@
 #include "agent_status.h"  // nowMs
 #include "json_min.h"
 #include "state_paths.h"
+#include "topic_log.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <utility>
 
 namespace bus {
 
@@ -46,54 +49,143 @@ auto ownerLiveFor(std::string_view agent, std::int64_t now) -> OwnerLive {
 }  // namespace
 
 auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
-  std::vector<Task> tasks;
   const std::int64_t now = nowMs();
 
-  // Source: $STATE/done/<agent>.jsonl — terminal completion claims (the
-  // Option-A spine). Option B adds open/in-flight tasks from the work-queue
-  // ahead of this loop; the schema already carries their states.
+  // ── Spine: the `tasks` append-log topic (open / cancelled records) ──
+  // Read-in-full via TopicLog::dump() — no cursor, no broker round-trip.
+  // Keyed by id; last open-record wins on a re-open. `mint_ts` is the
+  // sort key for not-yet-done tasks (done tasks sort by completion ts).
+  std::map<std::string, Task> by_id;
+  std::map<std::string, std::int64_t> mint_ts;
+  std::set<std::string> cancelled;
+
+  const std::string topic_path =
+      stateRoot() + "/topics/" + std::string{kTasksTopic} + ".log";
+  topic::TopicLog spine{topic_path};
+  if (auto dumped = spine.dump()) {
+    for (const auto& msg : *dumped) {
+      const auto v = json::parse(msg.body);
+      if (!v) continue;
+      const std::string id = v->getOrString("id");
+      if (id.empty()) continue;
+      if (v->getOrBool("cancelled", false)) {
+        cancelled.insert(id);
+        continue;
+      }
+      Task t;
+      t.id = id;
+      t.owner = v->getOrString("owner");
+      t.title = v->getOrString("title");
+      if (const auto* deps = v->get("deps"); deps != nullptr && deps->isArray())
+        for (const auto& d : deps->asArray())
+          if (d.isString()) t.deps.push_back(d.asString());
+      by_id[id] = std::move(t);
+      mint_ts[id] = v->getOrInt("ts", 0);
+    }
+  }
+
+  // ── Terminal claims: $STATE/done/<agent>.jsonl ──
+  // A claim with `task_id` closes a spine task (match by id). A claim
+  // without one is a legacy A-style anonymous completion — surfaced as a
+  // standalone terminal task so nothing is lost.
+  std::vector<Task> anon_done;
   const std::string dir = stateRoot() + "/done";
   std::error_code ec;
-  if (!std::filesystem::exists(dir, ec)) return tasks;
-  for (const auto& entry : std::filesystem::directory_iterator{dir, ec}) {
-    if (!entry.is_regular_file()) continue;
-    if (entry.path().extension() != ".jsonl") continue;
-    std::ifstream in{entry.path()};
-    std::string line;
-    while (std::getline(in, line)) {
-      if (line.empty()) continue;
-      const auto v = json::parse(line);
-      if (!v) continue;
-      const std::string owner = v->getOrString("agent");
-      if (!only.empty() && !only.contains(owner)) continue;
-      Task t;
-      t.owner = owner;
-      t.title = v->getOrString("task");
-      t.done_claim.artifact = v->getOrString("claimed_artifact");
-      t.done_claim.ts = v->getOrInt("ts", -1);
-      t.id = owner + "-" + std::to_string(t.done_claim.ts);
-      t.state = "done";  // Option A: every task here is terminal
-      tasks.push_back(std::move(t));
+  if (std::filesystem::exists(dir, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator{dir, ec}) {
+      if (!entry.is_regular_file()) continue;
+      if (entry.path().extension() != ".jsonl") continue;
+      std::ifstream in{entry.path()};
+      std::string line;
+      while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        const auto v = json::parse(line);
+        if (!v) continue;
+        DoneClaim claim;
+        claim.artifact = v->getOrString("claimed_artifact");
+        claim.ts = v->getOrInt("ts", -1);
+        const std::string task_id = v->getOrString("task_id");
+        if (!task_id.empty()) {
+          if (auto it = by_id.find(task_id); it != by_id.end()) {
+            it->second.done_claim = claim;  // close a known spine task
+          } else {
+            // Claim references an id with no open record (broker GC'd the
+            // spine, or done landed first). Still show it as terminal.
+            Task t;
+            t.id = task_id;
+            t.owner = v->getOrString("agent");
+            t.title = v->getOrString("task");
+            t.done_claim = claim;
+            by_id[task_id] = std::move(t);
+          }
+          continue;
+        }
+        Task t;
+        t.owner = v->getOrString("agent");
+        t.title = v->getOrString("task");
+        t.done_claim = claim;
+        t.id = t.owner + "-" + std::to_string(claim.ts);
+        anon_done.push_back(std::move(t));
+      }
     }
   }
 
-  // Newest-first by completion ts.
-  std::ranges::sort(tasks, [](const Task& a, const Task& b) {
-    return a.done_claim.ts > b.done_claim.ts;
+  // ── State precedence per task: done-claim ⇒ done; else a cancel ⇒
+  // cancelled; else owner mid-turn (liveness boundary=none) ⇒ in_flight;
+  // else open. in_flight is INFERRED from owner liveness (auri's ruling):
+  // it means "the owner is live", NOT "provably on THIS task".
+  std::vector<std::pair<std::string, OwnerLive>> live_cache;
+  auto liveFor = [&](const std::string& owner) -> const OwnerLive& {
+    auto it = std::ranges::find(live_cache, owner,
+                                &std::pair<std::string, OwnerLive>::first);
+    if (it == live_cache.end()) {
+      live_cache.emplace_back(owner, ownerLiveFor(owner, now));
+      it = std::prev(live_cache.end());
+    }
+    return it->second;
+  };
+
+  std::vector<Task> tasks;
+  tasks.reserve(by_id.size() + anon_done.size());
+  for (auto& [id, t] : by_id) {
+    t.owner_live = liveFor(t.owner);
+    if (t.done_claim.ts >= 0)
+      t.state = "done";
+    else if (cancelled.contains(id))
+      t.state = "cancelled";
+    else if (t.owner_live.valid && t.owner_live.boundary == "none")
+      t.state = "in_flight";
+    else
+      t.state = "open";
+    tasks.push_back(std::move(t));
+  }
+  for (auto& t : anon_done) {
+    t.owner_live = liveFor(t.owner);
+    t.state = "done";
+    tasks.push_back(std::move(t));
+  }
+
+  if (!only.empty())
+    std::erase_if(tasks, [&](const Task& t) { return !only.contains(t.owner); });
+
+  // Sort: live work first (in_flight, open), then done, then cancelled;
+  // within a rank, newest first (mint ts for not-done, completion ts for
+  // done) so the cockpit reads top-down by urgency then recency.
+  auto rank = [](const Task& t) {
+    if (t.state == "in_flight") return 0;
+    if (t.state == "open") return 1;
+    if (t.state == "done") return 2;
+    return 3;  // cancelled / unknown
+  };
+  auto sortTs = [&](const Task& t) {
+    return t.done_claim.ts >= 0 ? t.done_claim.ts
+                                : (mint_ts.count(t.id) ? mint_ts[t.id] : 0);
+  };
+  std::ranges::sort(tasks, [&](const Task& a, const Task& b) {
+    const int ra = rank(a), rb = rank(b);
+    if (ra != rb) return ra < rb;
+    return sortTs(a) > sortTs(b);
   });
-
-  // Overlay owner liveness once per owner (cache to avoid re-reading a
-  // trigger file per task).
-  std::set<std::string> seen;
-  std::vector<std::pair<std::string, OwnerLive>> cache;
-  for (auto& t : tasks) {
-    auto it = std::ranges::find(cache, t.owner, &std::pair<std::string, OwnerLive>::first);
-    if (it == cache.end()) {
-      cache.emplace_back(t.owner, ownerLiveFor(t.owner, now));
-      it = std::prev(cache.end());
-    }
-    t.owner_live = it->second;
-  }
 
   return tasks;
 }

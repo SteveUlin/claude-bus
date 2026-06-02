@@ -1,15 +1,20 @@
 # task-model — fleet task convergence (kvothe lane)
 
 Author: kvothe · 2026-06-01 · For: auri's observability pillar (task-tracking + critical-path)
-Status: **BUILT (Option A) + identity decision surfaced to auri.**
-`src/task_model.{h,cpp}` (pure reader) + `bus tasks` ship the terminal-only
-read model — done claims joined with the triggers owner-liveness overlay,
-live-verified (`bus tasks` renders owner/state/title/done + `LIVE` boundary
-+ctx%, dropping the overlay when the trigger file is stale). Pre-approved
-next after increment-c (auri's sequence: increment-c → **task-model** →
-critical-path). Land gated on elodin's D4 heal, same as the trigger-feed v1.
-OPEN: auri's A-vs-B call unlocks open/in-flight + deps (additive, no viewer
-rework). Critical-path view (next) joins tasks↔elodin's span schema.
+Status: **BUILT (Option B) — open-task spine live, verified end-to-end.**
+auri ruled all 5 design decisions (append-log spine; in_flight INFERRED from
+owner liveness; id = `<ms>-<owner>-<rand4>`, minted dispatch-side; deps
+advisory; standalone `bus tasks open`). Implemented + sandbox-verified:
+`bus tasks open/close` (producers via the enqueue RPC), `bus done --id`
+(optional `task_id`, purely additive), and `readTasks` reconcile over THREE
+stores — the `tasks` append-log spine (open/cancelled) + `$STATE/done`
+(terminal, by `task_id`) + the triggers liveness overlay (in_flight
+inference). `bus tasks` renders OWNER/STATE/TITLE/DEPS/DONE/LIVE with state
+colors. **No broker changes** (elodin untouched — producers use the existing
+enqueue op; the reader reads the log via TopicLog::dump()). Round-trip proven:
+open→open, `done --id`→done, `close`→cancelled, liveness none→in_flight,
+legacy `bus done` (no id)→terminal, owner filter, sort by urgency-then-recency.
+Critical-path view (next) joins tasks↔elodin's span schema.
 
 Durable anchor (survives /clear). Builds on
 [docs/p3-trigger-feed.md](p3-trigger-feed.md) and
@@ -164,38 +169,42 @@ No broker changes: enqueue uses the existing produce path; the reader reads
 the topic log file via `TopicLog::dump()`. Stays in my lane + auri's mint —
 **elodin untouched.**
 
-### Decisions for auri (surface before I implement)
+### Decisions for auri — RULED (2026-06-02)
 
-1. **Topic kind for the spine: append-log vs work-queue.** You said
-   work-queue, but its defining feature (consumer cursors / fetch-consume)
-   is UNUSED — we read-in-full and you push-assign `owner` at mint, so
-   nothing pulls. **append-log** is the truer fit (durable, read-whole, no
-   cursor semantics, retention=keep). Either works for the reader; I lean
-   append-log. Your call.
-2. **in_flight: inferred vs explicit.** I propose INFERRED from owner
-   liveness (no per-task `start` verb → zero agent burden). Explicit
-   `bus tasks start` can come later if the inference proves too coarse
-   (an agent juggling two tasks).
-3. **id scheme.** You mint; the verb takes an opaque string. Suggest a
-   stable, sortable form (e.g. `<ms>-<owner>-<rand4>`, mirroring broker
-   msg ids) so ordering is free.
-4. **deps semantics.** Advisory in v1 — recorded for the critical-path
-   graph, NOT gating (we don't block dispatch on unmet deps). Agree?
-5. **verb naming** — `bus tasks open/close` (co-located) OK, or do you want
-   it folded INTO your dispatch (e.g. `bus msg mail --task-id …` auto-opens
-   the task)? The standalone verb keeps non-mail task creation possible;
-   folding into mail is fewer calls for you. Your preference.
+1. **Topic kind = append-log.** work-queue's cursor/fetch is dead weight
+   when we read-in-full and auri push-assigns `owner` at mint. append-log
+   is the honest kind for an immutable event log we project over.
+2. **in_flight = INFERRED** from owner liveness. Zero agent burden. The
+   approximation, documented: `in_flight` means "the owner is live", NOT
+   "provably on THIS task". Explicit `bus tasks start` deferred to later
+   only if the inference misleads (an agent juggling two tasks).
+3. **id = `<ms>-<owner>-<rand4>`** — mirrors the broker msg_id format
+   (sortable, consistent). auri mints; the verb takes it opaque.
+4. **deps = advisory** in v1 — recorded for the critical-path graph, NOT
+   gating (auri is the scheduler; deps don't block dispatch).
+5. **verb = standalone `bus tasks open`** — no folding into mail in v1.
+   auri opens champion-less tasks with no mail to send, so task-creation
+   must not couple to the mail path.
 
-### Build order once approved
+### Build order — DONE
 
-1. `bus done --id` + `task_id` in the done record (smallest, unblocks
-   reconcile).
-2. `bus tasks open` / `close` verbs (the spine producer sugar).
-3. Extend `readTasks` (task_model.cpp) to read the `tasks` topic +
-   reconcile by id → real open/in_flight/done/cancelled + deps.
-4. `bus tasks` viewer: light up the DEPS column + the richer states.
+1. ~~`bus done --id` + `task_id` in the done record~~ — done
+   (`sub_produce.cpp`; optional flag, additive).
+2. ~~`bus tasks open` / `close` verbs~~ — done (`sub_tasks.cpp`; sugar
+   over the enqueue RPC, idempotent topic_create).
+3. ~~`readTasks` reconcile over the `tasks` spine~~ — done
+   (`task_model.cpp`; dump() the log, join `done` by `task_id`, state
+   precedence, liveness overlay, urgency-then-recency sort).
+4. ~~`bus tasks` viewer: DEPS column + richer states~~ — done
+   (OWNER/STATE/TITLE/DEPS/DONE/LIVE, state-colored).
 
-## Open / next (A — DONE)
+## Open / next (A + B — DONE)
 
-1. ~~auri: A-now-B-target?~~ — A landed; B approved, design above.
+1. ~~auri: A-now-B-target?~~ — A landed; B approved + ruled + BUILT.
 2. ~~reader lib + `bus tasks` (A scope)~~ — DONE (terminal-only).
+3. ~~B: recording verbs + open-task spine + reconcile~~ — DONE, verified.
+4. NEXT: **dispatch-side adoption** — auri mints ids + calls `bus tasks
+   open` at dispatch (her lane); agents echo `--id` into `bus done`. Until
+   adoption, the spine is empty and `bus tasks` shows the legacy
+   terminal-only view (graceful). Then: **critical-path view** joins
+   `Task.deps` ↔ elodin's span schema for the slowest dependent chain.

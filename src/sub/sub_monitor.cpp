@@ -245,6 +245,7 @@ auto scanIntAfter(std::string_view content,
 struct CtxStats {
   int pct{-1};
   long long size_tokens{-1};
+  std::string model;  // top-level "model" in the status JSON; "" if absent
 };
 
 auto contextStatsFor(std::string_view agent) -> CtxStats {
@@ -261,6 +262,25 @@ auto contextStatsFor(std::string_view agent) -> CtxStats {
   if (pct >= 0) out.pct = static_cast<int>(pct > 100 ? 100 : pct);
   out.size_tokens = scanIntAfter(content, "\"context_window\"",
                                  "\"context_window_size\"");
+  out.model = extractStr(content, "model");
+  return out;
+}
+
+// MODEL column — abbreviates the status JSON's model string (strips the
+// "claude-" vendor prefix: "claude-opus-4-8" → "opus-4-8") so the
+// model+ctx pair reads at a glance. "—" until the broker's token-scan
+// watcher stamps "model" into $STATE/status (it already parses the
+// transcript turn the model rides on; see token-monitor handoff).
+constexpr std::size_t kModelColWidth = 10;
+auto formatModel(std::string_view model) -> std::string {
+  if (model.empty()) return "—";
+  std::string_view m = model;
+  if (m.starts_with("claude-")) m.remove_prefix(7);
+  std::string out{m};
+  if (out.size() > kModelColWidth - 1) {
+    out.resize(kModelColWidth - 2);
+    out += "…";
+  }
   return out;
 }
 
@@ -301,8 +321,8 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   // Header — column widths matched 1:1 to the data row below. The
   // "    " (4-space) slot stands in for the state-glyph (2 chars) +
   // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:>9} {:<10} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "CTX", "LANE",
+  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<10} {:>9} {:<10} {}{}{}",
+               kBold, "AGENT", "STATE", "✉", "AGE", "MODEL", "CTX", "LANE",
                "TASK", kReset, kClearEol);
 
   if (!snap.broker_alive) {
@@ -341,6 +361,7 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto title = formatTitle(file_title);
     const auto ctx_stats = contextStatsFor(name);
     const auto ctx_cell = formatCtx(ctx_stats);
+    const auto model_cell = formatModel(ctx_stats.model);
     // CTX color tier: ≥90% red, ≥75% yellow, else dim — surfaces
     // approaching-ceiling context at a glance.
     const auto ctx_color =
@@ -361,13 +382,14 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
     std::println(
         "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
-        "{}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
+        "{}{:<10}{} {}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
         stateColor(st), stateName(st), kReset,
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
+        ctx_stats.model.empty() ? kDim : "", model_cell, kReset,
         ctx_color, ctx_cell, kReset,
         lane_raw.empty() ? kDim : "", lane, kReset,
         file_title.empty() ? kDim : "", title, kReset,

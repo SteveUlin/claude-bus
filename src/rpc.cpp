@@ -136,7 +136,11 @@ auto Server::bind() -> bool {
   // Remove stale socket file from a prior crashed broker.
   ::unlink(socket_path_.c_str());
 
-  listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  // SOCK_NONBLOCK so the intake drain loop's accept() returns EAGAIN once
+  // the backlog is empty (and breaks back to the stop-responsive pselect)
+  // instead of parking in a blocking accept() between requests — a parked
+  // accept() swallows SIGTERM (EINTR → re-accept) and wedges shutdown.
+  listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (listen_fd_ < 0) {
     std::println(stderr, "rpc: socket: {}", std::strerror(errno));
     return false;
@@ -442,7 +446,15 @@ auto readLine(int fd, std::size_t max_bytes)
   while (true) {
     const auto n = ::read(fd, buf.data(), buf.size());
     if (n < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR) {
+        // A stop signal (SIGTERM/INT/HUP) interrupted the read. Bail so the
+        // intake loop can observe gStopFlag instead of re-blocking on a
+        // half-sent request and swallowing the shutdown.
+        if (gStopFlag.load(std::memory_order_acquire)) {
+          return std::unexpected{Error{"interrupted by shutdown"}};
+        }
+        continue;
+      }
       return std::unexpected{Error{std::string{"read: "} + std::strerror(errno)}};
     }
     if (n == 0) {
@@ -472,7 +484,10 @@ auto writeAll(int fd, std::string_view s) -> bool {
   while (off < out.size()) {
     const auto n = ::write(fd, out.data() + off, out.size() - off);
     if (n < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR) {
+        if (gStopFlag.load(std::memory_order_acquire)) return false;
+        continue;
+      }
       return false;
     }
     off += static_cast<std::size_t>(n);

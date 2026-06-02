@@ -4,47 +4,44 @@
 # (report: an auri->comms message arrived byte-identical twice). bast owns this
 # failing regression; elodin owns the fix (verification-parallelism).
 #
-# ── ROOT CAUSE (elodin, confirmed 2026-06-01) ─────────────────────────────
-# comms is a hardcoded TTY opt-out (tty_policy.h:26), so dispatchAgentInbox
-# does NOT off-tty-return (delivery.cpp:511) -> it's the TTY PUSH path:
-# deliverInline -> sendToPaneSafe, marked in-flight with next_retry_at, acked
-# by the POSITIONAL UserPromptSubmit join (delivery.cpp:458-490), retried by
-# scanRetries (797), up to kMaxAttempts=3.
+# ── ROOT CAUSE (elodin, confirmed + simplified 2026-06-01) ────────────────
+# It is STRUCTURAL, not an ack-timing race. comms is a hardcoded TTY opt-out
+# (tty_policy.h:26), so dispatchAgentInbox takes the TTY PUSH path. There
+# (delivery.cpp:643) a record is marked in-flight ONLY AFTER deliverInline
+# SUCCEEDS:  `if (!deliverInline(...)) return;`  — so EVERY in-flight record
+# has ALREADY landed on the pane. Then scanRetries (861) calls deliverInline
+# AGAIN on that same in-flight record -> re-pushes the identical bytes ->
+# guaranteed duplicate (and it appends into the pane's input buffer, so it can
+# garble / double-submit). No ack is needed to trigger it: in-flight ⟹
+# already-delivered, so ANY retry re-push is a dup. Current binary re-pushes
+# up to kMaxAttempts(3) then escalates -> 3 identical deliveries.
+# (The off-TTY path already does the right thing: it acks BY ID and escalates,
+# never TTY-re-dispatches — delivery.cpp:434-454.)
 #
-# The ack and the record are TEMPORALLY DECOUPLED — there is no per-record
-# correlation. The tick order is scanEvents(874) -> scanRetries(875) ->
-# dispatch(882), so:
-#   - a UserPromptSubmit consumed by scanEvents when NO in-flight record
-#     exists for the agent is BURNED with no effect (oldest_id empty ->
-#     line 481 continue), one-shot (events_offset_ advanced); and
-#   - a record dispatched in tick N can never be acked by a UPS already
-#     consumed in tick N (dispatch runs AFTER scanEvents).
-# comms, mid-work, emits no further UPS -> the record stays un-acked ->
-# scanRetries re-pushes the SAME bytes after ackTimeout -> byte-identical dup.
-# (The off-TTY path already fixed this by acking BY ID — delivery.cpp:434-454,
-# whose comment notes it "replaces the positional UserPromptSubmit ack".)
-#
-# ── THE REGRESSION (elodin's DUP shape) ───────────────────────────────────
-# Force the consume-before-dispatch order: append a UPS for comms, drive a
-# tick so scanEvents BURNS it (no in-flight yet), THEN mail the record, then
-# drive ticks past ackTimeout so scanRetries re-pushes. INVARIANT asserted:
-# "a record for which an ack (UPS) was observed is delivered exactly once."
-# Pre-fix: the sink sees the record >=2x (FAIL). Post-fix (per-record ack
-# correlation): exactly 1x (PASS).
+# ── THE REGRESSION ────────────────────────────────────────────────────────
+# Mail an idle TTY agent, never ack, drive ticks past kMaxAttempts*ackTimeout.
+# Lock elodin's invariant (two clauses):
+#   (1) a successfully-delivered agent-inbox record is pushed to the pane
+#       EXACTLY ONCE  -> assert write-chars count for the payload == 1; and
+#   (2) absence of an ack triggers ESCALATION (inbox-ops/audit), NOT
+#       re-delivery -> assert an escalation record appears.
+# Pre-fix: the record is pushed 3x (FAIL clause 1) AND escalation appears
+# (clause 2 already holds). Post-fix (scanRetries escalates on the ack-DEADLINE
+# instead of re-delivering): pushed 1x + escalation -> both pass.
 #
 # SINK: a fake zellij logs every write-chars (the literal pane delivery);
-# count occurrences of the unique payload. >=2 == the dup. (elodin confirmed
-# this is the right observable.)
+# count occurrences of the unique payload. >=2 == the dup. (elodin-confirmed.)
 #
-# Gotchas baked in (project_broker_itest_gotchas): assert on the fake sink,
-# never a racy client read; `grep -c || true`; wait only on named pids.
+# Gotchas baked in (project_broker_itest_gotchas + project_fake_zellij_
+# delivery_harness): assert on the fake sink, never a racy client read;
+# `grep -c || true`; wait only on named pids.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUS="${BUS:-$ROOT/bin/bus}"
 export CLAUDE_BUS_STATE="$(mktemp -d /tmp/dup-delivery-itest.XXXXXX)"
-export CLAUDE_BUS_ACK_TIMEOUT_MS=200    # retry comes due fast once un-acked
+export CLAUDE_BUS_ACK_TIMEOUT_MS=200    # retry/escalation deadline comes fast
 
 RCPT="comms"                            # the hardcoded TTY opt-out (push path)
 FAKE="$CLAUDE_BUS_STATE/fakebin"
@@ -95,30 +92,26 @@ echo "isolated broker up (pid $BPID), recipient=$RCPT (TTY push), ack-timeout=${
 tick() { "$BUS" state >/dev/null 2>&1; }
 PAYLOAD="dup-probe-$$"
 
-# Establish the events_offset_ seek point (first scanEvents seeks to EOF, so
-# the seed Stop is never mis-consumed as an ack).
-tick; sleep 0.2
-
-echo "1. append a UserPromptSubmit for $RCPT BEFORE any record is in-flight"
-TS1="$(date -u +%FT%T.%3NZ)"
-printf '%s\n' "{\"ts\":\"$TS1\",\"session\":\"t\",\"agent\":\"$RCPT\",\"pane\":\"1\",\"event\":\"UserPromptSubmit\",\"payload\":{\"prompt\":\"x\"}}" \
-  >> "$CLAUDE_BUS_STATE/events.jsonl"
-tick; sleep 0.2     # scanEvents BURNS it (oldest_id empty -> no effect)
-
-echo "2. NOW mail the record — dispatched after the ack was already consumed"
+echo "1. mail an idle TTY agent — delivered once, marked in-flight"
 "$BUS" msg mail "$RCPT" "$PAYLOAD" >/dev/null
-tick; sleep 0.2     # dispatch -> push #1, in-flight, next_retry_at=+200ms
+tick; sleep 0.2     # dispatch -> push #1, in-flight, next_retry_at set
 
-echo "3. drive ticks past ackTimeout — un-acked record gets re-pushed"
-for _ in $(seq 1 8); do tick; sleep 0.2; done   # > ackTimeout; let scanRetries run
+echo "2. NEVER ack; drive ticks past kMaxAttempts*ackTimeout"
+for _ in $(seq 1 12); do tick; sleep 0.2; done   # ~2.4s >> 3*200ms
 
-echo "4. ASSERT exactly-once (a UPS ack WAS observed for $RCPT)"
+echo "3. ASSERT exactly-once delivery (a delivered record must not be re-pushed)"
 writes=$(grep -c "$PAYLOAD" "$WRITES" || true)
-ck "${writes:-0}" "1" "record delivered to $RCPT EXACTLY once (got $writes; >=2 == the dup bug)"
+ck "${writes:-0}" "1" "record pushed to $RCPT EXACTLY once (got $writes; >=2 == the dup bug)"
+
+echo "4. ASSERT the no-ack response is ESCALATION, not re-delivery"
+esc_audit=$("$BUS" msg peek audit --limit 100 2>/dev/null | grep -c "delivery exhausted.*agent=$RCPT" || true)
+esc_ops=$("$BUS" msg peek inbox-ops --limit 100 2>/dev/null | grep -c "delivery to $RCPT exhausted" || true)
+ck "$([ "${esc_audit:-0}" -ge 1 ] || [ "${esc_ops:-0}" -ge 1 ] && echo escalated)" "escalated" \
+   "escalation recorded after the ack deadline (audit=$esc_audit ops=$esc_ops)"
 
 echo
 if [ "$fail" = 0 ]; then
-  echo -e "\033[1mDUP-DELIVERY REGRESSION PASSED (exactly-once held)\033[0m"
+  echo -e "\033[1mDUP-DELIVERY REGRESSION PASSED (exactly-once + escalate-not-redeliver)\033[0m"
 else
   echo -e "\033[1mDUP-DELIVERY REGRESSION FAILED — duplicate delivered (expected on the pre-fix binary)\033[0m"
   echo "pane-writes.log (count=$writes):"; cat "$WRITES"

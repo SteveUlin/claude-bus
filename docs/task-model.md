@@ -122,9 +122,80 @@ Task {
 - **elodin:** span schema (already handed the CORE) — the critical-path
   view joins tasks↔spans, not task-model itself.
 
-## Open / next
+## B — recording verb + open-task spine (DESIGN; surface before impl)
 
-1. **auri:** A-now-B-target OK? Do we mint task identity at dispatch? →
-   gates whether the model ever shows open/in-flight or stays a post-mortem.
-2. Build reader lib + `bus tasks` (A scope) — pure reader, can start
-   without (1) since A needs no producer; (1) only unlocks B's richer states.
+auri APPROVED A-now-B-target and committed to the minting side. B gives
+tasks IDENTITY at dispatch so the model shows open / in_flight, not just
+done. Split: **auri mints `{id, owner, deps, title}` at dispatch; I build the
+recording verb + the spine + the reconcile.**
+
+### The convergence (still no 4th store)
+
+B activates the dormant 3rd store — the work-queue topic — as the OPEN-task
+registry. The reader then joins THREE existing stores by `id`:
+
+| Source | Role in B | Mechanism |
+| --- | --- | --- |
+| work-queue topic `tasks` | open-task registry: `{id, owner, deps, title}` minted at dispatch | `TopicLog::dump()` reads ALL records non-destructively (no cursor advance) — same read-in-full pattern A uses on `done/*.jsonl`. |
+| `$STATE/done/<agent>.jsonl` | terminal claim, linked by `task_id` | `bus done --id <id>` echoes the id so the reader matches open→done. |
+| `$STATE/triggers/<agent>.json` | in_flight inference (owner mid-turn on it) | existing owner-liveness overlay (A already joins this). |
+
+`state` precedence per id: a matching done-claim ⇒ `done`; else a `cancelled`
+record ⇒ `cancelled`; else owner liveness `boundary=none` ⇒ `in_flight`;
+else `open`.
+
+### Recording verbs (the design to approve)
+
+- **`bus tasks open --id ID --owner NAME --title "…" [--deps a,b]`** — thin
+  wrapper that builds the task JSON and enqueues it to the `tasks` topic
+  (auto-create on first use). Co-located under `bus tasks` (the task-model
+  surface) rather than the existing `bus task` (which is the unrelated
+  monitor-column setter — overloading it would conflate two concepts).
+  Mechanically this is `bus msg enqueue tasks '<json>'`; the verb is sugar
+  so auri's dispatch never hand-builds JSON.
+- **`bus done --id ID "<task>" "<artifact>"`** — `bus done` gains an OPTIONAL
+  `--id`; the done record gains `task_id`. Omitting it keeps today's
+  A-style terminal-only stamp (B is purely additive — old calls still work).
+- **`bus tasks close --id ID`** — append a `cancelled` record so an
+  abandoned/dispatched-but-dropped task leaves the open list (else it grows
+  unbounded). Lightweight; the reader folds it.
+
+No broker changes: enqueue uses the existing produce path; the reader reads
+the topic log file via `TopicLog::dump()`. Stays in my lane + auri's mint —
+**elodin untouched.**
+
+### Decisions for auri (surface before I implement)
+
+1. **Topic kind for the spine: append-log vs work-queue.** You said
+   work-queue, but its defining feature (consumer cursors / fetch-consume)
+   is UNUSED — we read-in-full and you push-assign `owner` at mint, so
+   nothing pulls. **append-log** is the truer fit (durable, read-whole, no
+   cursor semantics, retention=keep). Either works for the reader; I lean
+   append-log. Your call.
+2. **in_flight: inferred vs explicit.** I propose INFERRED from owner
+   liveness (no per-task `start` verb → zero agent burden). Explicit
+   `bus tasks start` can come later if the inference proves too coarse
+   (an agent juggling two tasks).
+3. **id scheme.** You mint; the verb takes an opaque string. Suggest a
+   stable, sortable form (e.g. `<ms>-<owner>-<rand4>`, mirroring broker
+   msg ids) so ordering is free.
+4. **deps semantics.** Advisory in v1 — recorded for the critical-path
+   graph, NOT gating (we don't block dispatch on unmet deps). Agree?
+5. **verb naming** — `bus tasks open/close` (co-located) OK, or do you want
+   it folded INTO your dispatch (e.g. `bus msg mail --task-id …` auto-opens
+   the task)? The standalone verb keeps non-mail task creation possible;
+   folding into mail is fewer calls for you. Your preference.
+
+### Build order once approved
+
+1. `bus done --id` + `task_id` in the done record (smallest, unblocks
+   reconcile).
+2. `bus tasks open` / `close` verbs (the spine producer sugar).
+3. Extend `readTasks` (task_model.cpp) to read the `tasks` topic +
+   reconcile by id → real open/in_flight/done/cancelled + deps.
+4. `bus tasks` viewer: light up the DEPS column + the richer states.
+
+## Open / next (A — DONE)
+
+1. ~~auri: A-now-B-target?~~ — A landed; B approved, design above.
+2. ~~reader lib + `bus tasks` (A scope)~~ — DONE (terminal-only).

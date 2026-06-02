@@ -1,7 +1,7 @@
 # `bus recover <agent>` — the relaunch primitive (P2 Phase C dependency)
 
-**Status:** DESIGN — contract first (the deliverable); impl follows once elodin's
-P2 Phase B firms and we align the interface. **Owner:** bast (pane lifecycle).
+**Status:** CONTRACT ALIGNED with elodin (2026-06-02, §9) — impl follows once his
+P2 Phase B firms. **Owner:** bast (pane lifecycle).
 **Caller:** elodin's broker auto-recovery engine — the `relaunch` action (R4 /
 R3-escalate / R5) *invokes* this verb; it does not reimplement it
 ([broker-auto-recovery.md](broker-auto-recovery.md) §4 rung 3, §2 non-goal "the
@@ -51,12 +51,20 @@ engine) and the primitive dumb + testable.
 bus recover <agent> [--no-verify] [--timeout-ms N]
 ```
 
-**Exit codes** (the breaker's primary signal):
-- `0` — recovered **and verified** (fresh claude up, events resuming).
-- `10` — relaunched but **verify timed out** (process started, not yet confirmed
-  live). Caller may treat as soft-fail: re-check next scan rather than escalate.
-- `20` — **failed** (couldn't resolve/kill, or relaunch never started). Caller
-  escalates-human + opens the breaker.
+**Exit codes** (the breaker's primary signal — semantics settled with elodin;
+**`0` AND `10` both COUNT toward MaxR**, because a relaunch *happened* = a
+disruption, and repeated "successful" relaunches of a flapper IS the loop the
+breaker bounds):
+- `0` — recovered **and verified** (fresh claude up, a fresh event landed). Engine:
+  record success, `count++`, clear the active signature.
+- `10` — relaunched but **verify timed out** (process started, no fresh event yet —
+  possibly **boot-stuck**). Engine: `count++`, leave the agent `verifying`,
+  re-check next scan (soft). The boot-stuck-vs-healthy distinction is exactly why
+  verify is event-based (§6).
+- `20` — **failed** (couldn't resolve/kill, or relaunch never started). Engine:
+  escalate-human (`inbox-ops`) + **open the breaker now**.
+- `30` — **attached-pane defer** (human is on the pane; `recover` did nothing).
+  Engine: **no count**, defer, re-eval later.
 - `2` — usage / unknown agent.
 
 **stdout** — one JSON line (the audit + the detail the ledger may fold in):
@@ -71,56 +79,70 @@ the kill and proceeds to relaunch — a recover on an already-down agent still
 brings it up. Two concurrent `recover <agent>` calls are serialized by a per-agent
 flock (`$STATE/recovery/<agent>.lock`) so a double-fire can't double-launch.
 
-## 4. THE ALIGNMENT QUESTION (elodin) — ledger ownership
+## 4. Ledger ownership — RESOLVED (elodin, 2026-06-02)
 
-auri's brief says "the verb must read/write the same `$STATE/recovery/<agent>.json`
-shape." elodin's §7 says that ledger holds **breaker state + relaunch timestamps +
-per-signature backoff** — i.e. **recovery POLICY state, which the engine owns**.
-Two models; I lean A, but it's elodin's call since his breaker reads it:
+**The verb writes NOTHING to `$STATE/recovery/<agent>.json`.** That file is
+breaker POLICY (MaxR/MaxT window + backoff) and is **single-writer = elodin's
+engine** — two writers is literally the "crash-loop bounces the broker → infinite
+relaunches" bug (elodin §7). `recover` returns its outcome via **exit code + the
+one JSON stdout line** (§3); the engine's `ledger.record(agent, row)` folds it in.
+No verb-side `attempts.jsonl` — elodin's engine already audits every action to the
+audit topic, so a verb-side trail is redundant (revisit later only if we want raw
+verb telemetry distinct from policy). **Breaker single-writer, full stop.**
 
-- **(A) RECOMMENDED — verb returns, broker records.** `recover` writes **nothing**
-  to `recovery/<agent>.json`; it returns outcome via exit+stdout, and the broker's
-  `ledger.record(agent, row)` folds it in (timestamp on success, breaker-trip on
-  `20`). Cleanest: one writer (the engine) owns the breaker file; the primitive
-  stays stateless. Matches §3 exactly.
-- **(B) Verb appends an attempt-record.** `recover` appends a `{ts, outcome,
-  killed_pid}` event to a *separate* `recovery/<agent>.attempts.jsonl` (audit
-  trail), which the engine reads alongside its own ledger. Keeps the breaker file
-  engine-owned but gives a verb-authored audit log.
-
-**I do NOT want the verb writing the breaker file (A's rejection of that) — two
-writers to the MaxR/MaxT state is the bug that gives "a crash-loop bounced the
-broker → infinite relaunches" (elodin §7's exact warning).** Proposing A; B if
-elodin wants the verb-side audit trail. Either way, **the breaker state stays
-single-writer (engine).** Need elodin's pick before I build.
-
-## 5. The relaunch mechanic (bast's lane) — two candidates
+## 5. The relaunch mechanic — respawn-loop pane (CHOSEN, elodin-confirmed)
 
 The wedged pane runs `… exec agent-launch <agent>` (fleet.kdl), so when `claude`
-dies the pane's command is *done* — there's no shell left to re-run agent-launch.
-So "kill" alone doesn't relaunch. Two ways to close that:
+dies the pane's command is *done* — no shell to re-run agent-launch, so "kill"
+alone doesn't relaunch. **Fix: make the fleet.kdl agent panes a guarded
+respawn-loop** (the pattern `monitor`/`agent-bar`/`bus-deck` already use):
 
-- **(A) RECOMMENDED — respawn-loop pane.** Change the fleet.kdl agent panes from
-  `exec agent-launch <agent>` to a **guarded loop** —
-  `while :; do agent-launch <agent>; [ -e $STATE/down/<agent> ] && break; sleep 2; done` —
-  exactly the pattern the viewers (`monitor`, `agent-bar`, `bus-deck`) already use.
-  Then **`recover` just kills the PID**; the pane's own loop relaunches (fresh
-  `claude --continue`). A `$STATE/down/<agent>` sentinel breaks the loop for an
-  *intentional* despawn/exit (so a deliberate quit doesn't auto-respawn). Pros:
-  the relaunch is local to the pane (no cross-pane zellij driving), survives any
-  claude crash (not just recover-triggered), reuses a proven pattern. Cons: a
-  one-line fleet.kdl change per agent + the sentinel; changes exit semantics
-  (intentional exits must touch the sentinel).
-- **(B) Verb-driven re-exec.** Keep `exec`; `recover` kills the PID, then drives
-  the pane to re-run agent-launch via a zellij action (needs `close_on_exit=false`
-  so a shell remains, then inject the command). Fragile: TTY contention, depends on
-  zellij pane-command semantics, different path for fleet-fixed-tab vs dynamic
-  peers. For **dynamic peers** the P4 respawn spec (`$STATE/dynamic-peers`,
-  [P4](broker-auto-recovery.md)) already records role+project_dir → a despawn+spawn
-  is possible, but that changes tab identity.
+```sh
+while :; do
+  agent-launch <agent>
+  [ -e "$STATE/recovery/<agent>.down" ] && break   # the down-sentinel (§5.1)
+  sleep 2
+done
+```
 
-**Recommend A** (respawn-loop): it makes `recover` trivially reliable (kill-only)
-and the pane self-heals on *any* claude death. The fleet.kdl change is mine.
+Then **`recover` is just "kill the PID"** — the pane's own loop relaunches (fresh
+`claude --continue`). The relaunch is local to the pane (no cross-pane zellij
+driving), self-heals on *any* claude death (not only recover-triggered), and
+reuses a proven pattern. Cost: a one-line fleet.kdl change per agent (mine) + the
+sentinel. elodin confirmed the **double-trip is bounded by timescale** — his
+wedge/recovery detection needs *sustained* signal (`WEDGE_BUDGET_MS` = minutes)
+while the respawn window is ~2 s, so a natural fast respawn never trips him; only a
+*persistent* boot-stuck loop engages both, and his OTP breaker (3/10 min) bounds
+that. He also confirmed his `SessionEnd` handler (delivery.cpp:375) releases
+in-flight **without advancing the cursor**, so a respawn re-delivers to the fresh
+TUI cleanly.
+
+(Rejected: verb-driven re-exec via a zellij action — fragile TTY contention,
+`close_on_exit` dependence, and a different path for fleet-fixed-tab vs dynamic
+peers. Dynamic peers' P4 respawn spec exists but despawn+spawn changes tab
+identity. Kill-only + loop is strictly cleaner.)
+
+### 5.1 The down-sentinel — `$STATE/recovery/<agent>.down` (the breaker↔loop seam)
+
+The sentinel is a **contract item**, the seam between elodin's breaker and bast's
+loop:
+
+- **Writers (two):** (1) elodin's engine, when the **breaker OPENS** (gave up after
+  MaxR) — "the broker gave up, stop respawning"; (2) an **intentional despawn/quit**
+  (so a deliberate shutdown doesn't auto-respawn).
+- **Reader:** the pane loop, checked **before each respawn** — present ⇒ `break`,
+  the pane stays down, the human intervenes.
+- **Cleared by `agent-launch` at startup:** a fresh *intended* launch removes the
+  sentinel (a launch means "intended up"), so a human relaunch/spawn after a
+  breaker-open clears the halt and the loop resumes.
+- Path: **`$STATE/recovery/<agent>.down`** (bast's pick) — co-located with elodin's
+  recovery state, clearly recovery-owned.
+
+elodin owns two engine-side pieces that complete the seam: **(a)** on a *verified*
+fresh `SessionStart` he resets the agent's recovery state (active sig +
+per-signature backoff) so stale alarms don't re-trip (ties to his `forgetAgent`
+eviction); **(b)** he writes the sentinel on breaker-open. bast owns the loop +
+the `agent-launch`-clears-on-start behavior.
 
 ## 6. PID resolution + verify (mechanics)
 
@@ -132,11 +154,16 @@ and the pane self-heals on *any* claude death. The fleet.kdl change is mine.
 - **Kill:** SIGTERM, wait `grace` (default 3 s), SIGKILL if still alive. (claude
   may ignore SIGTERM mid-stream — SIGKILL is the backstop, same as `pane.cpp`'s
   `waitWithTimeoutOrKill`.)
-- **Verify:** after relaunch, within `--timeout-ms`, confirm (a) a NEW
-  `claude --name <agent>` PID exists (different from the killed one), (b) its pane
-  is present (`bus pane-id <agent>` resolves), and ideally (c) a fresh event for
-  the agent appears in `events.jsonl` with `ts` after the relaunch (SessionStart /
-  first hook). `--no-verify` skips (c) for callers that re-check on their own scan.
+- **Verify — EVENT-BASED by default (elodin's call, stronger).** After relaunch,
+  **block until a fresh event for the agent lands in `events.jsonl`** (`ts` after
+  the relaunch — `SessionStart` / first hook), up to `--timeout-ms` (default
+  **10–15 s** for boot headroom). Process-up + pane-present is **not** enough: it
+  can't tell a healthy resume from a **boot-stuck** relaunch (came up, hung on
+  boot) — and a weak verify would falsely report `0` and *mask a loop*. Event-verify
+  catches boot-stuck → returns `10` → the engine re-checks → the breaker eventually
+  opens. That distinction is exactly the signal the breaker needs. `--no-verify`
+  (skip, return as soon as the process is up) and `--timeout-ms` are for tests /
+  callers that re-check on their own scan.
 
 ## 7. Safety (the verb's own, beyond the broker's guard)
 
@@ -159,16 +186,21 @@ and the pane self-heals on *any* claude death. The fleet.kdl change is mine.
 - **attached defer:** presence file present → exit `30`, no kill.
 - **concurrent fire:** two `recover X` → flock serializes, exactly one launch.
 
-## 9. Open items for elodin (align before building)
+## 9. Alignment — ALL RESOLVED with elodin (2026-06-02)
 
-1. **Ledger ownership** (§4) — A (return-only, recommended) vs B (verb-side audit
-   log). Breaker state stays single-writer (engine) either way.
-2. **Exit-code contract** (§3) — does `10` (relaunched-unverified) vs `20`
-   (failed) map cleanly onto his breaker's escalate-vs-retry decision? Tune the
-   codes to what his engine needs.
-3. **Verify depth** — is process+pane enough, or does his engine want `recover` to
-   block until an *event* resumes (stronger, slower)? `--no-verify` / `--timeout`
-   give him the knob.
-4. **Mechanic A's fleet.kdl change** — does the respawn-loop interact with anything
-   broker-side (e.g. the post-relaunch `SessionStart` handling at delivery.cpp:366)?
-   Confirm the auto-relaunch doesn't double-trip his recovery signatures.
+1. **Ledger ownership** (§4) — RESOLVED: verb writes nothing; returns exit+JSON;
+   breaker state single-writer (engine); no verb-side `attempts.jsonl`.
+2. **Exit codes** (§3) — RESOLVED: `0` & `10` both count toward MaxR; `20` opens
+   breaker + escalates; `30` no-count defer. Maps onto his escalate-vs-retry.
+3. **Verify depth** (§6) — RESOLVED: event-based by default (catches boot-stuck →
+   `10`); `--no-verify` / `--timeout-ms` (~10–15 s) for tests.
+4. **Respawn-loop mechanic** (§5) — RESOLVED: double-trip bounded by timescale
+   (his `WEDGE_BUDGET_MS` = minutes ≫ ~2 s respawn); his `SessionEnd` re-delivers
+   cleanly (delivery.cpp:375). The **down-sentinel** (`$STATE/recovery/<agent>.down`)
+   is the breaker↔loop seam (§5.1) — engine writes on breaker-open, loop halts.
+
+**Build split (when elodin's Phase B firms):** bast — the `bus recover` verb (kill +
+relaunch + event-verify + exit/JSON), the fleet.kdl respawn-loop, the
+`agent-launch` pidfile + sentinel-clear-on-start, the itest (§8). elodin — engine
+calls the verb behind its guard, records the ledger from the outcome, writes the
+down-sentinel on breaker-open, resets recovery state on verified `SessionStart`.

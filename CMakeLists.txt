@@ -66,7 +66,9 @@ add_executable(bus
     src/delivery.cpp
     src/dispatch.cpp
     src/rpc.cpp
+    src/task_model.cpp
     src/topic_registry.cpp
+    src/trigger_feed.cpp
     src/sub/sub_agent_bar.cpp
     src/sub/sub_agents.cpp
     src/sub/sub_broker.cpp
@@ -83,7 +85,9 @@ add_executable(bus
     src/sub/sub_produce.cpp
     src/sub/sub_roles.cpp
     src/sub/sub_state.cpp
+    src/sub/sub_tasks.cpp
     src/sub/sub_topic.cpp
+    src/sub/sub_triggers.cpp
     src/sub/sub_verify.cpp
 )
 target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})

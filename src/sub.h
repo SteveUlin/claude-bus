@@ -35,6 +35,8 @@ auto subMonitor(std::span<const char* const>) -> int;
 auto subInbox(std::span<const char* const>) -> int;
 auto subAgentBar(std::span<const char* const>) -> int;
 auto subVerify(std::span<const char* const>) -> int;
+auto subTriggers(std::span<const char* const>) -> int;
+auto subTasks(std::span<const char* const>) -> int;
 
 // Lifecycle (defined in src/sub/sub_lifecycle.cpp).
 auto subSpawn(std::span<const char* const>) -> int;

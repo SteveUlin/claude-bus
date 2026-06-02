@@ -18,6 +18,7 @@
 #include "../signals.h"
 #include "../state_paths.h"
 #include "../sub.h"
+#include "../trigger_feed.h"
 
 #include <chrono>
 #include <csignal>
@@ -301,7 +302,7 @@ auto formatCtx(const CtxStats& s) -> std::string {
   return std::format("{}%/{}", s.pct, formatCtxSize(s.size_tokens));
 }
 
-auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
+auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
   std::print("{}", kCursorHome);
 
   // Title row — compact, no emoji clutter.
@@ -318,10 +319,10 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
 
   std::println("{}", kClearEol);
 
-  // Header — column widths matched 1:1 to the data row below. The
-  // "    " (4-space) slot stands in for the state-glyph (2 chars) +
-  // its trailing space + the space after the agent name.
-  std::println("{}  {:<12}    {:<10} {:>3} {:>7} {:<10} {:>9} {:<10} {}{}{}",
+  // Header — column widths matched 1:1 to the data row below. The first
+  // "  " is the alarm gutter (P3 REC marker + space); the next "  " stands
+  // in for the attach dot + its trailing space.
+  std::println("{}    {:<12}    {:<10} {:>3} {:>7} {:<10} {:>9} {:<10} {}{}{}",
                kBold, "AGENT", "STATE", "✉", "AGE", "MODEL", "CTX", "LANE",
                "TASK", kReset, kClearEol);
 
@@ -340,12 +341,34 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   }
 
   std::size_t rendered = 0;
+  int act_count = 0;
+  int wait_count = 0;
   for (const auto& [name, entry] : state.asObject()) {
     if (!entry.isObject()) continue;
     const auto state_label = entry.getOrString("state");
     if (state_label == "GONE" || state_label == "ENDED") continue;
 
     const auto st = computeStateFromLabel(state_label);
+
+    // P3 trigger feed — same derivation `bus triggers` uses. Refresh the
+    // $STATE/triggers/<agent>.json file every tick so elodin's decoupled
+    // actuator never reads a stale signal (the monitor IS the continuous
+    // writer), and drive the alarm gutter below.
+    const Trig trig = deriveTrig(name, entry, now_ms);
+    writeTrigger(trig, now_ms);
+    const Rec rec = recOf(trig);
+    if (rec == Rec::Act) ++act_count;
+    if (rec == Rec::Wait) ++wait_count;
+    // Alarm gutter — a shape-family marker that pops in peripheral vision
+    // without recoloring the per-cell signals: filled red ▲ = ACT (urgent
+    // + safe boundary, intervene now), hollow yellow △ = WAIT (urgent but
+    // mid-turn, hold), blank = OK.
+    const char* alarm_glyph = rec == Rec::Act    ? "▲"
+                              : rec == Rec::Wait ? "△"
+                                                 : " ";
+    const auto alarm_color = rec == Rec::Act    ? kBrightRed
+                             : rec == Rec::Wait ? kYellow
+                                                : kDim;
     const auto unread = entry.getOrInt("unread");
     const auto age_ms = entry.getOrInt("age_ms", -1);
     const auto age_s = age_ms >= 0 ? age_ms / 1000 : -1;
@@ -381,8 +404,9 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
     const auto mail_cell = formatMail(unread);
 
     std::println(
-        "{}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
+        "{}{}{} {}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
         "{}{:<10}{} {}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
+        alarm_color, alarm_glyph, kReset,
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
         stateGlyph(st),
@@ -398,6 +422,16 @@ auto render(const Snapshot& snap, std::int64_t /*now_ms*/) -> void {
   }
   if (rendered == 0) {
     std::println("{}  (no live agents){}{}", kDim, kReset, kClearEol);
+  }
+  // Alarm legend — only when the gutter has something to explain, so a
+  // calm fleet stays uncluttered.
+  if (act_count + wait_count > 0) {
+    std::println("{}", kClearEol);
+    std::println(
+        "  {}▲ {} ACT{} urgent + safe boundary, intervene now   "
+        "{}△ {} WAIT{} urgent but mid-turn, hold{}",
+        kBrightRed, act_count, kReset, kYellow, wait_count, kReset,
+        kClearEol);
   }
   std::print("{}", kClearBelow);
   std::fflush(stdout);

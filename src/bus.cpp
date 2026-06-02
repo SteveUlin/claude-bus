@@ -35,7 +35,10 @@ const Subcommand kSubcommands[] = {
      "tear down a dynamic peer: prune its registry entry + close its tab"},
     {"state", subState, "broker's view of agent lifecycle"},
     {"task", subTask, "set an agent's monitor TASK column: task set AGENT \"<action>\""},
+    {"tasks", subTasks, "fleet task model: per-task owner/state/done + owner-liveness overlay"},
     {"topic", subTopic, "topic registry: create / list / show / inbox"},
+    {"triggers", subTriggers,
+     "P3 context-mgmt trigger feed: per-agent urgency × safety → ACT/WAIT/OK"},
     {"verify", subVerify, "claimed-done vs artifact-present: flag false done-claims"},
     {"version", subVersion, "print version"},
 };

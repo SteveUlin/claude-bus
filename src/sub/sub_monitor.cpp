@@ -244,13 +244,43 @@ auto scanIntAfter(std::string_view content,
 }
 
 struct CtxStats {
-  int pct{-1};
-  long long size_tokens{-1};
-  std::string model;  // top-level "model" in the status JSON; "" if absent
+  int pct{-1};                // used_percentage against the REAL window
+  long long size_tokens{-1};  // REAL per-model window (the honest denominator)
+  long long tokens{-1};       // total_input_tokens — drives the policy marker
+  std::string model;          // model id ("" if absent)
+  std::string effort;         // live effort level; "" if unavailable (gap)
 };
 
+// Context + effort for an agent. AUTHORITATIVE source is the statusline
+// capture ($STATE/statusline/<agent>.json — real per-model window + live
+// effort, the only place those exist; see settings/hooks-shared/
+// statusline.sh). Falls back to the broker's transcript-derived
+// $STATE/status (knob window, no effort) when the capture is absent — e.g.
+// before the wrapper has rolled out to a pane.
 auto contextStatsFor(std::string_view agent) -> CtxStats {
   CtxStats out;
+
+  // Preferred: the statusline capture (flat JSON we control).
+  {
+    const std::string sl =
+        stateDir() + "/statusline/" + std::string{agent} + ".json";
+    std::ifstream in{sl};
+    if (in) {
+      std::string content((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+      if (const auto v = json::parse(content); v && v->isObject()) {
+        out.tokens = v->getOrInt("total_input_tokens", -1);
+        out.size_tokens = v->getOrInt("context_window_size", -1);
+        const auto p = v->getOrInt("used_percentage", -1);
+        if (p >= 0) out.pct = static_cast<int>(p > 100 ? 100 : p);
+        out.model = v->getOrString("model_id");
+        out.effort = v->getOrString("effort_level");
+        if (out.size_tokens > 0) return out;  // authoritative window
+      }
+    }
+  }
+
+  // Fallback: broker status (knob-denominated window, no effort).
   const std::string path =
       stateDir() + "/status/" + std::string{agent} + ".json";
   std::ifstream in{path};
@@ -296,10 +326,40 @@ auto formatCtxSize(long long tokens) -> std::string {
   return std::format("{}", tokens);
 }
 
-// CTX column — '<pct>%/<size>' or '—'. Compact: '85%/1M', '94%/200K'.
+// CTX column — '<pct>%/<size>' or '—', with pct + size both against the
+// REAL per-model window. Compact: '5%/1M', '94%/200K'.
 auto formatCtx(const CtxStats& s) -> std::string {
   if (s.pct < 0) return "—";
   return std::format("{}%/{}", s.pct, formatCtxSize(s.size_tokens));
+}
+
+// The behavioral compact policy: agents self-compact past ~200k tokens
+// regardless of the real (1M) window. Rendered as the CTX color marker —
+// auri's mandate: 200k is a policy TICK, not the denominator. Keeping it
+// token-based (not %) keeps "past the compact line" salient even when 200k
+// is only ~20% of a 1M window.
+constexpr long long kPolicyTokens = 200'000;
+
+// CTX cell color. Token-count policy marker on the authoritative path;
+// falls back to pct tiers when only a % is known (broker fallback).
+auto ctxColorFor(const CtxStats& s) -> std::string_view {
+  if (s.tokens >= 0) {
+    if (s.tokens >= kPolicyTokens) return kRed;
+    if (s.tokens >= kPolicyTokens * 85 / 100) return kYellow;
+    return kDim;
+  }
+  if (s.pct < 0) return kDim;
+  if (s.pct >= 90) return kRed;
+  if (s.pct >= 75) return kYellow;
+  return kDim;
+}
+
+// EFFORT column — the live reasoning level. '—' when the statusline capture
+// didn't carry .effort.level (pre-rollout pane, or the field genuinely
+// absent — a surfaced gap, never synthesized).
+auto formatEffort(std::string_view effort) -> std::string {
+  if (effort.empty()) return "—";
+  return std::string{effort};
 }
 
 auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
@@ -322,9 +382,10 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
   // Header — column widths matched 1:1 to the data row below. The first
   // "  " is the alarm gutter (P3 REC marker + space); the next "  " stands
   // in for the attach dot + its trailing space.
-  std::println("{}    {:<12}    {:<10} {:>3} {:>7} {:<10} {:>9} {:<10} {}{}{}",
-               kBold, "AGENT", "STATE", "✉", "AGE", "MODEL", "CTX", "LANE",
-               "TASK", kReset, kClearEol);
+  std::println(
+      "{}    {:<12}    {:<10} {:>3} {:>7} {:<10} {:<6} {:>9} {:<10} {}{}{}",
+      kBold, "AGENT", "STATE", "✉", "AGE", "MODEL", "EFFORT", "CTX", "LANE",
+      "TASK", kReset, kClearEol);
 
   if (!snap.broker_alive) {
     std::print("{}", kClearBelow);
@@ -385,13 +446,10 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
     const auto ctx_stats = contextStatsFor(name);
     const auto ctx_cell = formatCtx(ctx_stats);
     const auto model_cell = formatModel(ctx_stats.model);
-    // CTX color tier: ≥90% red, ≥75% yellow, else dim — surfaces
-    // approaching-ceiling context at a glance.
-    const auto ctx_color =
-        ctx_stats.pct < 0          ? kDim
-        : ctx_stats.pct >= 90      ? kRed
-        : ctx_stats.pct >= 75      ? kYellow
-                                   : kDim;
+    const auto effort_cell = formatEffort(ctx_stats.effort);
+    // CTX color marks the 200k compact policy (token-based) on the real
+    // window; falls back to pct tiers when only a % is known.
+    const auto ctx_color = ctxColorFor(ctx_stats);
     (void)last_event;
     (void)last_tool;
     (void)has_draft;
@@ -405,7 +463,7 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
 
     std::println(
         "{}{}{} {}{}{} {}{:<12}{} {} {}{:<10}{} {}{:>3}{} {}{:>7}{} "
-        "{}{:<10}{} {}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
+        "{}{:<10}{} {}{:<6}{} {}{:>9}{} {}{:<10}{} {}{:<56}{}{}",
         alarm_color, alarm_glyph, kReset,
         attach_color, attach_glyph, kReset,
         agentColor(name), name, kReset,
@@ -414,6 +472,7 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
         mail_color, mail_cell, kReset,
         kDim, formatAge(age_s), kReset,
         ctx_stats.model.empty() ? kDim : "", model_cell, kReset,
+        ctx_stats.effort.empty() ? kDim : "", effort_cell, kReset,
         ctx_color, ctx_cell, kReset,
         lane_raw.empty() ? kDim : "", lane, kReset,
         file_title.empty() ? kDim : "", title, kReset,

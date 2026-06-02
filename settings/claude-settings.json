@@ -125,7 +125,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "/home/sulin/.claude/statusline-command.sh"
+    "command": "$CLAUDE_PROJECT_DIR/settings/hooks/statusline.sh"
   },
   "theme": "dark"
 }

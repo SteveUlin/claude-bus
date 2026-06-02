@@ -164,6 +164,16 @@ cd "$workspace_dir"
 main_rev=$(jj --ignore-working-copy -R "$BUS_ROOT" log --no-graph -r main -T 'commit_id' 2>/dev/null)
 if [ -n "$main_rev" ]; then
     mkdir -p "$workspace_dir/.claude"
+    # rm -f FIRST (mirrors the hooks/ rm -rf below) so we always write a FROZEN
+    # per-workspace COPY. Without it, `>` follows a pre-existing LEGACY SYMLINK
+    # (older workspaces still have .claude/settings.json -> the default-tree
+    # canonical) and writes THROUGH it: settings.json stays a LIVE view while
+    # settings/hooks/ is frozen-at-launch — so a live settings repoint (default
+    # tree reconciles to main, gains a new hooks/<x> ref) desyncs from a running
+    # agent's lagging hooks dir and blanks the bar (#15 runtime). The
+    # write-through also clobbered the default-tree canonical every launch.
+    # Freezing both symmetrically = config-via-relaunch, as CLAUDE.md intends.
+    rm -f "$workspace_dir/.claude/settings.json"
     if ! git --git-dir="$BUS_ROOT/.git" show "$main_rev:settings/claude-settings.json" \
             > "$workspace_dir/.claude/settings.json" 2>/dev/null; then
         echo "agent-launch: WARN failed to materialize claude-settings.json from main" >&2

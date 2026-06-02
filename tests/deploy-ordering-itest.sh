@@ -69,6 +69,18 @@ if [ -z "$main_rev" ]; then
   fi
 fi
 
+echo "3. RUNTIME invariant (#15 fix) — agent-launch must rm -f .claude/settings.json"
+echo "   BEFORE materializing it, so it's a FROZEN per-workspace copy (not a write"
+echo "   THROUGH a legacy symlink → a live view that desyncs from frozen hooks/)"
+AL="$ROOT/bin/agent-launch"
+rm_line=$(grep -nE 'rm -f[^#]*\.claude/settings\.json' "$AL" 2>/dev/null | head -1 | cut -d: -f1)
+show_line=$(grep -nE 'show .*:settings/claude-settings\.json' "$AL" 2>/dev/null | head -1 | cut -d: -f1)
+if [ -n "$rm_line" ] && [ -n "$show_line" ] && [ "$rm_line" -lt "$show_line" ]; then
+  ck "ok" "ok" "agent-launch rm -f's .claude/settings.json before the materialize write (line $rm_line < $show_line)"
+else
+  ck "rm=${rm_line:-none},show=${show_line:-none}" "ok" "agent-launch must rm -f .claude/settings.json before materializing it (#15 runtime fix; a revert reintroduces the live-symlink bar-blank)"
+fi
+
 echo
 if [ "$fail" = 0 ]; then
   echo -e "\033[1mDEPLOY-ORDERING OK: settings.json refs ⊆ materialized hooks (no dangling deploy)\033[0m"

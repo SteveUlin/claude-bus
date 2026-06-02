@@ -44,6 +44,11 @@ bin/bus msg send <peer-name> "<message>"
 
 The message lands in the peer's prompt buffer and submits. The peer receives it as a fresh user turn, indistinguishable from a human-typed message.
 
+**Mail by default; send only to unwedge — a firm rule.** Pick the path by urgency, not by habit:
+
+- **`bus msg mail` is the default for everything routine** — status, coordination, hand-offs, questions, anything non-urgent. It goes through the broker: delivered when the peer is ready, with ACK + retry, and it never fights the human's keyboard. If you're not unwedging something, mail it.
+- **`bus msg send` is the emergency lever only** — strictly for urgent recovery that must land *now* with no queue: a stuck/wedged pane, a broker-down situation, an agent that won't otherwise receive. It interrupts, contends with the keyboard, and has **no ACK/retry**. Reach for it only when the queue itself is unavailable or too slow to matter.
+
 - **Discover peers.** `zellij action list-panes` shows every pane and its title. Bus agents have titles set by the launching layout (e.g., `alice`, `bob`). `bus pane-id NAME` resolves a name to its `terminal_N` id; exits non-zero if absent.
 - **No reply channel.** The bus is fire-and-forget. To see how a peer responded, dump their screen: `zellij action dump-screen --pane-id "$(bus pane-id NAME)"`. To get a reply routed back to you, either the human relays it or the peer sends back through the bus.
 - **Sign your messages** when the recipient needs to know who's talking. Convention: lead with `[your-name]`. Example: `bin/bus msg send bob "[alice] need your take on the cache invalidation idea"`.

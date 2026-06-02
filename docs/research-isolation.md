@@ -209,8 +209,13 @@ a uid-1000 `--dangerously-skip-permissions` shell does *not* have (skip-perms is
 app-level, zero kernel caps). So the privileged hop must **enter the netns, then
 drop to uid-1000, then `exec`** — the worker holds the cap at *no* instant. Two
 clean mechanisms (preferring (a), no setuid binary to get wrong):
-  - **(a) `systemd-run --system --pty -p NetworkNamespacePath=/run/netns/claude-worker -p User=sulin …`** — PID 1 enters the netns and drops the user; the scope is also root-owned (non-delegated) for free. polkit-gated to sulin for this one unit.
-  - **(b)** a small root-owned setuid wrapper: `setns(netns_fd)` → `setgid/setuid(1000)` → `execve(claude)`. More moving parts; only if systemd-run proves awkward inside a zellij pane.
+  - **(a) `systemd-run --system --scope -p NetworkNamespacePath=/run/netns/claude-worker -p User=sulin …`** — PID 1 enters the netns and drops the user; the scope is also root-owned (non-delegated) for free. polkit-gated to sulin for this one unit. **Two guards pin the invariant** (auri, 2026-06-01): `NoNewPrivileges=yes` + an explicitly **empty** `AmbientCapabilities=` — the worker then *provably* cannot acquire any capability (incl. `CAP_SYS_ADMIN`) via `execve`, so it can never `setns` out of the cage. systemd grants none by default; pinning makes the unforgeability explicit, not incidental.
+  - **(b)** a small root-owned setuid wrapper: `setns(netns_fd)` → `setgid/setuid(1000)` → `execve(claude)`. More moving parts; only if systemd-run proves awkward inside a zellij pane. **(a) is the choice.**
+
+**Zero DNS in the cage** (auri, 2026-06-01): point `HTTPS_PROXY` at squid's
+**IP:port** (`http://10.200.0.1:3128`), never a hostname. The cage then needs no
+resolver at all — one fewer endpoint reachable inside it, and nothing to
+poison. squid does all name resolution on the worker's behalf.
 
 - **`--profile worker`** (bypass + contained):
   - enter the cage via the privileged hop above (enter-netns → drop-to-1000 → exec);

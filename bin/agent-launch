@@ -431,16 +431,22 @@ claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "
 if [ -e "/run/netns/$netns" ]; then
     # Cage present (NixOS module applied). Enter the netns via PID 1, then DROP
     # to this uid before exec — so a bypass worker holds CAP_SYS_ADMIN at NO
-    # instant (the one place netns would leak; design §6). --scope keeps the
-    # zellij pane's TTY; polkit (the module) makes this passwordless for the
-    # cage-* unit only. --system starts a near-empty env, so forward exactly
-    # what claude + the hooks need. NOTE: exercised only once the module is
-    # live — validate on the first real caged launch.
+    # instant (the one place netns would leak; design §6). NoNewPrivileges=yes +
+    # an explicitly EMPTY AmbientCapabilities pin that: the worker provably
+    # cannot acquire any capability (incl. CAP_SYS_ADMIN) via execve, so it can
+    # never setns out of the cage. The proxy is squid's IP (not a hostname), so
+    # the cage needs ZERO DNS — one fewer endpoint reachable inside it. --scope
+    # keeps the zellij pane's TTY; polkit (the module) makes this passwordless
+    # for the cage-* unit only. --system starts a near-empty env, so forward
+    # exactly what claude + the hooks need. NOTE: exercised only once the module
+    # is live — validate on the first real caged launch.
     exec systemd-run --system --scope --quiet --collect \
         --unit="cage-${name}-$$" \
         -p "NetworkNamespacePath=/run/netns/$netns" \
         -p "User=$(id -un)" \
         -p "WorkingDirectory=$workspace_dir" \
+        -p "NoNewPrivileges=yes" \
+        -p "AmbientCapabilities=" \
         -E "HTTPS_PROXY=$proxy" -E "HTTP_PROXY=$proxy" \
         -E "TERM=${TERM:-xterm-256color}" -E HOME -E PATH -E USER \
         -E CLAUDE_BUS_ROOT -E CLAUDE_BUS_AGENT_ID -E CLAUDE_BUS_AGENT_ROLE \

@@ -423,10 +423,25 @@ fi
 # gated auto-mode scholar) caged to the research allowlist tier — the fleet's
 # only sanctioned web path.
 case "$profile" in
-    worker)   netns="claude-worker";   proxy="http://10.200.0.1:3128"; bypass_flag=(--dangerously-skip-permissions) ;;
-    research) netns="claude-research";  proxy="http://10.200.0.5:3129"; bypass_flag=() ;;
+    worker)
+        netns="claude-worker";   proxy="http://10.200.0.1:3128"
+        bypass_flag=(--dangerously-skip-permissions); perm_flag=() ;;
+    research)
+        netns="claude-research";  proxy="http://10.200.0.5:3129"
+        bypass_flag=()
+        # Non-bypass read-only research envelope (auri's run-mode). The scholar
+        # has internet, so its threat model is web-prompt-injection — it must be
+        # UNABLE to act on fetched content. Auto-approve web + read tools and the
+        # bus CLI (Bash(bus *) — its only mutation, used to report findings back
+        # over the bus); HARD-DENY all repo mutation (Edit/Write/NotebookEdit) so
+        # an injected page can plant nothing. Arbitrary/unlisted tools fall to
+        # default (prompt) = fail-safe, never fail-open. NOT acceptEdits (an
+        # injected page could plant an edit), NOT bypass.
+        perm_flag=(--permission-mode default \
+                   --allowedTools 'Bash(bus *),WebSearch,WebFetch,Read,Grep,Glob' \
+                   --disallowedTools 'Edit,Write,NotebookEdit') ;;
 esac
-claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}")
+claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}" "${perm_flag[@]}")
 
 if [ -e "/run/netns/$netns" ]; then
     # Cage present (NixOS module applied). Enter the netns via PID 1, then DROP

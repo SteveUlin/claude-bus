@@ -16,6 +16,7 @@ const Subcommand kSubcommands[] = {
     {"agents", subAgents, "list registered agents (--kind/--session/--role, NAME, --json)"},
     {"broker", subBroker, "broker daemon: foreground; flock-singleton"},
     {"deck", subDeck, "one-sentence-per-agent activity card (NEEDS YOU + FLEET zones)"},
+    {"done", subDone, "stamp a durable completion claim: done \"<task>\" \"<artifact>\""},
     {"events", subEvents, "tail the bus event log"},
     {"help", subHelp, "list subcommands"},
     {"inflight", subInflight, "broker's in-flight deliveries (debug)"},
@@ -35,6 +36,7 @@ const Subcommand kSubcommands[] = {
     {"state", subState, "broker's view of agent lifecycle"},
     {"task", subTask, "set an agent's monitor TASK column: task set AGENT \"<action>\""},
     {"topic", subTopic, "topic registry: create / list / show / inbox"},
+    {"verify", subVerify, "claimed-done vs artifact-present: flag false done-claims"},
     {"version", subVersion, "print version"},
 };
 

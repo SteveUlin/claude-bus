@@ -84,6 +84,7 @@ add_executable(bus
     src/sub/sub_roles.cpp
     src/sub/sub_state.cpp
     src/sub/sub_topic.cpp
+    src/sub/sub_verify.cpp
 )
 target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})
 target_link_libraries(bus PRIVATE bus_core bus_agent_status)

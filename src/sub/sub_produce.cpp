@@ -1,5 +1,6 @@
 // `bus msg enqueue TOPIC body [...]` — and sugar verbs `bus msg mail`, `bus msg slash`.
 
+#include "../agent_status.h"
 #include "../broker.h"
 #include "../bus.h"
 #include "../json_min.h"
@@ -176,6 +177,55 @@ auto subTask(std::span<const char* const> args) -> int {
     return 1;
   }
   out << action << '\n';
+  return 0;
+}
+
+// `bus done "<task>" "<artifact>"` — stamp a durable, agent-authored
+// completion claim. Appends one JSON line to $STATE/done/<agent>.jsonl:
+//   {"agent","task","claimed_artifact","ts"}
+//
+// This is the WRITE side of the P5 verify path (W1, broker-free): the
+// claim is a durable agent-stamped artifact, NOT orchestrator-tracked
+// chat. `bus verify` (and elodin's broker R6 auto-check) read this same
+// dir to compare claimed-done vs artifact-present and flag false claims
+// — the failure mode that's bitten this fleet (a "landed" commit not on
+// disk, a "built" workspace that's empty). Append-only so the claim
+// history survives a /clear and stays auditable.
+//
+// `claimed_artifact` is the thing a verifier can check exists:
+//   - a jj commit / change id   (verified via `jj log -r <id>`)
+//   - a path                    (verified via filesystem exists)
+//   - `test:<name>`             (manual until a test harness lands)
+auto subDone(std::span<const char* const> args) -> int {
+  if (args.size() < 2) {
+    std::println(stderr,
+                 "usage: bus done \"<task>\" \"<artifact>\"  "
+                 "(artifact = commit id | path | test:<name>)");
+    return 2;
+  }
+  const std::string agent = senderFromEnv();
+  const std::string task{args[0]};
+  const std::string artifact{args[1]};
+
+  std::map<std::string, json::Value> rec;
+  rec.insert({"agent", json::Value::from(agent)});
+  rec.insert({"task", json::Value::from(task)});
+  rec.insert({"claimed_artifact", json::Value::from(artifact)});
+  rec.insert({"ts", json::Value::from(nowMs())});
+  const std::string line =
+      json::serialize(json::Value::fromObject(std::move(rec)));
+
+  const std::string dir = bus::stateRoot() + "/done";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  const std::string path = dir + "/" + agent + ".jsonl";
+  std::ofstream out{path, std::ios::app};
+  if (!out) {
+    std::println(stderr, "bus done: cannot write {}", path);
+    return 1;
+  }
+  out << line << '\n';
+  std::println("done: {} claims \"{}\" → {}", agent, task, artifact);
   return 0;
 }
 

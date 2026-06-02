@@ -34,6 +34,7 @@ auto subRoles(std::span<const char* const>) -> int;
 auto subMonitor(std::span<const char* const>) -> int;
 auto subInbox(std::span<const char* const>) -> int;
 auto subAgentBar(std::span<const char* const>) -> int;
+auto subVerify(std::span<const char* const>) -> int;
 
 // Lifecycle (defined in src/sub/sub_lifecycle.cpp).
 auto subSpawn(std::span<const char* const>) -> int;
@@ -50,6 +51,7 @@ auto subTopic(std::span<const char* const>) -> int;
 auto subEnqueue(std::span<const char* const>) -> int;
 auto subMail(std::span<const char* const>) -> int;
 auto subTask(std::span<const char* const>) -> int;
+auto subDone(std::span<const char* const>) -> int;
 auto subMsg(std::span<const char* const>) -> int;
 auto subSlash(std::span<const char* const>) -> int;
 auto subBroadcast(std::span<const char* const>) -> int;

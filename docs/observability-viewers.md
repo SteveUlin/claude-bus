@@ -1,7 +1,8 @@
 # Observability viewers — design + state (kvothe lane)
 
 Author: kvothe · 2026-06-02 · For: auri's max-parallelism observability dispatch
-Status: MODEL column landed; token-rate + verify-viewer contracts defined, builds pending.
+Status: MODEL column committed; P5 verify-viewer (`bus done` + `bus verify`)
+BUILT + committed (95d22533); token-rate column pending elodin's emit on main.
 
 This doc is the **durable anchor** for the observability viewer work so it
 survives a `/clear` (the #10 lesson: chat-only design evaporates — bast lost
@@ -74,33 +75,49 @@ the claim must be a structured durable artifact, never chat free-text.
 {"agent":"<name>","task":"<what>","claimed_artifact":"<commit|path|test>","ts":<ms>}
 ```
 
-**WRITE mechanism — decide WITH elodin (the auto-check is broker-side):**
-- **W1 — thin `bus done` CLI** → writes `$STATE/done/<agent>.json` (or appends).
-  Simple, viewer reads it directly. No broker change.
-- **W2 — route the claim through the broker as a topic** (e.g. `completions`) so
-  the broker auto-checks artifact-exists + escalates a mismatch — folds into
-  elodin's P2 **R6**. Richer (auto-verify + escalate) but broker-side.
-- I own the record schema + the viewer either way.
+**WRITE mechanism — SETTLED with elodin: W1.** `bus done "<task>"
+"<artifact>"` appends an agent-stamped line to `$STATE/done/<agent>.jsonl`.
+Broker-free write (I own it); elodin's P2 **R6** auto-check hooks the same
+dir as a pure READER — additive, zero producer coupling. W2 (claim-as-
+broker-topic) was rejected: it would make the broker the *producer* of the
+claim, the exact coupling that lets the signal inherit the orchestrator's
+failure modes. (Forward note from elodin: R6's on-disk verify wants
+`claimed_artifact` to be a stat-able path; my viewer already dual-probes
+path-OR-commit, so no schema change — add an optional `artifact_path` field
+only if R6 later needs it.)
 
-**Viewer (I build):** a column/card — claimed-done vs artifact-present.
-`artifact-present` = read `jj log` in `.workspaces/<agent>` (does
-`claimed_artifact` exist as a commit / file / passing test?). **Flag
-claimed-but-absent** — that's the false-claim alarm.
+**Both surfaces BUILT + committed (95d22533):**
+- `bus done` → `src/sub/sub_produce.cpp` (`subDone`). Schema
+  `{agent,task,claimed_artifact,ts}`, append-only JSONL.
+- `bus verify` → `src/sub/sub_verify.cpp`. Reads `$STATE/done/*.jsonl`;
+  per claim, artifact-present = filesystem path exists OR
+  `jj log -r <artifact>` resolves in the agent's workspace
+  (`--ignore-working-copy`, never snapshots a peer tree). **Flags
+  claimed-but-absent** = the false-claim alarm; exit 1 on any miss.
+  One-shot (the jj/fs probes are too expensive for a 1-Hz loop, and
+  one-shot can't silently die mid-frame — [[long-running-viewers-die]]).
+  Tested: real commit ✓, real path ✓, bogus ref ✗ MISSING, `test:` ? manual.
 
-Once schema + write land, auri rolls out "agents run `bus done` on completion"
-fleet-wide.
+Remaining: auri rolls out "agents run `bus done` on completion" fleet-wide
+(role-prompt line or Stop-hook — held off self-stamping so the writer isn't
+lone). Cosmetic polish deferred: the multibyte status glyphs (✓/✗/?) make
+`{:<11}` pad by bytes not display width, so the STATUS column drifts ~2 cols.
 
 ## Open handoffs / next actions (resume here post-/clear)
 
 1. **elodin** — emit `"model"` + `"context_tokens"` into `$STATE/status` from
-   `maybeScanTokens` (two 1-liners). Lights up MODEL + feeds P2's token-rate.
-2. **elodin + me** — pick the claimed-done write mechanism (W1 `bus done` →
-   `$STATE/done` vs W2 broker `completions` topic + auto-check). Auto-check is
-   broker-side, so elodin co-decides.
-3. **me (build)** — the P5 verify-viewer against the chosen mechanism (claimed
-   vs `jj log` artifact, flag absent). Optionally the token-rate monitor column.
-4. **me (land)** — push MODEL column `3450a2a5` when comms opens a window.
-5. **auri** — roll out `bus done` usage once it lands.
+   `maybeScanTokens`. DONE on elodin's side (built+verified `context_tokens`
+   + `model`); lands on main right after P2 Phase A. MODEL column lights up
+   the moment it's on main + the broker's rebuilt.
+2. ~~W1 vs W2~~ — SETTLED: W1. (done)
+3. ~~P5 verify-viewer build~~ — DONE (95d22533: `bus done` + `bus verify`).
+4. **me** — token-rate column: once elodin's `context_tokens` emit is on
+   main, compute Δtokens/Δt across monitor ticks and write it back to
+   `$STATE/status/<agent>.json` as `"token_rate_per_min"` (synced format to
+   elodin — he consumes it as the 2nd corroborating signal for P2 R3/R4).
+5. **me (land)** — land the MODEL column + verify-viewer stack to main when
+   comms opens a window (stack: MODEL → doc → verify-viewer, on main now).
+6. **auri** — roll out `bus done` usage fleet-wide (role-prompt or Stop-hook).
 
 ## Pointers
 - Monitor render + `$STATE/status` read: `src/sub/sub_monitor.cpp`

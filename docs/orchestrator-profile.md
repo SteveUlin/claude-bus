@@ -11,7 +11,10 @@ profiles + netns cage this extends), the config-materialize model in `CLAUDE.md`
 web content (`WebSearch`/`WebFetch`) must run **gate-up** (`--permission-mode
 default`, auto), never `--dangerously-skip-permissions` — so injected web content
 can never silently trigger an action. The human-answered prompt *is* the safety
-mechanism for the dangerous post-web step (a write).
+mechanism for the dangerous post-web step (a write). This is not merely policy:
+under bypass, fan-out subagents **inherit** the permissive mode and can't be
+restricted (§3.1), so bypass *structurally* defeats the read-only-subagent design —
+**non-bypass is required by the mechanism**, the strongest argument for the profile.
 
 This profile is the web-capable **orchestrator**: auto mode, web + write tools,
 where **writes prompt the in-pane human**. It fans out read-only headless
@@ -40,26 +43,38 @@ layer. They are configured in different places and — critically — can differ
 > from the subagents' set (read-only allowlist, no prompt)? Or is it only one
 > session-wide `--allowedTools`/`--permission-mode`?
 
-**Answer: YES, separable — it is NOT session-wide-only.** (Authoritative, via
-claude-code-guide; load-bearing claims gated empirically in §7.)
+**Answer: YES, separable — BUT ONLY IF THE ORCHESTRATOR IS NON-BYPASS.**
+(Authoritative via claude-code-guide, routed by auri — the sanctioned channel, no
+web from this bypass peer; code.claude.com sub-agents + permission-modes.)
 
-- A subagent definition's `tools:` frontmatter is an **independent allowlist**,
-  *not* inherited from the parent session's `--permission-mode`. Official docs:
-  each subagent "runs in its own context window with … specific tool access, and
-  **independent permissions**."
-- Enforcement is **by unavailability**: if `Edit`/`Write` are omitted from a
-  subagent's `tools:`, the tool is not in its context at all — it can never even
-  *attempt* a write, so it never reaches a permission prompt. No hang, no write.
-- Therefore writes stay at the **answerable in-pane orchestrator**; headless
-  subagents are read-only **by config**.
+- Read-only subagents exist two ways: built-in `agentType: 'Explore'` (denies
+  Edit/Write, allows Read/Grep/Glob/WebSearch/WebFetch), OR a **custom** type in
+  `.claude/agents/*.md` with `tools:`/`disallowedTools:`. **Enforced by the
+  TOOLSET** — the tool is simply absent, so a read-only subagent never even
+  *attempts* a write, never prompts.
+- **The headless-hang fear is UNFOUNDED (correcting my earlier draft):** background
+  subagents **AUTO-DENY any permission prompt and CONTINUE** — fail-closed and
+  graceful, they do **not** hang. (My prior "hangs loud-and-stuck" claim came from
+  stale GH issues I should not have fetched; the authoritative answer supersedes it.)
 
-**The one thing that is session-wide:** `settings.json` `permissions.allow`/`deny`
-apply to the whole session uniformly — there is **no per-agent block** in
-settings.json. Consequence: we **cannot** put `deny: Edit` in shared
-`settings.json` to make subagents read-only, because that would also block the
-*orchestrator's* gated writes (and break the rest of the fleet — one ruleset per
-session). Per-subagent restriction must come from the **subagent layer**, not the
-session layer — see §5, where a built-in agentType supplies it with no config at all.
+### 3.1 THE CRITICAL GOTCHA — bypass-orchestrator is FORBIDDEN BY THE MECHANISM
+
+**If the orchestrator launches with `--dangerously-skip-permissions` (bypass) or
+`acceptEdits`, its SUBAGENTS INHERIT that permissive mode and CANNOT be
+restricted** — the parent mode **overrides** the subagent's `permissionMode` /
+`tools`-deny. So a bypass orchestrator ⇒ ungated, write-capable subagents ⇒ the
+**exact hole** the security model closes (web-injected content acting silently
+through a write-capable headless subagent).
+
+Therefore the orchestrator **MUST** run `--permission-mode default` for the
+read-only-subagent restriction to hold at all. This is the strongest argument for
+the whole profile: **web-capable ⇒ non-bypass is not policy preference, it is a
+mechanism requirement** — bypass *structurally defeats* subagent restriction.
+
+**Also session-wide:** `settings.json` `permissions.allow`/`deny` apply uniformly —
+no per-agent block — so we can't `deny: Edit` there without blocking the
+orchestrator's own gated writes. Per-subagent restriction comes from the subagent
+layer (§5), and only holds under a non-bypass orchestrator (§3.1).
 
 ## 4. Orchestrator profile spec (`agent-launch --profile orchestrator`)
 
@@ -92,110 +107,119 @@ Semantics this relies on (gated in §7): under `--permission-mode default`,
 profile uses both lists together, which already implies this three-way split:
 allow = auto, disallow = hard-block, unlisted = prompt.)
 
-## 5. Subagent envelope — built-in `Explore` agentType (primary)
+## 5. Subagent envelope — a custom read-only type (auri's recommended profile)
 
-**v1 mechanism: Workflow `agent(..., {agentType: 'Explore'})`.** The built-in
-`Explore` type is bounded to a read-only + web tool set **BY TYPE** — no
-allowlist, no custom definition, no materialize. Confirmed from the local
-Agent/Workflow tool spec (no web lookup): `Explore` = "All tools except `Agent`,
-`ExitPlanMode`, `Edit`, `Write`, `NotebookEdit`." So it HAS `Read`/`Grep`/`Glob`/
-`Bash`/`WebSearch`/`WebFetch` and CANNOT `Edit`/`Write` — exactly the subagent
-envelope (read-only + web), and a headless write is structurally impossible (the
-tool is absent by type). It also excludes `Agent`, closing one nesting vector
-(§6).
+Two valid mechanisms, both enforced by the TOOLSET (§3) and both holding **only
+under a non-bypass orchestrator** (§3.1):
 
-**Why this beats a custom `.claude/agents/*.md` definition for v1:**
-- **No new structural surface.** `Explore` ships with the harness — the orchestrator
-  just passes `agentType: 'Explore'` in its `agent()` calls. **The
-  `settings/agents-shared/` → `.claude/agents/` materialize is NOT needed for v1.**
-  (That was my earlier "REQUIRED" constraint; `Explore` dissolves it.)
-- **Enforced by type, not by a frontmatter list** that could be misedited.
+**(A) Custom read-only type — `settings/agents-shared/ro-worker.md` (RECOMMENDED).**
+auri's specified profile. Explicit, stable toolset:
 
-**OPEN NUANCE — parked on the sanctioned claude-code-guide answer (auri owns; do
-NOT web-search it):** in an **auto/`--permission-mode default`** session, does a
-HEADLESS `Explore` subagent's `WebSearch`/`WebFetch` call get auto-approved, or
-does it PROMPT — and therefore hang (headless can't answer)? `Edit`/`Write` hang
-is already moot (absent by type), but if web tools PROMPT under default mode, a
-headless `Explore` wedges on its first search. The design branches on this:
-- **If web auto-approves under default mode** → `Explore` works as-is, zero config.
-- **If web prompts** → either pre-approve `WebSearch`/`WebFetch` for the
-  orchestrator's subagent scope (if that's expressible) or accept that web-reading
-  subagents need a non-prompting path. Decide once guide answers.
+```yaml
+---
+name: ro-worker
+description: Headless read-only research/coordination worker. No file writes.
+tools: Read, Grep, Glob, WebSearch, WebFetch
+disallowedTools: Edit, Write, NotebookEdit
+---
+You read, search, fetch, and report findings to the orchestrator,
+which holds the (gated) write. You cannot edit or write files.
+```
 
-**Fallback (only if `Explore` is unusable):** a custom `settings/agents-shared/
-ro-worker.md` (`tools: Read, Grep, Glob, Bash, WebSearch, WebFetch`, no Edit/Write)
-materialized to `.claude/agents/` via the frozen-copy pattern (`rm -rf` + fresh
-copy from landed `main`, like `settings/hooks/`). Same read-only-by-unavailability
-property, but reintroduces the materialize surface — so it's plan B.
+Materialized per-launch to the workspace's `.claude/agents/ro-worker.md` via the
+**frozen-copy pattern** (`rm -rf` then fresh copy from landed `main`, exactly like
+`settings/hooks/` — the #15 frozen-copy invariant). This is the new structural
+surface in bast's lane. The orchestrator invokes it via Workflow `agent(...,
+{agentType: 'ro-worker'})`. Chosen over Explore because the toolset is **explicit
+and version-stable** (Explore's set is harness-defined and could drift), and it
+omits `Bash` entirely — no Bash-scoping question at all.
 
-**Bash note (both paths):** `Explore` has `Bash`, but the **session**
-`permissions.allow` still scopes *which* Bash auto-approves (e.g. `Bash(bus *)`)
-vs prompts — and a headless subagent that prompts hangs. So the orchestrator's
-session must pre-approve any Bash the subagents need (the safe `Bash(bus *)` set);
-anything outside it is the same parked web-prompt question.
+**(B) Built-in `agentType: 'Explore'` — zero-config alternative.** Bounded by type
+to "all tools except `Agent`, `ExitPlanMode`, `Edit`, `Write`, `NotebookEdit`"
+(from the local Agent/Workflow spec) → read-only + web, no write, no `Agent`
+nesting, **no materialize surface**. The lighter option if we'd rather not add the
+`agents-shared` dir. Difference from (A): Explore also carries `Bash`/`Workflow`
+(see the Bash + nesting notes in §6). **Decision (A vs B) is auri's at review.**
 
-## 6. Failure-mode backstop, and the nesting vector
+**Web tools must be PRE-APPROVED, or research silently fails (the auto-deny
+consequence).** Since background subagents **auto-deny** any prompt (§3), if
+`WebSearch`/`WebFetch` would *prompt* under the orchestrator's default mode, a
+subagent's web call is silently denied — it won't hang, but it won't fetch either.
+So the orchestrator session must **pre-approve** `WebSearch`/`WebFetch` (in its
+`--allowedTools` / `permissions.allow`); subagents inherit that auto-approval and
+can actually research. Same logic for any `Bash` a subagent needs (path B):
+pre-approve the safe `Bash(bus *)` set or it auto-denies. Verifying the
+auto-approve actually fires is a §7 check the (non-bypass) orchestrator runs — not
+this bypass peer.
 
-**Backstop (defense in depth):** with `Explore`, `Edit`/`Write` are absent **by
-type**, so a headless write is structurally impossible — no prompt, no hang, no
-write. Even in the plan-B custom path, if `Edit` were misconfigured into a
-subagent's `tools:`, a headless write attempt under a gated mode **HANGS waiting
-for TTY input** rather than writing silently (a known headless behavior). So the
-failure direction is always *loud-and-stuck*, never *silent-and-written* — the
-safe one.
+## 6. Failure mode, Bash, and the nesting vector
 
-**Nesting vector (narrowed, not gone):** `Explore` **excludes `Agent`** by type,
-so it cannot spawn a Task subagent — that nesting vector is closed structurally.
-It does **not** exclude `Workflow`, so whether an `Explore` subagent could call
-`Workflow` (and what permission set THAT child gets — parent-Explore's bounds, or
-a reset to the orchestrator's write-capable mode) is the **one remaining nesting
-question**. Whether nested `Workflow` even works from inside a subagent is itself
-unconfirmed. **v1 mitigation:** treat `Explore` subagents as LEAVES — the
-orchestrator is the sole fan-out point; don't rely on subagent-initiated
-`Workflow`. Revisit only if nested fan-out is needed, after the guide answer.
+**Failure mode (corrected — fail-closed, graceful):** with a read-only subagent,
+`Edit`/`Write` are absent, so a write is never attempted. And if anything *would*
+prompt (a write somehow reachable, or an un-pre-approved web/Bash call), the
+background subagent **AUTO-DENIES and CONTINUES** — it does **not** hang. So the
+failure direction is *silently-denied*, never *silent-write* and never *wedged*.
+The earlier "hangs loud-and-stuck" framing is retracted (§3). The flip side is the
+§5 auto-deny consequence: a needed tool that isn't pre-approved gets silently
+skipped — so pre-approve the subagents' real needs (web, `Bash(bus *)`).
+
+**Bash:** path A (`ro-worker`) omits `Bash` entirely — no scoping question. Path B
+(`Explore`) carries `Bash`; the session `permissions.allow` scopes which Bash
+auto-approves (`Bash(bus *)`), and anything else just auto-denies (harmless).
+
+**Nesting vector:** path A omits `Agent`/`Workflow` → no nesting at all. Path B
+(`Explore`) excludes `Agent` but carries `Workflow`, so "could an Explore subagent
+call `Workflow`, and what perms would that child get" is an open question — but note
+§3.1: a non-bypass orchestrator means even an inherited mode is the *default* (gated)
+one, not bypass, so a nested child still couldn't silently write. **v1 mitigation
+(both paths):** treat subagents as LEAVES; the orchestrator is the sole fan-out
+point. Path A enforces this structurally.
 
 ## 7. Pre-land empirical GATE (SEC-1-style: verify, don't trust the docs)
 
-Load-bearing claims get a tiny local check before land (SEC-1 GATE precedent).
-**None of these require web access** — they're local session/subagent behavior.
-The Explore-in-auto-mode web-prompt question is NOT in this gate: it's parked on
-auri's sanctioned claude-code-guide answer (bypass peers must not web-probe it).
+The mechanism is now authoritative (guide), so the gate just confirms it fires as
+documented before land (SEC-1 precedent). Checks 1–2 are **local, web-free** — a
+bypass peer can run them. Check 3 needs web/auto behavior and is therefore the
+**non-bypass orchestrator's** to run (NOT this bypass peer).
 
-1. **Gated-write semantics.** Launch a throwaway session with
-   `--permission-mode default --allowedTools 'Read,Grep,Glob'` and confirm an
-   `Edit` attempt **prompts** (does not silently apply, does not hard-deny) —
-   i.e. unlisted ⇒ prompt. If `--allowedTools` is actually a hard allowlist
-   (only-these), the orchestrator needs Edit/Write *in* `--allowedTools` and we
+1. **Gated-write semantics (local).** Session with `--permission-mode default
+   --allowedTools 'Read,Grep,Glob'`: confirm an `Edit` attempt **prompts** (not a
+   silent apply, not a hard-deny) — i.e. unlisted ⇒ prompt. If `--allowedTools` is
+   actually a hard allowlist, the orchestrator needs Edit/Write *in* it and we
    re-derive how to keep them gated. **Decides §4's flag shape.**
-2. **`Explore` is read-only by type.** Invoke Workflow `agent(..., {agentType:
-   'Explore'})` and confirm it has no `Edit`/`Write` available (a write attempt
-   reports the tool absent, never a silent apply). **Confirms §5's primary path.**
-3. **Web behavior under auto mode (PARKED — guide, not gate):** does a headless
-   `Explore` `WebSearch`/`WebFetch` auto-approve or prompt-and-hang under
-   `--permission-mode default`? Answered by auri's guide channel, then folded into
-   §5. A bypass peer must NOT run this empirically (it's the web-under-bypass hole).
+2. **Read-only subagent is write-incapable (local).** Invoke the chosen subagent
+   type (`ro-worker` or `Explore`) and confirm `Edit`/`Write` are absent — a write
+   reports the tool unavailable, never a silent apply. **Confirms §5.**
+3. **Web auto-approval propagates (orchestrator-run, not bypass).** With
+   `WebSearch`/`WebFetch` pre-approved on the orchestrator session, confirm a
+   background subagent's web call **auto-approves** (not auto-denied) so research
+   actually works — and, separately, that a NON-pre-approved write attempt
+   **auto-denies and continues** (no hang). Run by the auto-mode orchestrator once
+   it exists; a bypass peer must not (web-under-bypass).
 
 ## 8. v1 scope
 
-**In:** the `orchestrator` profile case in `agent-launch` (§4 flags); subagents via
-built-in `agentType: 'Explore'` (§5 — NO new dir, NO materialize); the §7 local
-gate; doc. Build starts after auri's spec review + the parked guide answer (§5).
+**In:** the `orchestrator` profile case in `agent-launch` (§4 flags, **non-bypass —
+forbidden-by-mechanism per §3.1**); the read-only subagent type (§5 — path A
+`ro-worker` + its `settings/agents-shared/` → `.claude/agents/` frozen-copy
+materialize is the recommended build; path B `Explore` if auri prefers zero
+materialize); pre-approve `WebSearch`/`WebFetch` (+ `Bash(bus *)` for path B) on
+the orchestrator session so subagent web research doesn't auto-deny; the §7 gate;
+doc. Build starts after auri's spec review.
 
 **Explicitly OUT / deferred:**
-- **`settings/agents-shared/` materialize** — NOT needed for v1; `Explore` supplies
-  the read-only+web envelope by type. Only build it if the guide answer rules
-  `Explore` unusable (the §5 plan-B fallback).
 - **Worktree isolation NOT needed.** Only the single in-pane orchestrator writes,
   in its own jj workspace — read-only subagents never write, so the parallel-write
   jj-workspace-vs-git-worktree unknown does not arise for v1.
-- **SEC-1 nixos module NOT a dependency** — auto-gate is primary; the netns cage is
-  optional defense-in-depth.
-- **Nested subagent fan-out** — `Explore` excludes `Agent`; the `Workflow`-nesting
-  question (§6) stays deferred; leaf-only for now.
+- **SEC-1 nixos module NOT a dependency** — the auto-gate (non-bypass orchestrator)
+  is the primary defense; the netns cage is optional defense-in-depth.
+- **Nested subagent fan-out** — leaf-only v1 (§6); path A omits Agent/Workflow
+  entirely, path B's `Workflow`-nesting stays deferred.
 
 ## 9. Rollout
 
-Config-via-relaunch, as always: land the `agent-launch` `orchestrator` case (+
-`settings/claude-settings.json` only if a safe-allow set moves there) to `main`;
-relaunch picks it up by construction. The v1 subagent path (`Explore`) ships with
-the harness, so there's nothing to materialize. No live working-copy edits.
+Config-via-relaunch, as always: land the `agent-launch` `orchestrator` case +
+(path A) `settings/agents-shared/ro-worker.md` + its materialize step to `main`;
+relaunch picks it up by construction (the `.claude/agents/` copy frozen at launch,
+like `settings/hooks/`). Path B (`Explore`) ships with the harness — nothing to
+materialize. Either way, no live working-copy edits.

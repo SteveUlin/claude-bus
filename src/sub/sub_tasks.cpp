@@ -25,8 +25,10 @@
 #include "../sub.h"
 #include "../task_model.h"
 
+#include <format>
 #include <map>
 #include <print>
+#include <random>
 #include <set>
 #include <span>
 #include <string>
@@ -143,6 +145,32 @@ auto enqueueTaskRecord(const std::string& body) -> int {
   return 0;
 }
 
+// `bus tasks mint-id --owner NAME` — print a fresh task id in the broker's
+// msg-id format `<ms:013>-<owner>-<rand:04x>` (sortable + consistent, auri's
+// ruling). The dispatcher mints once, then threads it through `bus tasks
+// open --id` and the recipient's `bus done --id`.
+auto tasksMintId(std::span<const char* const> args) -> int {
+  std::string owner;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view a{args[i]};
+    if (a == "--owner") {
+      if (++i >= args.size()) return 2;
+      owner = args[i];
+    } else {
+      std::println(stderr, "bus tasks mint-id: unknown flag \"{}\"", a);
+      return 2;
+    }
+  }
+  if (owner.empty()) {
+    std::println(stderr, "usage: bus tasks mint-id --owner NAME");
+    return 2;
+  }
+  thread_local std::mt19937 rng{std::random_device{}()};
+  std::uniform_int_distribution<unsigned> dist{0, 0xFFFF};
+  std::println("{:013}-{}-{:04x}", nowMs(), owner, dist(rng));
+  return 0;
+}
+
 // `bus tasks open --id ID --owner NAME --title "..." [--deps a,b]`
 auto tasksOpen(std::span<const char* const> args) -> int {
   std::string id, owner, title, deps_csv;
@@ -254,6 +282,7 @@ auto tasksView(std::span<const char* const> args) -> int {
 auto subTasks(std::span<const char* const> args) -> int {
   if (!args.empty()) {
     const std::string_view verb{args[0]};
+    if (verb == "mint-id") return tasksMintId(args.subspan(1));
     if (verb == "open") return tasksOpen(args.subspan(1));
     if (verb == "close") return tasksClose(args.subspan(1));
   }

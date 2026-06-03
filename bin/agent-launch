@@ -186,18 +186,6 @@ if [ -n "$main_rev" ]; then
     else
         echo "agent-launch: WARN failed to materialize settings/hooks from main" >&2
     fi
-    # Subagent definitions (.claude/agents/) — same #15-hardened frozen-copy as
-    # hooks: rm -rf + fresh export from main, so the orchestrator's read-only
-    # ro-worker type (docs/orchestrator-profile.md) is frozen-at-launch, never a
-    # live view. strip-components=2 drops `settings/agents-shared/` → bare *.md
-    # into .claude/agents/. Harmless for non-orchestrator agents (a defined type
-    # only matters if invoked). Absent at main pre-land ⇒ graceful WARN.
-    rm -rf "$workspace_dir/.claude/agents"
-    mkdir -p "$workspace_dir/.claude/agents"
-    if ! git --git-dir="$BUS_ROOT/.git" archive "$main_rev" settings/agents-shared 2>/dev/null \
-            | tar -x --strip-components=2 -C "$workspace_dir/.claude/agents" 2>/dev/null; then
-        echo "agent-launch: WARN failed to materialize .claude/agents from main" >&2
-    fi
 else
     echo "agent-launch: WARN could not resolve claude-bus main; config not refreshed" >&2
 fi

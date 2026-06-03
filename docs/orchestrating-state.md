@@ -124,6 +124,25 @@ Ties the #16 observability blind-spot (monitor blind to Workflow subagents,
 ## Status / next
 
 1. ~~ground the design in the axes model + defer gate~~ — DONE (this doc).
-2. Surface to auri/sulin: detection signal (recommend C) + TTL + glyph.
-3. On ratification: implement the axis + signal + render (my lane); hand the
-   gate flip to elodin. Pair on the `wakeReadyForMail` contract.
+2. ~~surface to auri/sulin: detection signal + TTL + glyph~~ — RATIFIED
+   (auri): C (hybrid auto-decay), 90 s lease, glyph my pick.
+3. ~~implement the axis + signal + render (my lane)~~ — BUILT + LANDED
+   (main 8d94c32d). `TurnAxis::Orchestrating` + `State::Orchestrating`;
+   detection = `last_orchestration_ms` folded from `Workflow` PreToolUse,
+   TTL-decayed at 90 s in `computeAxes` (overrides ONLY mid-turn Working,
+   never Ready/Stuck/NeedsInput); render = 🪐 bright-green across monitor /
+   agent-bar / deck / `bus state`; trigger-feed treats it `boundary=none`
+   (context-mgmt-unsafe, like Working — net-zero since it was Working
+   before). 7 unit tests (fold stamp/decay/reset; computeAxes lease /
+   decay / ready-not-overridden / stuck-outranks). **Behavior-neutral:**
+   `wakeReadyForMail` untouched, so delivery is unchanged — only the label
+   becomes truthful.
+4. **ELODIN (the activating change):** flip the defer gate —
+   `wakeReadyForMail` (agent_status.cpp) returns true for
+   `TurnAxis::Orchestrating` as it does for `Ready`. That converts the
+   workflow Working-windows from deferred to deliverable (the payoff).
+   Until then the state renders honestly but defers like Working — no
+   regression either way. Pair on the predicate when he's ready.
+5. **v2 (later):** explicit sentinel for event-invisible postures (`/loop`,
+   background Bash/Task) — needs tool-input capture or a self-declared lease
+   file; the auto-decay TTL contract already supports it.

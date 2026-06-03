@@ -73,7 +73,6 @@ add_executable(bus
     src/sub/sub_agents.cpp
     src/sub/sub_broker.cpp
     src/sub/sub_consume.cpp
-    src/sub/sub_deck.cpp
     src/sub/sub_events.cpp
     src/sub/sub_inbox.cpp
     src/sub/sub_lifecycle.cpp

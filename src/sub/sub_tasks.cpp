@@ -22,9 +22,12 @@
 #include "../broker.h"
 #include "../json_min.h"
 #include "../rpc.h"
+#include "../signals.h"
 #include "../sub.h"
 #include "../task_model.h"
 
+#include <chrono>
+#include <csignal>
 #include <format>
 #include <map>
 #include <print>
@@ -33,6 +36,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace bus {
@@ -40,6 +44,9 @@ namespace bus {
 namespace {
 
 using namespace bus::ansi;
+
+volatile std::sig_atomic_t gStopTasks = 0;
+auto onSignalTasks(int) -> void { gStopTasks = 1; }
 
 auto senderFromEnv() -> std::string {
   if (const char* env = std::getenv("CLAUDE_BUS_AGENT_ID")) return env;
@@ -249,31 +256,63 @@ auto tasksClose(std::span<const char* const> args) -> int {
   return rc;
 }
 
-auto tasksView(std::span<const char* const> args) -> int {
-  std::set<std::string> only;
-  for (const char* a : args) only.insert(a);
-
+// Emit the task table. `live` = continuous-refresh framing: each line gets
+// a clear-to-EOL suffix and the block is positioned by the caller (cursor
+// home + clear-below) so a redraw never leaves stale trailing glyphs. The
+// one-shot path passes live=false for plain stdout.
+auto emitTable(const std::set<std::string>& only, bool live) -> void {
+  const auto eol = live ? kClearEol : std::string_view{""};
   const auto tasks = readTasks(only);
   if (tasks.empty()) {
     std::println("no tasks yet — dispatch mints them with "
-                 "`bus tasks open`, agents close with `bus done`");
-    return 0;
+                 "`bus tasks open`, agents close with `bus done`{}", eol);
+    return;
   }
-
   const std::int64_t now = nowMs();
-  std::println("{}{:<10} {:<10} {:<34} {:<10} {:<7} {}{}", kBold, "OWNER",
-               "STATE", "TITLE", "DEPS", "DONE", "LIVE", kReset);
+  std::println("{}{:<10} {:<10} {:<34} {:<10} {:<7} {}{}{}", kBold, "OWNER",
+               "STATE", "TITLE", "DEPS", "DONE", "LIVE", kReset, eol);
   for (const auto& t : tasks) {
     const std::string age =
         t.done_claim.ts >= 0 ? fmtAge(now - t.done_claim.ts) : "—";
-    std::println("{:<10} {}{:<10}{} {:<34} {:<10} {:<7} {}", t.owner,
+    std::println("{:<10} {}{:<10}{} {:<34} {:<10} {:<7} {}{}", t.owner,
                  stateColor(t.state), t.state, kReset, truncate(t.title, 34),
-                 truncate(depsCell(t.deps), 10), age, liveCell(t.owner_live));
+                 truncate(depsCell(t.deps), 10), age, liveCell(t.owner_live),
+                 eol);
   }
-  std::println("");
+  std::println("{}", eol);
   std::println("{}{} task(s) — open/in_flight from the `tasks` spine, done "
-               "from $STATE/done, liveness from triggers{}",
-               kDim, tasks.size(), kReset);
+               "from $STATE/done, liveness from triggers{}{}",
+               kDim, tasks.size(), kReset, eol);
+}
+
+auto tasksView(std::span<const char* const> args) -> int {
+  std::set<std::string> only;
+  for (const char* a : args) only.insert(a);
+  emitTable(only, /*live=*/false);
+  return 0;
+}
+
+// `bus tasks watch [OWNER...]` — continuous full-screen refresh, the live
+// fleet-activity surface (the pane that replaced bus-deck). Mirrors the
+// monitor viewer idiom: alt-screen + EINTR-able signal handling +
+// fetch/render/sleep. The one-shot `bus tasks` stays for scripting and the
+// dispatch-side B-adoption flow.
+auto tasksWatch(std::span<const char* const> args) -> int {
+  std::set<std::string> only;
+  for (const char* a : args) only.insert(a);
+  installInterruptHandlers(onSignalTasks);
+
+  std::print("{}{}", kAltOn, kCursorHide);
+  std::fflush(stdout);
+  while (gStopTasks == 0) {
+    std::print("{}", kCursorHome);
+    emitTable(only, /*live=*/true);
+    std::print("{}", kClearBelow);
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+  std::print("{}{}", kCursorShow, kAltOff);
+  std::fflush(stdout);
   return 0;
 }
 
@@ -285,6 +324,7 @@ auto subTasks(std::span<const char* const> args) -> int {
     if (verb == "mint-id") return tasksMintId(args.subspan(1));
     if (verb == "open") return tasksOpen(args.subspan(1));
     if (verb == "close") return tasksClose(args.subspan(1));
+    if (verb == "watch") return tasksWatch(args.subspan(1));
   }
   return tasksView(args);
 }

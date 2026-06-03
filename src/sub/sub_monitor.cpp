@@ -222,7 +222,7 @@ auto formatMail(std::int64_t unread) -> std::string {
 
 // Scan `"<key>": <int>` after `"<scope>"` — avoids json::parse because
 // the statusline payload has float fields (cost.total_cost_usd) and
-// our json_min doesn't speak floats. Same trick sub_deck.cpp uses.
+// our json_min doesn't speak floats.
 auto scanIntAfter(std::string_view content,
                   std::string_view scope_key,
                   std::string_view leaf_key) -> long long {

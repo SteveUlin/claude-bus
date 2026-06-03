@@ -1464,9 +1464,8 @@ auto Loop::maybeWakeIdleOffTty() -> void {
 // effect (see docs/status-decouple.md). For each live agent, tail its
 // transcript JSONL, compute context occupancy from the last assistant
 // turn's usage, and write $STATE/status/<agent>.json — the CTX% source
-// `bus deck` + `bus monitor` read. Only two fields are consumed
-// downstream (used_percentage + context_window_size), so that's all we
-// write.
+// `bus monitor` reads. Only two fields are consumed downstream
+// (used_percentage + context_window_size), so that's all we write.
 //
 // Numerator (context tokens) comes straight from the transcript and
 // matches the statusline's context_window.total_input_tokens exactly.
@@ -1544,7 +1543,7 @@ auto Loop::maybeScanTokens() -> void {
     if (pct > 100) pct = 100;
     if (pct < 0) pct = 0;
 
-    // Atomic write of the two fields deck + monitor read. The
+    // Atomic write of the two fields the monitor reads. The
     // context_window block matches the old statusline projection's
     // shape so the existing scanIntAfter readers keep working.
     const std::string dir = cfg_.state_dir + "/status";

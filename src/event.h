@@ -2,7 +2,7 @@
 
 // One typed events.jsonl record, parsed ONCE (roadmap D7). Every consumer
 // — agent_status::readAgents, delivery::scanEvents, and the sub_events /
-// sub_log / sub_deck viewers — used to hand-roll its own `extractStr`
+// sub_log viewers — used to hand-roll its own `extractStr`
 // substring scanner with subtly divergent escape handling, and several did
 // a FLAT search that mismatched a payload-nested `"agent"`/`"event"` for
 // the record's own top-level key (the C3 misparse, also latent in the

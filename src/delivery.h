@@ -158,7 +158,7 @@ class Loop {
   // Per-agent transcript tail state for the token-scan watcher. The
   // watcher reads each live agent's transcript JSONL, computes context
   // occupancy from the last assistant turn's usage, and writes
-  // $STATE/status/<agent>.json (the CTX% source deck + monitor read).
+  // $STATE/status/<agent>.json (the CTX% source the monitor reads).
   // Offset-based incremental read like scanEvents — only new bytes are
   // parsed. A path change (new session after /clear or /compact) resets
   // the offset to re-read the fresh transcript. See docs/status-decouple.md.

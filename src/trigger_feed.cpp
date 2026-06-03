@@ -101,7 +101,14 @@ auto deriveTrig(std::string_view agent, const json::Value& entry,
   const auto label = entry.getOrString("state");
   const auto age_ms = entry.getOrInt("age_ms", -1);
   t.done_ms = lastDoneMs(agent);
-  if (label == "WORKING" || label == "COMPACTING") {
+  if (label == "WORKING" || label == "COMPACTING" ||
+      label == "ORCHESTRATING") {
+    // ORCHESTRATING is receptive to MAIL (the broker's wakeReadyForMail
+    // gate), but for the P3 context-watchdog it is mid-flight work: a
+    // /clear or /compact here would kill the in-flight coordination, so it
+    // is an UNSAFE boundary like WORKING. (This also keeps task-model B's
+    // in_flight inference, which reads boundary=none, correct for an owner
+    // actively orchestrating its task.)
     t.boundary = Boundary::None;  // mid-turn: UNSAFE
     t.idle_ms = -1;
   } else if (t.done_ms >= 0 && (now - t.done_ms) < kDoneBoundaryWindowMs) {

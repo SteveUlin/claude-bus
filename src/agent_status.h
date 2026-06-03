@@ -54,6 +54,10 @@ struct AgentInfo {
   std::string open_tool;               // PreToolUse with no matching
                                        // PostToolUse — a call in flight.
   std::int64_t open_tool_since_ms{0};  // when that call opened.
+  std::int64_t last_orchestration_ms{0};  // most recent Workflow dispatch;
+                                          // anchors the Orchestrating lease
+                                          // (TTL-decayed in computeAxes). 0 =
+                                          // none this session.
 };
 
 // Fold one event into an agent's turn/tool accumulator. Reads info.last
@@ -82,6 +86,9 @@ enum class State {
                //   but is actually busy. Auto-clears on the next event.
   NeedsInput,  // PreToolUse for AskUserQuestion — agent is blocked on
                //   the human picking an answer.
+  Orchestrating,  // mid-turn but receptive — running a Workflow / background
+                  //   fan-out, drains mail at sub-boundaries. The receptive
+                  //   sibling of Working. See docs/orchestrating-state.md.
   BootStuck,   // SessionStart fired > 30s ago with no follow-up event.
                //   Pure hook-based detection — a healthy resume emits
                //   Notification(idle_prompt) within seconds; the absence
@@ -123,6 +130,14 @@ enum class TurnAxis {
   Stuck,       // last non-Stop event, age > 5 min
   NeedsInput,  // AskUserQuestion or Notification(permission_prompt)
   Compacting,  // SessionStart source=compact within 60 s
+  Orchestrating,  // mid-turn but RECEPTIVE — a Workflow ran within the lease
+                  //   window (it dispatches subagents in the background and
+                  //   drains at sub-boundaries). The axis is RECEPTIVITY, not
+                  //   busyness: a true Working defers mail (mid-stream
+                  //   dropped-turn hazard), an Orchestrating one can safely
+                  //   take it. Inferred from a lease-TTL over Workflow events
+                  //   (auto-decays), so a finished/crashed orchestrator falls
+                  //   back to its real turn. See docs/orchestrating-state.md.
 };
 
 enum class MailAxis {

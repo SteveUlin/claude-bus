@@ -23,6 +23,13 @@ namespace bus {
 
 namespace {
 
+// Orchestration lease: an agent counts as Orchestrating for this long after
+// its last Workflow dispatch, then auto-decays back to its real turn state.
+// 90 s (auri's ratified ~60–120 s band) spans the inter-subagent gaps of a
+// running workflow yet decays ~1–2 turns after it ends — short enough that a
+// crashed/finished orchestrator never lies as Orchestrating for long.
+constexpr std::int64_t kOrchestrationLeaseMs = 90 * 1000;
+
 auto captureCommand(const std::string& cmd) -> std::string {
   FILE* pipe = ::popen(cmd.c_str(), "r");
   if (pipe == nullptr) return {};
@@ -58,6 +65,7 @@ auto axisName(TurnAxis t) -> std::string_view {
     case TurnAxis::Stuck: return "stuck";
     case TurnAxis::NeedsInput: return "needs_input";
     case TurnAxis::Compacting: return "compacting";
+    case TurnAxis::Orchestrating: return "orchestrating";
   }
   return "?";
 }
@@ -95,6 +103,7 @@ auto turnAxisFrom(std::string_view s) -> TurnAxis {
   if (s == "stuck") return TurnAxis::Stuck;
   if (s == "needs_input") return TurnAxis::NeedsInput;
   if (s == "compacting") return TurnAxis::Compacting;
+  if (s == "orchestrating") return TurnAxis::Orchestrating;
   return TurnAxis::None;
 }
 
@@ -120,6 +129,8 @@ auto stateName(State s) -> std::string_view {
       return "HAS_MAIL";
     case State::Working:
       return "WORKING";
+    case State::Orchestrating:
+      return "ORCHESTRATING";
     case State::Stuck:
       return "STUCK";
     case State::Compacting:
@@ -148,6 +159,9 @@ auto stateGlyph(State s) -> std::string_view {
       return "🔔";
     case State::Working:
       return "🔨";  // Single-codepoint emoji, unambiguous 2-cell width.
+    case State::Orchestrating:
+      return "🪐";  // Ringed planet: subagents orbit the orchestrator.
+                    //   Single-codepoint, unambiguous 2-cell width.
     case State::Stuck:
       return "🚧";
     case State::Compacting:
@@ -176,6 +190,10 @@ auto stateColor(State s) -> std::string_view {
       return ansi::kCyan;
     case State::Working:
       return ansi::kYellow;
+    case State::Orchestrating:
+      // Bright-green = "busy but RECEPTIVE" — the healthy, mail-takeable
+      // sibling of Working's plain yellow. Distinct from Idle's plain green.
+      return ansi::kBrightGreen;
     case State::Stuck:
       return ansi::kRed;
     case State::Compacting:
@@ -208,6 +226,13 @@ auto foldTurnState(AgentInfo& info) -> void {
   } else if (ev == "PreToolUse") {
     info.open_tool = info.last.tool;
     info.open_tool_since_ms = ts;
+    // A Workflow dispatch puts the agent in an orchestration posture: it
+    // fans subagents out in the background and returns immediately, so the
+    // posture outlives the tool call. Anchor the lease here; computeAxes
+    // TTL-decays it. (Workflow is the unambiguous events-only signal — a
+    // background Task/Bash isn't distinguishable from a blocking one
+    // without tool-input capture; that's the explicit-sentinel v2.)
+    if (info.last.tool == "Workflow") info.last_orchestration_ms = ts;
   } else if (ev == "PostToolUse") {
     info.open_tool.clear();
     info.open_tool_since_ms = 0;
@@ -218,9 +243,12 @@ auto foldTurnState(AgentInfo& info) -> void {
   } else if (ev == "Notification") {
     if (info.last.notification_type == "idle_prompt") info.turn_start_ms = 0;
   } else if (ev == "SessionStart" || ev == "SessionEnd") {
+    // New / ended session — reset the turn AND the orchestration lease so a
+    // prior session's Workflow can't bleed into a fresh one.
     info.turn_start_ms = 0;
     info.open_tool.clear();
     info.open_tool_since_ms = 0;
+    info.last_orchestration_ms = 0;
   }
 }
 
@@ -281,9 +309,21 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
     // Compacting / Stuck, which set turn=None above). Both land at a
     // prompt waiting for input.
     ax.turn = TurnAxis::Ready;
+  } else if (age_s > 5 * 60) {
+    // PreToolUse / PostToolUse / UserPromptSubmit, but stale > 5 min — a
+    // genuine stall outranks an orchestration lease (which is shorter than
+    // this anyway, so it has already decayed).
+    ax.turn = TurnAxis::Stuck;
+  } else if (a.last_orchestration_ms > 0 &&
+             now_ms - a.last_orchestration_ms < kOrchestrationLeaseMs) {
+    // Mid-turn AND a Workflow dispatched within the lease window — the
+    // receptive sibling of Working. Overrides ONLY Working (Ready / Stuck /
+    // NeedsInput above are untouched), so the render gains a truthful label
+    // with zero delivery change until the gate (wakeReadyForMail) honors it.
+    ax.turn = TurnAxis::Orchestrating;
   } else {
     // PreToolUse / PostToolUse / UserPromptSubmit — mid-turn work.
-    ax.turn = age_s > 5 * 60 ? TurnAxis::Stuck : TurnAxis::Working;
+    ax.turn = TurnAxis::Working;
   }
 
   // ---- Mail axis ----
@@ -330,6 +370,8 @@ auto computeState(const AgentInfo& a, std::size_t unread,
       return ax.mail == MailAxis::Pending ? State::HasMail : State::Idle;
     case TurnAxis::Working:
       return State::Working;
+    case TurnAxis::Orchestrating:
+      return State::Orchestrating;
     case TurnAxis::Stuck:
       return State::Stuck;
     case TurnAxis::NeedsInput:

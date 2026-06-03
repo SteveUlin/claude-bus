@@ -70,6 +70,8 @@ auto turnView(TurnAxis t) -> Primary {
       return {"💤", "IDLE", kGreen};
     case TurnAxis::Working:
       return {"🔨", "WORKING", kYellow};
+    case TurnAxis::Orchestrating:
+      return {"🪐", "ORCHESTRATING", kBrightGreen};
     case TurnAxis::Stuck:
       return {"🚧", "STUCK", kRed};
     case TurnAxis::NeedsInput:

@@ -65,6 +65,7 @@ auto computeStateFromLabel(std::string_view label) -> State {
   if (label == "IDLE") return State::Idle;
   if (label == "HAS_MAIL") return State::HasMail;
   if (label == "WORKING") return State::Working;
+  if (label == "ORCHESTRATING") return State::Orchestrating;
   if (label == "STUCK") return State::Stuck;
   if (label == "COMPACTING") return State::Compacting;
   if (label == "NEEDS_INPUT") return State::NeedsInput;
@@ -247,6 +248,7 @@ auto makeRow(std::string_view name, const json::Value& entry,
       if (r.subject.empty()) r.subject = "needs input";
       break;
     case State::Working:
+    case State::Orchestrating:
     case State::HasMail:
     case State::Compacting:
       r.subject = firstLine(title);
@@ -291,6 +293,7 @@ auto formatMeta(std::int64_t age_s, int ctx_pct,
 auto verbFor(State s) -> std::string_view {
   switch (s) {
     case State::Working:     return "working on";
+    case State::Orchestrating: return "orchestrating";
     case State::HasMail:     return "has mail";
     case State::NeedsInput:  return "asking";
     case State::Idle:        return "idle";

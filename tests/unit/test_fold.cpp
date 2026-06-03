@@ -82,6 +82,35 @@ TEST(fold_new_prompt_clears_stale_open_tool) {
   CHECK_EQ(a.turn_start_ms, std::int64_t{3000});
 }
 
+// ─── orchestration lease (Workflow → Orchestrating) ──────────────────
+
+TEST(fold_workflow_stamps_orchestration) {
+  // A Workflow dispatch anchors the orchestration lease; an ordinary tool
+  // does not.
+  AgentInfo a;
+  apply(a, "PreToolUse", 1500, "Bash");
+  CHECK_EQ(a.last_orchestration_ms, std::int64_t{0});
+  apply(a, "PreToolUse", 2000, "Workflow");
+  CHECK_EQ(a.last_orchestration_ms, std::int64_t{2000});
+}
+
+TEST(fold_workflow_lease_survives_posttool) {
+  // The posture outlives the tool call (Workflow returns immediately) — the
+  // lease must NOT clear on PostToolUse, only decay by TTL in computeAxes.
+  AgentInfo a;
+  apply(a, "PreToolUse", 2000, "Workflow");
+  apply(a, "PostToolUse", 2100, "Workflow");
+  CHECK_EQ(a.last_orchestration_ms, std::int64_t{2000});
+}
+
+TEST(fold_session_start_resets_orchestration) {
+  // A new session must not inherit a prior session's lease.
+  AgentInfo a;
+  apply(a, "PreToolUse", 2000, "Workflow");
+  apply(a, "SessionStart", 3000);
+  CHECK_EQ(a.last_orchestration_ms, std::int64_t{0});
+}
+
 // ─── the signatures D8 exists to make visible ────────────────────────
 
 TEST(fold_wedged_tool_signature) {

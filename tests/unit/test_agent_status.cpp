@@ -129,3 +129,38 @@ TEST(dropped_turn_invisible_until_wallclock_threshold) {
   // turn immediately rather than waiting out the wall clock — update this
   // test to assert detection at ago(60).
 }
+
+// ─── Orchestrating: mid-turn but receptive (Workflow lease) ───
+// Lease window is 90 s (internal). ago(30) is fresh; ago(120) has decayed.
+
+TEST(orchestrating_within_lease) {
+  // Mid-turn work + a Workflow dispatched 30 s ago → Orchestrating, the
+  // receptive sibling of Working.
+  auto a = mk("PreToolUse", "", "Bash", ago(20));
+  a.last_orchestration_ms = ago(30);
+  CHECK_EQ(turnOf(a), std::string_view{"orchestrating"});
+}
+
+TEST(orchestrating_decays_to_working) {
+  // Same mid-turn work, but the last Workflow was 120 s ago — lease expired,
+  // so it reads plain Working again (auto-decay, no stuck-Orchestrating).
+  auto a = mk("PreToolUse", "", "Bash", ago(20));
+  a.last_orchestration_ms = ago(120);
+  CHECK_EQ(turnOf(a), std::string_view{"working"});
+}
+
+TEST(orchestrating_does_not_override_ready) {
+  // A Stop with a fresh lease is still Ready (at the prompt) — the override
+  // touches ONLY Working, never the receptive-already Ready state.
+  auto a = mk("Stop", "", "", ago(10));
+  a.last_orchestration_ms = ago(30);
+  CHECK_EQ(turnOf(a), std::string_view{"ready"});
+}
+
+TEST(orchestrating_stuck_outranks_lease) {
+  // Mid-turn but stale > 5 min → Stuck wins over any lease (a genuine stall
+  // is not "receptive"). The 90 s lease has expired by then anyway.
+  auto a = mk("PreToolUse", "", "Bash", ago(6 * 60));
+  a.last_orchestration_ms = ago(6 * 60);
+  CHECK_EQ(turnOf(a), std::string_view{"stuck"});
+}

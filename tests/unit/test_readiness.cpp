@@ -73,6 +73,17 @@ TEST(wake_working_not_wakeable) {
   CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Working), &p));
 }
 
+// Orchestrating = receptive mid-turn (Workflow within its lease). The gate
+// flip: deliverable like Ready, unlike the true Working turn above. This is
+// the activating half of kvothe's behavior-neutral state landing.
+TEST(wake_orchestrating_is_wakeable) {
+  auto p = pane(true, "INSERT");
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Orchestrating),
+                         &p));
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Orchestrating),
+                         nullptr));
+}
+
 TEST(wake_needs_input_not_wakeable) {
   auto p = pane(true, "INSERT");
   CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::NeedsInput), &p));

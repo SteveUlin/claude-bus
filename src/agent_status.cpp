@@ -385,8 +385,14 @@ auto computeState(const AgentInfo& a, std::size_t unread,
 }
 
 auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool {
-  // Normal idle at the prompt.
-  if (ax.process == ProcessAxis::Alive && ax.turn == TurnAxis::Ready) {
+  // Normal idle at the prompt, OR a receptive orchestrator mid-turn.
+  // Orchestrating is the receptivity-axis payoff (kvothe's state): a
+  // Workflow/background-loop running within its lease drains queued mail at
+  // sub-task boundaries, so the broker can safely push to it mid-turn. A
+  // TRUE Working turn stays deferred (the mid-stream dropped-turn hazard) —
+  // computeAxes only overrides Working→Orchestrating when the lease is live.
+  if (ax.process == ProcessAxis::Alive &&
+      (ax.turn == TurnAxis::Ready || ax.turn == TurnAxis::Orchestrating)) {
     return true;
   }
   // Post-compaction idle — SessionStart(source=compact) is the last event

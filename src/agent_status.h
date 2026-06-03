@@ -227,23 +227,12 @@ inline auto readPaneState(const std::string& name) -> PaneState {
 // when the file is missing or holds an unknown value.
 auto agentColor(std::string_view name) -> std::string_view;
 
-// Is any zellij client focused on this agent's pane? Pure observation —
-// the bus deliberately does NOT change behavior based on focus. Sulin
-// must be able to watch a pane (mail arriving, drains injecting, model
-// responding) without halting the autonomous flow. Kept exposed for
-// callers that genuinely want the signal; do not use it to gate mail.
-auto isFocused(const std::string& name) -> bool;
-
 // Does the agent have a recent presence file under <state>/presence/<name>?
 // Written by the [bus-attach] sentinel (Ctrl+G a chord), removed by
 // [bus-detach]. Expires after 1h so a forgotten attach can't mute the
-// agent forever.
+// agent forever. Presence (explicit attach) is the ONLY mail-suppression
+// signal — focus has no effect (focus-vs-presence: presence won outright).
 auto hasPresenceFile(const std::string& name) -> bool;
-
-// Presence = explicit attach. The sentinel chord is the ONLY way to
-// flip this; focus has no effect. Watcher and drain hook gate mail
-// suppression on this exclusively.
-auto isPresent(const std::string& name) -> bool;
 
 auto nowMs() -> std::int64_t;
 

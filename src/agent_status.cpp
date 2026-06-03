@@ -6,7 +6,6 @@
 
 #include <sys/stat.h>
 
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -14,7 +13,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,18 +27,6 @@ namespace {
 // running workflow yet decays ~1–2 turns after it ends — short enough that a
 // crashed/finished orchestrator never lies as Orchestrating for long.
 constexpr std::int64_t kOrchestrationLeaseMs = 90 * 1000;
-
-auto captureCommand(const std::string& cmd) -> std::string {
-  FILE* pipe = ::popen(cmd.c_str(), "r");
-  if (pipe == nullptr) return {};
-  std::string out;
-  std::array<char, 512> buf{};
-  while (std::fgets(buf.data(), buf.size(), pipe) != nullptr) {
-    out.append(buf.data());
-  }
-  ::pclose(pipe);
-  return out;
-}
 
 }  // namespace
 
@@ -488,34 +474,6 @@ auto hasPresenceFile(const std::string& name) -> bool {
   const auto now =
       duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
   return (now - static_cast<std::int64_t>(st.st_mtime)) < 3600;
-}
-
-auto isFocused(const std::string& name) -> bool {
-  // Resolve agent name -> terminal_N in-process via pane.h.
-  const auto pane = paneId(name);
-  if (pane.empty()) return false;
-
-  // Compare against the second column of every list-clients row.
-  const auto clients =
-      captureCommand("zellij action list-clients 2>/dev/null");
-  if (clients.empty()) return false;
-  std::istringstream in{clients};
-  std::string line;
-  bool first = true;
-  while (std::getline(in, line)) {
-    if (first) {
-      first = false;
-      continue;
-    }
-    std::istringstream ls{line};
-    std::string client, pid;
-    if (ls >> client >> pid && pid == pane) return true;
-  }
-  return false;
-}
-
-auto isPresent(const std::string& name) -> bool {
-  return hasPresenceFile(name);
 }
 
 auto nowMs() -> std::int64_t {

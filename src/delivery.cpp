@@ -210,6 +210,9 @@ auto Loop::loadBlockingOps() -> void {
 }
 
 auto Loop::load() -> void {
+  // Recovery ledger first — independent of the in-flight dir, and the early
+  // return below (missing in-flight dir on a fresh boot) must not skip it.
+  loadRecovery();
   // Read every $STATE/in-flight/*.json into memory. Survives restart.
   in_flight_.clear();
   const auto dir = inflightDir(cfg_);
@@ -1122,6 +1125,132 @@ auto Loop::maybeAutoClear() -> void {
   }
 }
 
+// ── P2 recovery: monotonic clock + boot id + ledger persistence (§6.1/§7) ──
+
+auto nowMonoMs() -> std::int64_t {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+auto readBootId() -> std::string {
+  std::ifstream f{"/proc/sys/kernel/random/boot_id"};
+  std::string id;
+  std::getline(f, id);
+  return id;  // "" if unreadable → treated as a fresh boot on every load
+}
+
+namespace {
+
+auto breakerToStr(BreakerState b) -> std::string {
+  switch (b) {
+    case BreakerState::Open:
+      return "open";
+    case BreakerState::HalfOpen:
+      return "half-open";
+    default:
+      return "closed";
+  }
+}
+
+auto breakerFromStr(std::string_view s) -> BreakerState {
+  if (s == "open") return BreakerState::Open;
+  if (s == "half-open") return BreakerState::HalfOpen;
+  return BreakerState::Closed;
+}
+
+}  // namespace
+
+auto ledgerToJson(const RecoveryLedger& l) -> json::Value {
+  std::map<std::string, json::Value> m;
+  m.insert({"boot_id", json::Value::from(l.boot_id)});
+  std::map<std::string, json::Value> sigs;
+  for (const auto& [k, s] : l.sigs) {
+    std::map<std::string, json::Value> so;
+    so.insert({"last_fired_mono_ms", json::Value::from(s.last_fired_mono_ms)});
+    so.insert({"attempts",
+               json::Value::from(static_cast<std::int64_t>(s.attempts))});
+    so.insert(
+        {"backoff_until_mono_ms", json::Value::from(s.backoff_until_mono_ms)});
+    sigs.insert({k, json::Value::fromObject(std::move(so))});
+  }
+  m.insert({"sigs", json::Value::fromObject(std::move(sigs))});
+  std::vector<json::Value> rl;
+  rl.reserve(l.relaunch_mono_ms.size());
+  for (auto t : l.relaunch_mono_ms) rl.push_back(json::Value::from(t));
+  m.insert({"relaunch_mono_ms", json::Value::fromArray(std::move(rl))});
+  m.insert({"breaker", json::Value::from(breakerToStr(l.breaker))});
+  m.insert({"open_until_mono_ms", json::Value::from(l.open_until_mono_ms)});
+  return json::Value::fromObject(std::move(m));
+}
+
+auto ledgerFromJson(const json::Value& v) -> RecoveryLedger {
+  RecoveryLedger l;
+  l.boot_id = v.getOrString("boot_id");
+  if (const auto* sigs = v.get("sigs"); sigs != nullptr && sigs->isObject()) {
+    for (const auto& [k, sv] : sigs->asObject()) {
+      RecoverySig s;
+      s.last_fired_mono_ms = sv.getOrInt("last_fired_mono_ms", 0);
+      s.attempts = static_cast<std::int32_t>(sv.getOrInt("attempts", 0));
+      s.backoff_until_mono_ms = sv.getOrInt("backoff_until_mono_ms", 0);
+      l.sigs.insert({k, s});
+    }
+  }
+  if (const auto* rl = v.get("relaunch_mono_ms");
+      rl != nullptr && rl->isArray()) {
+    for (const auto& t : rl->asArray()) l.relaunch_mono_ms.push_back(t.asInt());
+  }
+  l.breaker = breakerFromStr(v.getOrString("breaker", "closed"));
+  l.open_until_mono_ms = v.getOrInt("open_until_mono_ms", 0);
+  return l;
+}
+
+// Boot load: read every $STATE/recovery/<agent>.json. A boot_id mismatch
+// means the machine rebooted since the ledger was written, so its monotonic
+// windows are meaningless (steady_clock reset) — discard them and keep a
+// fresh ledger tagged with the current boot. Same-boot (broker restart)
+// preserves the breaker, which is the whole point.
+auto Loop::loadRecovery() -> void {
+  namespace fs = std::filesystem;
+  const std::string dir = cfg_.state_dir + "/recovery";
+  const std::string boot = readBootId();
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator(dir, ec)) {
+    if (e.path().extension() != ".json") continue;
+    const auto agent = e.path().stem().string();
+    std::ifstream f{e.path()};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto parsed = json::parse(ss.str());
+    if (!parsed) continue;
+    auto l = ledgerFromJson(*parsed);
+    if (l.boot_id != boot) {
+      l = RecoveryLedger{};  // reboot → windows invalid; reset
+      l.boot_id = boot;
+    }
+    recovery_.insert_or_assign(agent, std::move(l));
+  }
+}
+
+// Persist one agent's ledger atomically (tmp + rename). Called after any
+// breaker/backoff/relaunch-window mutation so the breaker survives a restart.
+auto Loop::saveRecovery(const std::string& agent) -> void {
+  namespace fs = std::filesystem;
+  auto it = recovery_.find(agent);
+  if (it == recovery_.end()) return;
+  if (it->second.boot_id.empty()) it->second.boot_id = readBootId();
+  const std::string dir = cfg_.state_dir + "/recovery";
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  const std::string path = dir + "/" + agent + ".json";
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream f{tmp, std::ios::trunc};
+    f << json::serialize(ledgerToJson(it->second));
+  }
+  fs::rename(tmp, path, ec);
+}
+
 // P2 auto-recovery triage — Phase A (OBSERVE-ONLY). Evaluates the recovery
 // signature table for every live agent and logs what it WOULD do
 // ("would-recover ...") to the audit topic, taking NO action. This is the
@@ -1146,6 +1275,40 @@ auto Loop::maybeAutoRecover() -> void {
   const auto now = nowMs();
   if (now - auto_recover_last_scan_ms_ < 30'000) return;  // every 30 s
   auto_recover_last_scan_ms_ = now;
+
+  // §6.1a WALL-JUMP GRACE. Event ages are wall-clock (hooks wall-stamp
+  // events.jsonl), so a suspend/resume / NTP step / restart-across-reboot
+  // inflates every age → false STUCK/idle. steady_clock PAUSES across
+  // suspend while wall LEAPS, so Δwall − Δmono between scans is the jump
+  // signature. On a jump, arm a grace window during which the engine NO-OPS:
+  // every age spanning the jump is untrustworthy until agents emit fresh
+  // post-resume events. This is the "recognize-don't-chase" W1 deferred —
+  // recovery ACTS, so it's the first consumer that needs it for real.
+  const auto mono = nowMonoMs();
+  std::int64_t jump_threshold_ms = 5'000;
+  if (const char* e = std::getenv("CLAUDE_BUS_CLOCK_JUMP_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) jump_threshold_ms = v;
+  }
+  std::int64_t grace_ms = 60'000;
+  if (const char* e = std::getenv("CLAUDE_BUS_SUSPEND_GRACE_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) grace_ms = v;
+  }
+  if (last_tick_wall_ms_ > 0) {
+    const auto d_wall = now - last_tick_wall_ms_;
+    const auto d_mono = mono - last_tick_mono_ms_;
+    if (d_wall - d_mono > jump_threshold_ms) {
+      suspend_grace_until_mono_ms_ = mono + grace_ms;
+      std::println(stderr,
+                   "recovery: clock jump (d_wall={}ms d_mono={}ms) — "
+                   "suspending auto-recovery for {}ms",
+                   d_wall, d_mono, grace_ms);
+    }
+  }
+  last_tick_wall_ms_ = now;
+  last_tick_mono_ms_ = mono;
+  if (mono < suspend_grace_until_mono_ms_) return;  // in grace → take no action
 
   // Budgets (env-tunable; reuse the escalation budget where it matches).
   std::int64_t stuck_budget = 5 * 60'000;

@@ -26,6 +26,7 @@
 //   - pubsub / blackboard / work-queue (4f)
 
 #include "broker.h"
+#include "json_min.h"
 #include "topic_log.h"
 #include "topic_registry.h"
 
@@ -75,6 +76,39 @@ struct InFlight {
 // don't have to wait 60 s of real time.
 auto ackTimeoutMs() -> std::int64_t;
 constexpr std::int32_t kMaxAttempts = 3;
+
+// ── P2 auto-recovery ledger (docs/broker-auto-recovery.md §6.1, §7) ──────
+// Per-agent recovery state, persisted to $STATE/recovery/<agent>.json so the
+// breaker survives a broker restart (a crash-looping agent that bounced the
+// broker must NOT get a fresh MaxR budget). ALL timestamps are MONOTONIC ms
+// (steady_clock == CLOCK_MONOTONIC on Linux): continuous across same-boot
+// processes (restart preserves the windows), reset on reboot via the boot_id
+// tag (mismatch → clear). Never wall-clock — a suspend/resume jump must not
+// perturb the breaker.
+enum class BreakerState { Closed, Open, HalfOpen };
+
+// Per-signature exponential-backoff state (one row × one agent).
+struct RecoverySig {
+  std::int64_t last_fired_mono_ms{0};
+  std::int32_t attempts{0};
+  std::int64_t backoff_until_mono_ms{0};
+};
+
+struct RecoveryLedger {
+  std::string boot_id;                          // boot this state belongs to
+  std::map<std::string, RecoverySig> sigs;      // keyed by signature id
+  std::vector<std::int64_t> relaunch_mono_ms;   // MaxR/MaxT rolling window
+  BreakerState breaker{BreakerState::Closed};
+  std::int64_t open_until_mono_ms{0};           // half-open probe gate
+};
+
+// Monotonic now (ms) — steady_clock, suspend-immune ordering for the engine.
+auto nowMonoMs() -> std::int64_t;
+// Current boot's UUID (/proc/sys/kernel/random/boot_id); "" if unreadable.
+auto readBootId() -> std::string;
+// Ledger <-> JSON (module-level; persistence roundtrips through these).
+auto ledgerToJson(const RecoveryLedger& l) -> json::Value;
+auto ledgerFromJson(const json::Value& v) -> RecoveryLedger;
 
 class Loop {
  public:
@@ -151,6 +185,14 @@ class Loop {
   std::int64_t auto_recover_last_scan_ms_{0};
   std::map<std::string, std::int64_t> would_recover_next_log_ms_;
 
+  // P2 recovery ledger (per agent), loaded on boot, persisted on mutation.
+  std::map<std::string, RecoveryLedger> recovery_;
+  // Wall-jump detection (§6.1a): a (wall,mono) pair from the previous tick;
+  // Δwall − Δmono past the threshold marks a suspend/clock-jump → arm grace.
+  std::int64_t last_tick_wall_ms_{0};
+  std::int64_t last_tick_mono_ms_{0};
+  std::int64_t suspend_grace_until_mono_ms_{0};
+
   // Last time the log-retention sweep ran (events.jsonl rewrite +
   // per-topic head trim). Rate-limited; see maybeTrimLogs.
   std::int64_t trim_last_scan_ms_{0};
@@ -206,6 +248,11 @@ class Loop {
                 std::string_view body) -> void;
   auto maybeAutoClear() -> void;
   auto maybeAutoRecover() -> void;
+  // Recovery-ledger persistence ($STATE/recovery/<agent>.json). loadRecovery
+  // runs on boot; saveRecovery after any breaker/backoff mutation. On load,
+  // a boot_id mismatch (reboot) resets the agent's monotonic windows.
+  auto loadRecovery() -> void;
+  auto saveRecovery(const std::string& agent) -> void;
   auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;

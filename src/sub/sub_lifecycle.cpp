@@ -151,33 +151,38 @@ auto tabNameExists(std::string_view name) -> bool {
 }  // namespace
 
 auto subSpawn(std::span<const char* const> args) -> int {
-  // bus spawn [--role ROLE] [--project-dir DIR] NAME
+  // bus spawn [--role ROLE] [--project-dir DIR] [--profile PROFILE] NAME
   //   --role        passed through to agent-launch (role-injected peer).
   //   --project-dir target repo for the agent's workspace + cwd (e.g.
   //                 ~/taro); the agent stays a claude-bus citizen. Omitted =
   //                 claude-bus, unchanged.
-  std::string name, role, project_dir;
+  //   --profile     worker|research|orchestrator, passed through to
+  //                 agent-launch (permission/bypass/cage envelope). Omitted =
+  //                 agent-launch's default (worker). agent-launch validates it.
+  std::string name, role, project_dir, profile;
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string a{args[i]};
     if (a == "--role" && i + 1 < args.size()) {
       role = args[++i];
     } else if (a == "--project-dir" && i + 1 < args.size()) {
       project_dir = args[++i];
+    } else if (a == "--profile" && i + 1 < args.size()) {
+      profile = args[++i];
     } else if (a.starts_with("--")) {
       std::println(stderr,
-                   "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
+                   "usage: bus spawn [--role ROLE] [--project-dir DIR] [--profile PROFILE] NAME");
       return 2;
     } else if (name.empty()) {
       name = a;
     } else {
       std::println(stderr,
-                   "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
+                   "usage: bus spawn [--role ROLE] [--project-dir DIR] [--profile PROFILE] NAME");
       return 2;
     }
   }
   if (name.empty()) {
     std::println(stderr,
-                 "usage: bus spawn [--role ROLE] [--project-dir DIR] NAME");
+                 "usage: bus spawn [--role ROLE] [--project-dir DIR] [--profile PROFILE] NAME");
     return 2;
   }
 
@@ -204,13 +209,14 @@ auto subSpawn(std::span<const char* const> args) -> int {
   const std::string bus_bin = bin + "/bus";
   const std::string agent_launch = bin + "/agent-launch";
 
-  // agent-launch's arg line (KDL): forward --role / --project-dir when set,
-  // then NAME. agent-launch resolves BUS_ROOT from its own path, so the bus
-  // side stays claude-bus regardless of --project-dir.
+  // agent-launch's arg line (KDL): forward --role / --project-dir / --profile
+  // when set, then NAME. agent-launch resolves BUS_ROOT from its own path, so
+  // the bus side stays claude-bus regardless of --project-dir.
   std::string launch_args = "args";
   if (!role.empty()) launch_args += " \"--role\" \"" + role + "\"";
   if (!project_dir.empty())
     launch_args += " \"--project-dir\" \"" + project_dir + "\"";
+  if (!profile.empty()) launch_args += " \"--profile\" \"" + profile + "\"";
   launch_args += " \"" + name + "\"";
 
   // Pane cwd = the project repo when targeting one, else claude-bus. (agent-
@@ -253,8 +259,10 @@ layout {{
   // fleet.kdl agents never come through `bus spawn`, so the registry holds
   // exactly the dynamically-spawned peers (kilvin, the taro spokes, ...).
   // One file per peer under $STATE/dynamic-peers/ — atomic add/remove, no
-  // rewrite races. Records the respawn spec (role + project_dir); session
-  // continuity is free (agent-launch --continue resumes by name+workspace).
+  // rewrite races. Records the respawn spec (role + project_dir + profile);
+  // session continuity is free (agent-launch --continue resumes by
+  // name+workspace). profile MUST persist or a restore-peers relaunch silently
+  // demotes an orchestrator back to the default (worker) envelope.
   {
     namespace fs = std::filesystem;
     const std::string reg_dir = stateRoot() + "/dynamic-peers";
@@ -263,7 +271,8 @@ layout {{
     std::ofstream out{reg_dir + "/" + name};
     if (out) {
       out << "role=" << role << "\n"
-          << "project_dir=" << project_dir << "\n";
+          << "project_dir=" << project_dir << "\n"
+          << "profile=" << profile << "\n";
     }
   }
 
@@ -292,11 +301,12 @@ auto subRestorePeers(std::span<const char* const>) -> int {
   for (const auto& entry : fs::directory_iterator(reg_dir, ec)) {
     if (!entry.is_regular_file()) continue;
     const std::string name = entry.path().filename().string();
-    std::string role, project_dir, line;
+    std::string role, project_dir, profile, line;
     std::ifstream in{entry.path()};
     while (std::getline(in, line)) {
       if (line.starts_with("role=")) role = line.substr(5);
       else if (line.starts_with("project_dir=")) project_dir = line.substr(12);
+      else if (line.starts_with("profile=")) profile = line.substr(8);
     }
     ++registered;
     std::vector<std::string> a;
@@ -305,6 +315,7 @@ auto subRestorePeers(std::span<const char* const>) -> int {
       a.emplace_back("--project-dir");
       a.push_back(project_dir);
     }
+    if (!profile.empty()) { a.emplace_back("--profile"); a.push_back(profile); }
     a.push_back(name);
     std::vector<const char*> argv;
     argv.reserve(a.size());

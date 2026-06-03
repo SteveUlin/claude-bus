@@ -40,8 +40,15 @@
 *.o
 *.a
 *.so
+a.out
 core
 core.*
+
+# stray root-level scratch (one-off experiments belong in /scratch or outside
+# the repo, per CLAUDE.local.md). Anchored to root so legit fixtures elsewhere
+# aren't caught. These were committed by accident (a getline experiment).
+/test.txt
+/test_getline.cpp
 
 # env overrides + secrets
 .env

@@ -149,6 +149,46 @@ Notes:
 - **Role exclusion + presence:** comms/primary excluded from destructive rows;
   an attached pane (`hasPresenceFile`) defers recovery — the human has it.
 
+### 6.1 Clock handling — the concrete mechanism (Phase B refinement)
+
+§6/§7 say "monotonic everywhere, same care as W1." Making that concrete
+surfaced a gap worth flagging *before* coding: `nowMs()` is **wall-clock**
+(`system_clock`), and `events.jsonl` is **wall-stamped by hooks**, so age math
+(`now − last_event_ms`) is inherently wall-based — a suspend/resume jump
+inflates every age → false STUCK/idle. W1/detection tolerates this as *benign*
+(recognize-don't-chase, no action) and **never implemented a jump mechanism**.
+Recovery **acts**, so it's the first consumer that genuinely needs one. Two
+concerns, two mechanisms:
+
+**(a) Wall-jump grace — protects age/staleness reads.** Each tick records a
+`(wall, mono)` pair (`mono` = `steady_clock`/CLOCK_MONOTONIC, which *pauses*
+rather than *leaps* across suspend). If `Δwall − Δmono > JUMP_THRESHOLD`
+(~5 s) between consecutive ticks, a clock jump occurred (suspend, NTP step,
+restart-across-reboot) → arm a **suspend-grace window** (~60 s mono) during
+which the recovery engine **no-ops entirely**. Every age spanning the jump is
+untrustworthy; skip recovery until ages re-stabilize. This is the structural
+"recognize-don't-chase" W1 lacked. (The monitor may still flash transient
+false-STUCK — recovery just won't act on it.)
+
+**(b) Monotonic ledger windows + boot-id persistence — protects breaker/
+backoff.** The ledger's own timestamps (MaxR/MaxT relaunch window,
+`backoff_until`, breaker `open_until`) are set by recovery *when it fires*, so
+recovery owns their clock → use **monotonic ms**. Persistence:
+- CLOCK_MONOTONIC is continuous across processes within one boot, so a **broker
+  restart (same boot) preserves the windows** — exactly what "breaker must
+  survive restart" requires.
+- It resets on **reboot**. So tag the ledger file with the **boot id**
+  (`/proc/sys/kernel/random/boot_id`, or `btime` from `/proc/stat`). On load:
+  boot_id matches → rebase mono-relative, windows valid; boot_id differs →
+  **reset the windows**. Resetting on reboot is SAFE — a pre-reboot crash-loop
+  is stale and the reboot was almost certainly human-caused; worst case a
+  genuine looper gets a fresh MaxR budget post-reboot, which the human just
+  triggered anyway.
+
+Net: (a) stops suspend/resume from firing recovery; (b) makes the breaker
+survive a broker restart yet reset cleanly on reboot — "monotonic everywhere",
+concretely, for an engine fed by wall-stamped events.
+
 ## 7. State — the recovery ledger
 
 A per-agent ledger, persisted to `$STATE/recovery/<agent>.json`, holding:

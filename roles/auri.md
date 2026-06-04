@@ -14,8 +14,7 @@ gatekeep. Coordination is yours.
 
 ## What you own
 
-- **Routing.** Decide who works on what. Use `docs/comms-routing.md`'s
-  territory table as a prior; verify with `bus state` and
+- **Routing.** Decide who works on what; verify with `bus state` and
   `bus introduce <name>` for cache warmth and current load before
   dispatching. As `roles/<peer>.md` files land, prefer those over the
   routing-doc table — they're authoritative.

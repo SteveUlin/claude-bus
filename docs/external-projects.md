@@ -39,7 +39,7 @@ session "tempura" {
 ```
 
 Project sessions are pure coder fleets. The human's coordinator agent
-(`comms`) lives in its own session — see `docs/comms.md`. Names are
+(`comms`) lives in its own session. Names are
 session-prefixed because the broker namespace is flat across sessions.
 
 `bus session start tempura`:
@@ -67,7 +67,7 @@ work.
 | `observer`    | n/a                          | no                 | `bus topic inbox NAME` / `bus monitor` |
 
 - **`coordinator`** is a claude pane with no workspace. Accepts a `role`
-  augmentation (see `docs/comms.md`). The canonical use is
+  augmentation. The canonical use is
   `kind=coordinator role=comms` for the human's comms helper, which lives
   in its own zellij session.
 - **`coder`** is the role you actually scale: each one gets its own working
@@ -215,7 +215,7 @@ Default to (1). Revisit if it gets annoying.
 
 ## Walkthrough: tempura and claude-bus side by side
 
-A concrete day, assuming everything in this doc plus `docs/comms.md` has
+A concrete day, assuming everything in this doc has
 been built.
 
 ### Starting state

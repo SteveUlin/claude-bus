@@ -205,7 +205,7 @@ auto computeState(const AgentInfo& a, std::size_t unread,
 //     the ground truth that claude is ready for input. A genuinely wedged
 //     boot shows a modal (non-INSERT) and stays excluded, so BOOT_STUCK
 //     detection is preserved. Mirrors dispatchAgentInbox's Starting+INSERT
-//     gate. See docs/fresh-spawn-delivery.md.
+//     gate.
 // pane may be null (no pane state) — then the INSERT-rescue can't fire.
 auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool;
 

@@ -22,8 +22,8 @@
 //   comms-bar-style 1-row strip + agent-launch'd claude pane. Sulin
 //   switches tabs only when attaching to an individual agent.
 //
-// `comms` is the human's communications layer (see docs/comms.md +
-// roles/comms.md). It launches via agent-launch's --role flag, which
+// `comms` is the human's communications layer (see roles/comms.md).
+// It launches via agent-launch's --role flag, which
 // appends roles/comms.md to claude's system prompt and exports
 // CLAUDE_BUS_AGENT_ROLE so the register hook records it in
 // $CLAUDE_BUS_STATE/agents/comms.json.

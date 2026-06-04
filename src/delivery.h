@@ -175,7 +175,7 @@ class Loop {
   // $STATE/status/<agent>.json (the CTX% source the monitor reads).
   // Offset-based incremental read like scanEvents — only new bytes are
   // parsed. A path change (new session after /clear or /compact) resets
-  // the offset to re-read the fresh transcript. See docs/status-decouple.md.
+  // the offset to re-read the fresh transcript.
   struct TokenScanState {
     std::string path;
     std::int64_t offset{0};
@@ -229,7 +229,7 @@ class Loop {
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;
 
-  // In-tick log retention (roadmap D1+D2; see docs/log-retention.md).
+  // In-tick log retention (roadmap D1+D2).
   // maybeTrimLogs is the rate-limited entry from tick(); it rewrites
   // events.jsonl (advisory tail-preserving) and head-trims topic logs
   // (retention_ms + size cap), rebasing every affected cursor + in-flight

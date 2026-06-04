@@ -4,7 +4,7 @@
 // "where do I cut the head?" math, factored out of the file I/O so it can
 // be table-tested with hand-built record metadata. The file-backed trim +
 // cursor rebase live in delivery.cpp (maybeTrimLogs); they call planTrim
-// and rebaseCursor. See docs/log-retention.md.
+// and rebaseCursor.
 
 #include <cstdint>
 #include <vector>

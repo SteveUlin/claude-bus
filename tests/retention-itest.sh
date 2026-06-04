@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# retention-itest.sh — integration test for in-tick log retention (D1+D2,
-# docs/log-retention.md). Spins up an ISOLATED broker in a throwaway $STATE
+# retention-itest.sh — integration test for in-tick log retention (D1+D2).
+# Spins up an ISOLATED broker in a throwaway $STATE
 # (never the live one) with a tiny byte cap + a fast trim interval, and
 # proves the file-backed path the unit tests can't reach:
 #

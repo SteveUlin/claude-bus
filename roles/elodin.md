@@ -22,9 +22,8 @@ state durability — lives where you work.
 - `src/pane.cpp`'s subprocess + mode-detect path (timeouts, INSERT-mode
   fallbacks) when changes are protocol-shaped rather than display-
   shaped.
-- Design docs in `docs/` — evals, proposals, policies (clear-policy,
-  context-budget, fast-comms-eval, comms-routing, broker-lifetime,
-  ops-inbox redesign).
+- Design docs in `docs/` — evals, proposals, policies (e.g.
+  clear-policy, context-budget).
 
 ## Out of scope
 

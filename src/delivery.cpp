@@ -786,7 +786,7 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   // Mail inbox-ops (auto-creates the topic). The ops inbox carries
   // infrastructure notifications — delivery failures, retry exhaustion,
   // audit escalation — separate from inbox-comms which surfaces real
-  // messages directed at the human. See docs/comms.md.
+  // messages directed at the human.
   auto _ig = registry_.getOrAutoCreate("inbox-ops");
   topic::TopicLog ops_log{cfg_.state_dir + "/topics/inbox-ops.log"};
   topic::SendOpts mopts;
@@ -858,7 +858,7 @@ auto Loop::scanRetries() -> void {
     // trigger: we only advance the deadline clock (`attempts`) here and
     // let the kMaxAttempts branch above escalate to inbox-ops/audit if no
     // ack ever arrives. Deferred deliveries never reach in-flight, so this
-    // loses no legitimate retry. (See docs/dup-delivery-fix.md.)
+    // loses no legitimate retry.
     //
     // tui-commands DO re-dispatch: their in-flight semantics differ (a
     // not-ready slash that never landed should legitimately retry), so
@@ -1570,9 +1570,8 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // a wedged boot — so the old Alive-Ready||Compacting gate never rang it
     // and its first brief stranded until a manual nudge. The pane's INSERT
     // mode disambiguates ready-prompt from wedged-modal; a modal boot stays
-    // excluded so BOOT_STUCK detection is intact. See
-    // docs/fresh-spawn-delivery.md. (Mid-compaction is PreCompact => Working,
-    // still excluded.)
+    // excluded so BOOT_STUCK detection is intact. (Mid-compaction is
+    // PreCompact => Working, still excluded.)
     //
     // Cost discipline (broker-wedge fix): paneStateCached() forks a 5 s-capped
     // `zellij dump-screen` on this single delivery-loop thread, so reading a
@@ -1621,7 +1620,7 @@ auto Loop::maybeWakeIdleOffTty() -> void {
 }
 
 // Token-scan watcher. Replaces the statusline script's data-write side
-// effect (see docs/status-decouple.md). For each live agent, tail its
+// effect. For each live agent, tail its
 // transcript JSONL, compute context occupancy from the last assistant
 // turn's usage, and write $STATE/status/<agent>.json — the CTX% source
 // `bus monitor` reads. Only two fields are consumed downstream
@@ -1731,7 +1730,7 @@ auto Loop::maybeScanTokens() -> void {
   }
 }
 
-// --- Log retention (D1 + D2; see docs/log-retention.md) -----------------
+// --- Log retention (D1 + D2) --------------------------------------------
 
 // Smallest consumer cursor across every $STATE/cursors/<topic>/*.cursor.
 // Returns 0 when no cursor exists (the "nobody has read anything" floor

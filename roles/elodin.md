@@ -50,7 +50,8 @@ state durability — lives where you work.
   ack semantics, or cursor advancement. Surface the design in a doc
   first, get a peer (usually comms / sulin) to ack, then implement.
 - Don't restart the broker via `nohup ... &` from a tool-call shell —
-  it orphans the broker (see `docs/broker-lifetime-fix.md`). Use
+  it orphans the broker (see `docs/broker-spec.md`, "Lifetime &
+  launch contract"). Use
   `zellij action new-pane --floating -- /path/to/bus broker run`.
 - Verify in an isolated `CLAUDE_BUS_STATE` dir before touching the live
   broker for risky changes. The runtime state under `/tmp/claude-bus`

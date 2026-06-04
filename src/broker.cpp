@@ -284,8 +284,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // backgrounded launch had reparented the broker to init and let it
   // survive across zellij restarts. PR_SET_PDEATHSIG is Linux-only;
   // the bus already targets Linux, but the #ifdef keeps the build
-  // clean elsewhere. See docs/broker-lifetime-fix.md for the
-  // diagnosis.
+  // clean elsewhere. See docs/broker-spec.md "Lifetime & launch
+  // contract" for the diagnosis.
 #ifdef PR_SET_PDEATHSIG
   if (::prctl(PR_SET_PDEATHSIG, SIGTERM) < 0) {
     logEvent(cfg.state_dir, "WARN",

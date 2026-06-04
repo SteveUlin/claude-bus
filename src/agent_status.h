@@ -48,7 +48,7 @@ struct AgentInfo {
   // under `state = f(last_event)`. Populated by readAgents via
   // foldTurnState; the timerfd escalation + R1 triage consume them. Part A
   // is additive: computeAxes' axis outputs do NOT yet depend on these (the
-  // wall-clock decouple is Part B). See docs/computeaxes-fold.md.
+  // wall-clock decouple is Part B).
   std::int64_t turn_start_ms{0};       // UserPromptSubmit that began the
                                        // current turn; 0 = no active turn.
   std::string open_tool;               // PreToolUse with no matching

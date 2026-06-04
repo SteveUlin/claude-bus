@@ -9,8 +9,7 @@
 // roles/NAME.md (frontmatter stripped) — the role's own description
 // of territory, in/out-of-scope, etc.
 //
-// Read-only over roles/*.md. Zero risk. See docs/kvothe-ideation.md
-// §2.
+// Read-only over roles/*.md. Zero risk.
 
 #include "../sub.h"
 

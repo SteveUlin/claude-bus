@@ -32,8 +32,7 @@ auto senderFromEnv() -> std::string {
 // 1 hour gives plenty of headroom for legitimate delays (broker
 // restart, idle agent, busy queue) while keeping the long-tail of
 // truly-stale mail self-pruning. Producers can override via --ttl.
-// See docs/elodin-ideation.md §3 + docs/context-budget.md for the
-// reasoning.
+// See docs/context-budget.md for the reasoning.
 constexpr std::int64_t kDefaultMailTtlMs = 60 * 60 * 1000;    // 1 hour
 constexpr std::int64_t kDefaultSlashTtlMs = 60 * 60 * 1000;   // 1 hour
 

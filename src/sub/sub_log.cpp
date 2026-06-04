@@ -2,7 +2,7 @@
 //
 // Colorized lifecycle log. Tails $STATE/events.jsonl and emits one
 // line per fleet-lifecycle transition — replacing the previous
-// `bus topic inbox ops` viewer per docs/ops-inbox-redesign.md.
+// `bus topic inbox ops` viewer.
 //
 // Filter set (everything else dropped):
 //   - SessionStart                                  → "started"

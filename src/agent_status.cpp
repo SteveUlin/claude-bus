@@ -429,10 +429,6 @@ auto readAgents(const std::string& log_path,
   return out;
 }
 
-// readPaneState's body lives as an inline in agent_status.h now —
-// just delegates to pane.h's paneState(). The popen-based version is
-// gone with bin/pane-state.
-
 auto agentColor(std::string_view name) -> std::string_view {
   const char* home = std::getenv("HOME");
   if (home == nullptr) return ansi::kBold;

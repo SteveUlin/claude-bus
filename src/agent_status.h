@@ -215,13 +215,6 @@ auto readAgents(const std::string& log_path,
                 const std::set<std::string>& filter)
     -> std::map<std::string, AgentInfo>;
 
-// readPaneState is a compatibility alias for the in-process paneState()
-// defined in pane.h. Older callers (monitor / agent-bar) kept the
-// `read` prefix; new code should call paneState() directly.
-inline auto readPaneState(const std::string& name) -> PaneState {
-  return paneState(name);
-}
-
 // Per-agent color stored at ~/.cache/claude-bus/agents/NAME.color, one of
 // claude's 8 /color choices. Returns an ANSI bright-color escape, or kBold
 // when the file is missing or holds an unknown value.

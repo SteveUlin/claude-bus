@@ -172,3 +172,24 @@ TEST(trimhead_noop_out_of_range) {
 
   std::remove(path.c_str());
 }
+
+// ── advanceCursorMonotonic (cut #2: the at-least-once invariant) ────────────
+
+// A cursor advances only forward: a backward or equal target is refused, so an
+// out-of-order / duplicate ack can never rewind past already-delivered records.
+TEST(advance_cursor_monotonic_never_rewinds) {
+  const auto path = tmpPath() + ".cursor";
+  std::remove(path.c_str());
+
+  CHECK(topic::writeCursor(path, 100));
+  CHECK(topic::advanceCursorMonotonic(path, 200));  // forward → writes
+  CHECK_EQ(topic::readCursor(path), std::int64_t{200});
+  CHECK(!topic::advanceCursorMonotonic(path, 150));  // backward → refused
+  CHECK_EQ(topic::readCursor(path), std::int64_t{200});
+  CHECK(!topic::advanceCursorMonotonic(path, 200));  // equal → refused (no-op)
+  CHECK_EQ(topic::readCursor(path), std::int64_t{200});
+  CHECK(topic::advanceCursorMonotonic(path, 250));  // forward again → writes
+  CHECK_EQ(topic::readCursor(path), std::int64_t{250});
+
+  std::remove(path.c_str());
+}

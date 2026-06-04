@@ -270,6 +270,16 @@ auto Loop::forgetInflight(const std::string& msg_id)
   return snap;
 }
 
+auto Loop::onAck(const std::string& msg_id, bool write_lastid) -> bool {
+  auto it = in_flight_.find(msg_id);
+  if (it == in_flight_.end()) return false;  // unknown / already acked
+  const auto cursor_p = topic::cursorPath(cfg_.state_dir, it->second.topic, "");
+  topic::advanceCursorMonotonic(cursor_p, it->second.cursor_after);
+  if (write_lastid) topic::writeLastId(topic::lastIdPath(cursor_p), msg_id);
+  forgetInflight(msg_id);  // removes file + erases map + clears blocking-op
+  return true;
+}
+
 auto Loop::noteDrainDelivery(const std::string& msg_id,
                              const std::string& topic,
                              const std::string& agent,
@@ -326,16 +336,11 @@ auto Loop::scanEvents() -> void {
         (event == "SessionEnd" &&
          (ev->reason == "clear" || ev->reason == "compact"));
     if (is_blocking_op_ack && blocking_ops_.contains(agent)) {
-      // The blocking-op msg_id is also tracked as in-flight (the
-      // dispatch wrote it there). Clear both atomically.
-      const auto& msg_id = blocking_ops_.at(agent);
-      if (auto it = in_flight_.find(msg_id); it != in_flight_.end()) {
-        const auto cursor_p =
-            topic::cursorPath(cfg_.state_dir, it->second.topic, "");
-        topic::writeCursor(cursor_p, it->second.cursor_after);
-        removeInflight(msg_id);
-        in_flight_.erase(it);
-      }
+      // The blocking-op msg_id is also tracked as in-flight (the dispatch
+      // wrote it there). onAck advances its cursor + forgets it (forgetInflight
+      // clears the matching blocking-op); clearBlockingOp after covers the case
+      // where the record already left in-flight (onAck no-ops then).
+      onAck(blocking_ops_.at(agent), /*write_lastid=*/false);
       clearBlockingOp(agent);
       continue;
     }
@@ -427,18 +432,10 @@ auto Loop::scanEvents() -> void {
     if (event == "bus-ack") {
       const auto& msg_id = ev->msg_id;  // payload.msg_id, typed by parseEvent
       if (msg_id.empty()) continue;
-      auto it = in_flight_.find(msg_id);
-      if (it == in_flight_.end()) continue;  // unknown / already acked
-      const auto cursor_p =
-          topic::cursorPath(cfg_.state_dir, it->second.topic, "");
-      // Monotonic: never move the cursor backwards (out-of-order or
-      // duplicate bus-ack from a re-delivery).
-      if (topic::readCursor(cursor_p) < it->second.cursor_after) {
-        topic::writeCursor(cursor_p, it->second.cursor_after);
-      }
-      topic::writeLastId(topic::lastIdPath(cursor_p), msg_id);
-      removeInflight(msg_id);
-      in_flight_.erase(it);
+      // Monotonic advance + lastid stamp + forget, all via onAck (the lastid
+      // marker is written at ack-time so a record whose bus-ack never lands
+      // re-drains without being dedup-skipped). No-ops if already acked.
+      onAck(msg_id, /*write_lastid=*/true);
       continue;
     }
 
@@ -466,14 +463,8 @@ auto Loop::scanEvents() -> void {
       }
     }
     if (oldest_id.empty()) continue;
-
-    const auto& f = in_flight_.at(oldest_id);
-    // Advance the topic's default cursor past the acked record.
-    const auto cursor_p =
-        topic::cursorPath(cfg_.state_dir, f.topic, "");
-    topic::writeCursor(cursor_p, f.cursor_after);
-    removeInflight(oldest_id);
-    in_flight_.erase(oldest_id);
+    // Positional ack (TTY agents, no drain hook): advance + forget via onAck.
+    onAck(oldest_id, /*write_lastid=*/false);
   }
   events_offset_ = reader.offset();
 }

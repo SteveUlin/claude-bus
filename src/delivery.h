@@ -248,6 +248,15 @@ class Loop {
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;
+
+  // ACK an in-flight record by id: monotonically advance its topic's default
+  // cursor past the record, optionally stamp the lastid dedup marker, then
+  // forget the in-flight entry (which also clears any matching blocking-op).
+  // The SOLE path that advances a cursor on an ack — the three ack branches in
+  // scanEvents (blocking-op / bus-ack / positional UserPromptSubmit) all route
+  // through here, so "what advances a cursor" is one auditable place.
+  // No-op returning false when msg_id isn't in-flight (already acked / unknown).
+  auto onAck(const std::string& msg_id, bool write_lastid) -> bool;
   auto blockingOpPath(std::string_view agent) const -> std::string;
   auto setBlockingOp(std::string_view agent,
                      std::string_view msg_id) -> void;

@@ -130,6 +130,14 @@ auto parseFrom(std::span<const std::byte> buf, std::int64_t start_offset,
 auto readCursor(const std::string& path) -> std::int64_t;
 auto writeCursor(const std::string& path, std::int64_t offset) -> bool;
 
+// Advance a cursor to `target` ONLY if it moves forward (target > current) —
+// the at-least-once invariant made a one-liner: an out-of-order or duplicate
+// ack must never rewind a cursor past records already delivered. Returns true
+// iff it actually wrote. (Reads the current value, so it costs one extra stat
+// + read; ack paths are low-frequency, so that's fine.)
+auto advanceCursorMonotonic(const std::string& path, std::int64_t target)
+    -> bool;
+
 // Compute the cursor path for a (topic, consumer) pair, rooted at
 // $STATE/cursors/. Consumer "" maps to "_default".
 auto cursorPath(std::string_view state_root, std::string_view topic,

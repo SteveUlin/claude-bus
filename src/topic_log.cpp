@@ -379,6 +379,12 @@ auto writeCursor(const std::string& path, std::int64_t offset) -> bool {
   return ::rename(tmp.c_str(), path.c_str()) == 0;
 }
 
+auto advanceCursorMonotonic(const std::string& path, std::int64_t target)
+    -> bool {
+  if (readCursor(path) >= target) return false;  // never rewind
+  return writeCursor(path, target);
+}
+
 auto lastIdPath(const std::string& cursor_path) -> std::string {
   constexpr std::string_view kSuffix = ".cursor";
   if (cursor_path.size() >= kSuffix.size() &&

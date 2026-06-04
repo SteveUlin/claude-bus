@@ -3,7 +3,7 @@
 #
 # Writes the in-progress task's activeForm (or subject as fallback) to
 # $STATE/focus/$CLAUDE_BUS_AGENT_ID. The bus monitor reads this as the
-# first priority in its FOCUS column (see docs/monitor-focus.md).
+# first priority in its FOCUS column.
 #
 # Three trigger surfaces:
 #

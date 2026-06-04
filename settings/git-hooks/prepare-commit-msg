@@ -4,7 +4,7 @@
 # users (no env var). Makes per-agent authorship visible in jj log,
 # git blame, and GitHub UI — and diagnoses the shared-tree scoop-bundle
 # pattern (a kvothe-titled commit with Co-Authored-By: bast is a clear
-# signal). Per docs/bast-ideation.md §1.
+# signal).
 
 set -uo pipefail
 

@@ -9,7 +9,7 @@
 # numbers are authoritative + live. It writes them to $STATE/statusline/<agent>
 # .json (a NEW file — never $STATE/status, which the broker owns) for the
 # monitor to read the TRUTH: bar = tokens / real window, with 200k as a policy
-# marker, plus an EFFORT column. See docs/monitor-truth.md.
+# marker, plus an EFFORT column.
 #
 # Capture is best-effort and MUST NOT break the render: any failure falls
 # through to delegating the original JSON to sulin's renderer unchanged.

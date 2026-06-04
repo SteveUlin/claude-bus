@@ -5,8 +5,8 @@ goal. Step 2 of the monitor-truth increment (step 1 = the statusline wrapper,
 which moved ctx/window/effort off any pane-read onto a file — DONE,
 live-verified).
 
-Durable anchor (survives /clear). Builds on
-[docs/monitor-truth.md](monitor-truth.md). See [[stop_pane_reading]] memory.
+Durable anchor (survives /clear). Builds on the statusline-wrapper
+increment (step 1, landed). See [[stop_pane_reading]] memory.
 
 ## Goal
 

@@ -99,6 +99,16 @@ class TopicLog {
   // Read all records currently in the log.
   auto dump() const -> bus::Result<std::vector<Message>>;
 
+  // Drop the head of the log up to `cut_offset` (a record boundary, as
+  // returned by retention planning), preserving the file header and splicing
+  // the surviving tail down so it begins right after the header. Atomic
+  // (tmp + rename). Returns the number of bytes dropped (cut_offset - header)
+  // on success, or 0 when the cut is a no-op / out of range (≤ header or ≥ the
+  // file size) — the caller rebases its cursors/in-flight by exactly this
+  // amount. Owning the rewrite here keeps "the bytes and their addressing"
+  // under one owner: no other component sees an offset shift it didn't request.
+  auto trimHead(std::int64_t cut_offset) -> std::int64_t;
+
   // Path to the topic log file.
   auto path() const -> const std::string& { return path_; }
 

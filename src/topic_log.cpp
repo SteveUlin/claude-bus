@@ -318,6 +318,34 @@ auto TopicLog::dump() const -> Result<std::vector<Message>> {
   return peek(static_cast<std::int64_t>(kFileHeaderBytes));
 }
 
+auto TopicLog::trimHead(std::int64_t cut_offset) -> std::int64_t {
+  const auto header = static_cast<std::int64_t>(kFileHeaderBytes);
+  auto buf = readAll(path_);
+  if (!buf) return 0;
+  const auto size = static_cast<std::int64_t>(buf->size());
+  // Out of range / no-op: a cut at or before the header drops nothing; a cut
+  // at or past EOF would drop the whole body (refused — that's not a trim).
+  if (cut_offset <= header || cut_offset >= size) return 0;
+
+  // Splice [0, header) + [cut_offset, size) into a tmp file, atomic-rename.
+  const std::string tmp = path_ + ".trim.tmp";
+  Fd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)};
+  if (!fd.valid()) return 0;
+  const auto* base = reinterpret_cast<const char*>(buf->data());
+  if (::write(fd.get(), base, static_cast<std::size_t>(header)) !=
+      static_cast<ssize_t>(header)) {
+    return 0;
+  }
+  const auto tail = static_cast<std::size_t>(size - cut_offset);
+  if (::write(fd.get(), base + cut_offset, tail) !=
+      static_cast<ssize_t>(tail)) {
+    return 0;
+  }
+  fd.reset();
+  if (::rename(tmp.c_str(), path_.c_str()) != 0) return 0;
+  return cut_offset - header;  // bytes dropped == the offset shift
+}
+
 auto cursorPath(std::string_view state_root, std::string_view topic,
                 std::string_view consumer) -> std::string {
   std::string c{consumer};

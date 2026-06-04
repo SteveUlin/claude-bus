@@ -114,3 +114,61 @@ TEST(parsefrom_empty_or_headerless_buffer) {
   std::vector<std::byte> tiny(10);
   CHECK_EQ(topic::parseFrom(tiny, 0).size(), std::size_t{0});
 }
+
+// ── trimHead (seam cut #1: the Log owns the byte rewrite) ───────────────────
+
+// Trimming the head to a record boundary drops exactly that prefix, returns
+// the byte shift, and leaves the surviving tail records intact + re-addressed
+// from the header (the property the dispatch-loop cursor rebase relies on).
+TEST(trimhead_drops_head_keeps_tail) {
+  const auto path = tmpPath();
+  topic::TopicLog log{path};
+  topic::SendOpts opts;
+  (void)log.append("a", "first", opts);
+  (void)log.append("b", "second", opts);
+  (void)log.append("c", "third", opts);
+
+  auto before = log.dump();
+  CHECK(before.has_value());
+  CHECK_EQ(before->size(), std::size_t{3});
+  const auto cut = (*before)[1].offset;  // drop record 0, keep 1 + 2
+
+  const auto dropped = log.trimHead(cut);
+  CHECK_EQ(dropped, cut - static_cast<std::int64_t>(topic::kFileHeaderBytes));
+
+  auto after = log.dump();
+  CHECK(after.has_value());
+  CHECK_EQ(after->size(), std::size_t{2});
+  CHECK_EQ((*after)[0].body, std::string{"second"});
+  CHECK_EQ((*after)[1].body, std::string{"third"});
+  // The surviving tail is re-addressed from the header — the first kept
+  // record now begins exactly at the header.
+  CHECK_EQ((*after)[0].offset,
+           static_cast<std::int64_t>(topic::kFileHeaderBytes));
+  CHECK_EQ((*after)[0].next_offset, (*after)[1].offset);
+
+  std::remove(path.c_str());
+}
+
+// Out-of-range cuts are no-ops: ≤ header drops nothing, ≥ EOF refuses (never
+// wipes the body). Returns 0 and leaves the file untouched.
+TEST(trimhead_noop_out_of_range) {
+  const auto path = tmpPath();
+  topic::TopicLog log{path};
+  topic::SendOpts opts;
+  (void)log.append("a", "one", opts);
+  (void)log.append("b", "two", opts);
+
+  const auto header = static_cast<std::int64_t>(topic::kFileHeaderBytes);
+  // At/before the header drops nothing; at/past EOF is refused (never wipes
+  // the body). All three return 0.
+  CHECK_EQ(log.trimHead(header), std::int64_t{0});
+  CHECK_EQ(log.trimHead(0), std::int64_t{0});
+  CHECK_EQ(log.trimHead(1'000'000'000), std::int64_t{0});
+
+  auto after = log.dump();
+  CHECK(after.has_value());
+  CHECK_EQ(after->size(), std::size_t{2});  // untouched
+
+  std::remove(path.c_str());
+}

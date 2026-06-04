@@ -96,22 +96,6 @@ auto atomicReplace(const std::string& path, std::string_view content) -> bool {
   return true;
 }
 
-// Byte-slice a topic log's head: keep the 64-byte file header verbatim
-// (preserves created_ms etc.) + every byte at/after cut_offset, preserving
-// record bytes exactly (no re-append / restamp). Returns true on rewrite.
-auto trimTopicLogHead(const std::string& path, std::int64_t cut_offset,
-                      std::int64_t header_bytes) -> bool {
-  const auto bytes = readFileBytes(path);
-  const auto size = static_cast<std::int64_t>(bytes.size());
-  if (cut_offset <= header_bytes || cut_offset >= size) return false;
-  std::string out;
-  out.reserve(static_cast<std::size_t>(header_bytes + (size - cut_offset)));
-  out.append(bytes, 0, static_cast<std::size_t>(header_bytes));
-  out.append(bytes, static_cast<std::size_t>(cut_offset),
-             static_cast<std::size_t>(size - cut_offset));
-  return atomicReplace(path, out);
-}
-
 // Write a small body to a pane, holding the per-pane flock. Returns
 // true on success (mirrors what `bus msg send NAME TEXT` does).
 auto deliverInline(const BrokerConfig& cfg, std::string_view agent,
@@ -1863,15 +1847,16 @@ auto Loop::maybeTrimLogs() -> void {
                             min_cursor, guaranteed);
     if (plan.dropped_bytes <= 0) continue;
 
-    if (!trimTopicLogHead(path, plan.cut_offset, header)) continue;
+    // The Log owns the byte rewrite and REPORTS the exact shift it made.
+    const auto dropped = log.trimHead(plan.cut_offset);
+    if (dropped <= 0) continue;  // no-op / refused — nothing shifted
 
-    // Every absolute offset shifted down by dropped_bytes — rebase cursors
-    // and in-flight trackers for this topic.
-    rebaseTopicCursors(tc.name, plan.dropped_bytes, header);
+    // Every absolute offset shifted down by `dropped` — rebase cursors and
+    // in-flight trackers for this topic against the Log's reported shift.
+    rebaseTopicCursors(tc.name, dropped, header);
     for (auto& [id, f] : in_flight_) {
       if (f.topic != tc.name) continue;
-      f.cursor_after =
-          retention::rebaseCursor(f.cursor_after, plan.dropped_bytes, header);
+      f.cursor_after = retention::rebaseCursor(f.cursor_after, dropped, header);
       writeInflight(f);
     }
 

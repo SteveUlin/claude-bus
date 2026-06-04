@@ -125,8 +125,6 @@ auto enqueueTaskRecord(const std::string& body) -> int {
     mk.insert({"op", json::Value::from("topic_create")});
     mk.insert({"name", json::Value::from(std::string{kTasksTopic})});
     mk.insert({"kind", json::Value::from(std::string{"append-log"})});
-    // Roomy per-record cap: task JSON is small, but titles are free text.
-    mk.insert({"max_record_bytes", json::Value::from(static_cast<std::int64_t>(8192))});
     auto r = rpc::call(cfg.socket_path, json::Value::fromObject(std::move(mk)));
     // Ignore the result: success on first call, "already exists" after.
     // A genuine broker-down failure surfaces on the enqueue below.

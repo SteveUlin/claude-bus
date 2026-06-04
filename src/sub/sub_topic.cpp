@@ -27,7 +27,6 @@ auto printTopic(const json::Value& v) -> void {
   }
   std::println("name:             {}", v.getOrString("name"));
   std::println("kind:             {}", v.getOrString("kind"));
-  std::println("max_record_bytes: {}", v.getOrInt("max_record_bytes"));
   std::println("retention_ms:     {}", v.getOrInt("retention_ms"));
   if (const auto* kc = v.get("kind_config"); kc != nullptr && !kc->isNull()) {
     std::println("kind_config:      {}", json::serialize(*kc));
@@ -97,16 +96,15 @@ auto subTopic(std::span<const char* const> args) -> int {
   }
 
   if (verb == "create") {
-    // bus topic create NAME --kind KIND [--max-bytes N] [--retention-ms N]
+    // bus topic create NAME --kind KIND [--retention-ms N]
     if (args.size() < 2) {
       std::println(stderr,
                    "usage: bus topic create NAME [--kind KIND] "
-                   "[--max-bytes N] [--retention-ms MS]");
+                   "[--retention-ms MS]");
       return 2;
     }
     std::string name{args[1]};
     std::string kind = "work-queue";  // sensible default
-    std::int64_t max_bytes = 4096;
     std::int64_t retention = 0;
     std::string subscribers;  // comma-separated for pubsub kind
 
@@ -115,9 +113,6 @@ auto subTopic(std::span<const char* const> args) -> int {
       if (a == "--kind") {
         if (++i >= args.size()) return 2;
         kind = args[i];
-      } else if (a == "--max-bytes") {
-        if (++i >= args.size()) return 2;
-        max_bytes = std::atoll(args[i]);
       } else if (a == "--retention-ms") {
         if (++i >= args.size()) return 2;
         retention = std::atoll(args[i]);
@@ -134,7 +129,6 @@ auto subTopic(std::span<const char* const> args) -> int {
     m.insert({"op", json::Value::from("topic_create")});
     m.insert({"name", json::Value::from(name)});
     m.insert({"kind", json::Value::from(kind)});
-    m.insert({"max_record_bytes", json::Value::from(max_bytes)});
     m.insert({"retention_ms", json::Value::from(retention)});
 
     // Parse subscribers (pubsub kind) into kind_config.

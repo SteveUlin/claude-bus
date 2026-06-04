@@ -49,7 +49,6 @@ using TopicKindConfig = std::variant<
 struct TopicConfig {
   std::string name;
   std::string kind;
-  std::int64_t max_record_bytes{4096};
   std::int64_t retention_ms{0};  // 0 means unbounded
   json::Value kind_config{json::Value::null_()};
   TopicKindConfig parsed_config;  // free-form per-kind blob

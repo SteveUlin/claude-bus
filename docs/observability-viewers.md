@@ -4,6 +4,23 @@ Author: kvothe · 2026-06-02 · For: auri's max-parallelism observability dispat
 Status: MODEL column committed; P5 verify-viewer (`bus done` + `bus verify`)
 BUILT + committed (95d22533); token-rate column pending elodin's emit on main.
 
+> **STEWARDSHIP UPDATE (kvothe, 2026-06-03)** — reconciling this anchor with
+> landed reality (auri handed me ownership; doc held open while tails close):
+> - **EFFORT is now LIVE, no longer out-of-scope.** The monitor-truth build added
+>   a SECOND producer — a project-scoped statusline WRAPPER that writes
+>   `$STATE/statusline/<agent>.json` with the real per-model window **and live
+>   `.effort.level`**. The EFFORT column shipped (`sub_monitor.cpp`); §Item-1's
+>   "effort — OUT OF SCOPE" below is SUPERSEDED. See [[project-monitor-truth]].
+> - **The producer story is now TWO sources, not one:** (1) statusline-wrapper →
+>   `$STATE/statusline/<agent>.json` = AUTHORITATIVE window + effort; (2) broker
+>   `maybeScanTokens` → `$STATE/status/<agent>.json` = token occupancy + the
+>   FALLBACK window (knob, no effort) when the capture is absent. The
+>   single-producer/ephemeral-consumer invariant still holds PER FILE.
+> - **Still-open tails (why this doc lives):** elodin's `model`+`context_tokens`
+>   emit (post-P2), the optional token-rate column, auri's `bus done` fleet
+>   rollout. Archive/kill when these close or fold into the Phase-2 observability
+>   regeneration.
+
 This doc is the **durable anchor** for the observability viewer work so it
 survives a `/clear` (the #10 lesson: chat-only design evaporates — bast lost
 SEC-1 twice that way). Fresh-me should be able to BUILD from this without the

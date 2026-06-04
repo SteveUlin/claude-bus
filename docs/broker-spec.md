@@ -63,12 +63,28 @@ The fleet default is **off-TTY drain**, not the broker typing into panes:
   inbox records and injects them as Claude Code **`additionalContext`** on the
   next turn.
 - For a **TTY agent** (opt-out of the default), the broker pushes into the pane
-  via `sendToPaneSafe` — the safe write that preserves a human draft and defers
-  on scrolled / locked / modal panes.
+  via `sendToPaneSafe` — the safe write that preserves a human draft, defers on
+  scrolled / locked / modal panes, and **flattens newlines to spaces** before
+  writing (a raw `\n` reads as Enter in the prompt, so a multiline message would
+  submit at its first newline and let a concurrent human typist's keys merge in;
+  claude's prompt never holds a legit buffer `\n` — a soft newline is Shift+Enter
+  at the key layer — so flattening is lossless for input). In practice **`comms`
+  is the lone TTY agent** — the single human-facing opt-out; every other agent is
+  off-TTY. The TTY arm exists precisely for `comms` and must be preserved (never
+  collapse `comms` into the off-TTY arm).
 
 Both paths converge on the same cursor + ack semantics below; they differ only
 in the last-mile actuator. `bus msg send` remains the separate raw-TTY lever and
 is outside this queued path entirely.
+
+**This two-arm model IS the "Transport seam"** (broker-seam-redesign §6) — and
+it stays a documented fork, not a component. The arm selector is `isOffTty`; the
+TTY arm is `deliverInline` → `sendToPaneSafe`; the off-TTY arm is "don't push"
+(the drain RPC pulls); the doorbell is the asleep-off-TTY branch. Those pieces
+are already factored, so wrapping them in a `Transport` class would be ceremony
+over a two-case fork — the seam's collapse-to-if tripwire, deliberately tripped.
+The seam's real value (quarantining the off-TTY-vs-TTY model into one
+authoritative place) is *this section*.
 
 **The doorbell (waking an idle off-TTY agent).** An off-TTY agent only drains on
 a turn boundary, so an *idle* one with queued mail would sit forever. The broker
@@ -143,6 +159,15 @@ one — they cannot rely on an idle 250 ms beat alone.
 The `[bus-attach]` sentinel controls presence: the broker defers ALL records for
 an agent while `$STATE/presence/<agent>` is fresh. The cursor advances in FIFO
 order with no per-record bypass.
+
+All ack-driven cursor advances flow through **one** path — `Loop::onAck` →
+`topic::advanceCursorMonotonic` — which writes the cursor **only forward**, so an
+out-of-order or duplicate ack can never rewind it past already-delivered records.
+The guard covers all three ack arms (blocking-op, bus-ack, positional
+`UserPromptSubmit`); the blocking-op + positional arms were upgraded from
+unconditional writes to monotonic in the `scanEvents`→`onAck` consolidation
+(seam cut #2) — a **deliberate safety hardening**, observably identical on every
+reachable trace (chronicler-verified, zero regressions).
 
 ## Reliability
 

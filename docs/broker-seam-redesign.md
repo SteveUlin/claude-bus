@@ -154,6 +154,19 @@ honest that these two are relabel-risk:
   named place with one arm-selector (`isOffTty`). Acceptance is conditional: if
   the containment doesn't pay off in clarity, it's *tidy-not-simpler* and should
   collapse back to an `if` in Router. Flag this explicitly for the gate.
+  **OUTCOME (2026-06-04, post cut-#2-verdict, tripwire TRIPPED):** examined at
+  the gate, the actuation is ALREADY factored — `deliverInline` (TTY arm),
+  `isOffTty` (selector), the drain RPC (off-TTY arm), `maybeWakeIdleOffTty`
+  (doorbell) — AND already documented (broker-spec §"Delivery model"). A
+  `Transport` class would be ceremony over that existing fork, so the
+  collapse-to-if fires. The seam's value (quarantine the off-TTY/TTY doc-lie)
+  is delivered as DOCUMENTATION, not code: broker-spec §"Delivery model" was
+  tightened with the TTY-arm mechanics (sendToPaneSafe + flock + draft-preserve
+  + newline-flatten), the comms-is-the-lone-TTY-agent invariant, and an explicit
+  "this two-arm model IS the Transport seam, kept as a documented fork" note. The
+  multiline-flatten fix (bd58a1e8) is the TTY arm. No `deliver()` component;
+  the `if (isOffTty) … else deliverInline` model stands, now authoritatively
+  documented.
 
 ## 7. Per-seam discipline (every seam)
 

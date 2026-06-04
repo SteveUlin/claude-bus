@@ -550,7 +550,19 @@ auto paneId(std::string_view name) -> std::string {
 
 auto sendToPane(std::string_view pane_id, std::string_view text) -> bool {
   const std::string pane_s{pane_id};
-  const std::string text_s{text};
+  std::string text_s{text};
+  // Flatten newlines to spaces before writing (comms draft-clobber fix).
+  // Claude's prompt text field never holds a legit '\n' — a soft newline is a
+  // Shift+Enter at the key layer, not a buffer character — so a raw '\n' sent
+  // via write-chars reads as Enter and SUBMITS a multiline message at its first
+  // newline, fragmenting it and letting a concurrent human typist's keystrokes
+  // merge into the fragments (the comms-only symptom: comms is the lone live
+  // TTY-push agent). Treating '\n' as a space lands the whole message as ONE
+  // line + the single trailing Enter (per sulin: newline is never legit input
+  // here). Single-line text is unaffected.
+  for (auto& c : text_s) {
+    if (c == '\n') c = ' ';
+  }
   // write-chars NAMED-PANE TEXT
   if (runSilent({"zellij", "action", "write-chars", "--pane-id",
                  pane_s.c_str(), text_s.c_str()}) != 0) {

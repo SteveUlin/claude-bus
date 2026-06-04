@@ -103,6 +103,15 @@ echo "3. ASSERT exactly-once delivery (a delivered record must not be re-pushed)
 writes=$(grep -c "$PAYLOAD" "$WRITES" || true)
 ck "${writes:-0}" "1" "record pushed to $RCPT EXACTLY once (got $writes; >=2 == the dup bug)"
 
+# The mail payload is multiline (header\nbody); the fix flattens '\n'→space so
+# header + body land on ONE write-chars line + one Enter (a raw \n would submit
+# the header alone and fragment the rest — the comms draft-clobber bug). Assert
+# the payload's write line ALSO carries the header (flattened together, not
+# \n-split onto separate lines).
+flat=$(grep "$PAYLOAD" "$WRITES" | grep -c "bus msg mail from" || true)
+ck "$([ "${flat:-0}" -ge 1 ] && echo flat)" "flat" \
+   "multiline TTY push flattened to one line (header+body together; count=$flat)"
+
 echo "4. ASSERT the no-ack response is ESCALATION, not re-delivery"
 esc_audit=$("$BUS" msg peek audit --limit 100 2>/dev/null | grep -c "delivery exhausted.*agent=$RCPT" || true)
 esc_ops=$("$BUS" msg peek inbox-ops --limit 100 2>/dev/null | grep -c "delivery to $RCPT exhausted" || true)

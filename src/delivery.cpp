@@ -1024,6 +1024,16 @@ auto Loop::maybeEscalateStuck() -> void {
 // from the doc is automatically satisfied by the idle threshold —
 // no separate check needed.
 auto Loop::maybeAutoClear() -> void {
+  // When the recovery engine is in soft/on mode it OWNS idle-context clearing
+  // (R1, through the breaker/backoff ledger) — stand aside so the agent isn't
+  // cleared twice. In observe/off mode (the default) this standalone loop stays
+  // the actor, so the default config keeps its exact behavior. See
+  // docs/broker-auto-recovery.md §8.
+  if (const char* m = std::getenv("CLAUDE_BUS_AUTO_RECOVERY"); m != nullptr) {
+    const std::string_view mode{m};
+    if (mode == "soft" || mode == "on") return;
+  }
+
   const auto now = nowMs();
   if (now - auto_clear_last_scan_ms_ < 30'000) return;  // every 30 s
   auto_clear_last_scan_ms_ = now;
@@ -1191,6 +1201,12 @@ auto Loop::maybeAutoRecover() -> void {
                                ? mode_env
                                : "observe";
   if (mode == "off" || mode == "0") return;
+  // "soft" enables the non-destructive rows (R1 clear); "on" additionally
+  // arms relaunch (Phase C). "observe" (default) only logs would-recover and
+  // leaves the standalone loops (maybeAutoClear / doorbell) as the actors —
+  // so the default config has ZERO behavior change. See §8.
+  const bool acting = (mode == "soft" || mode == "on");
+  const auto rec_th = recoveryThresholds();
 
   const auto now = nowMs();
   if (now - auto_recover_last_scan_ms_ < 30'000) return;  // every 30 s
@@ -1271,6 +1287,50 @@ auto Loop::maybeAutoRecover() -> void {
         opts);
   };
 
+  // R1 ACT (soft/on mode): the engine OWNS idle-context clearing, superseding
+  // maybeAutoClear (which steps aside at mode≥soft). Gate on the ledger's
+  // per-signature backoff, enqueue /clear to commands-<agent> exactly as
+  // maybeAutoClear did, then record the fire so backoff arms + persists.
+  // Uses the MONOTONIC clock (the ledger's clock). Returns true if it cleared.
+  auto recoverClear = [&](const std::string& agent,
+                          const std::string& signals) -> bool {
+    auto& led = recovery_[agent];
+    if (led.boot_id.empty()) led.boot_id = readBootId();
+    if (!recoveryDecide(led, "idle-context", RecoveryAction::Clear, mono,
+                        rec_th)
+             .allow) {
+      return false;  // backoff — too soon since the last clear
+    }
+    const auto commands_topic = "commands-" + agent;
+    if (auto cr = registry_.getOrAutoCreate(commands_topic); !cr) return false;
+    topic::TopicLog cmd_log{cfg_.state_dir + "/topics/" + commands_topic +
+                            ".log"};
+    topic::SendOpts opts;
+    opts.protocol = "auto-recover-clear";
+    opts.deliver_when = 1;  // idle
+    stampEpoch(opts, current_epoch_);
+    auto _ig = cmd_log.append("broker", "/clear", opts);
+    recoveryRecord(led, "idle-context", RecoveryAction::Clear, mono, rec_th);
+    saveRecovery(agent);
+    // Audit the acted recovery (protocol=recover) — the same place the human
+    // sees delivery failures + would-recover rows.
+    TopicConfig audit;
+    audit.name = "audit";
+    audit.kind = std::string{kKindAppendLog};
+    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
+    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
+    topic::SendOpts a;
+    a.protocol = "recover";
+    stampEpoch(a, current_epoch_);
+    auto _ = audit_log.append(
+        "broker",
+        std::format("recover agent={} signature=idle-context action=clear "
+                    "signals=[{}]",
+                    agent, signals),
+        a);
+    return true;
+  };
+
   // Inbox-pending probe (a head record exists past the cursor).
   auto inboxPending = [&](const std::string& agent) -> bool {
     const auto cursor_p =
@@ -1313,18 +1373,30 @@ auto Loop::maybeAutoRecover() -> void {
     const bool transcript_stale =
         transcript_age >= 0 && transcript_age > wedge_budget;
 
-    // R1 idle-context → clear (already acted by maybeAutoClear; logged here
-    // for table completeness so the would-recover stream is whole).
+    // R1 idle-context → clear. comms/primary are excluded exactly as
+    // maybeAutoClear excluded them (high cross-thread continuity — clear only
+    // on human cue; see clear-policy.md §6). In observe mode this logs what it
+    // WOULD do (maybeAutoClear still acts); in soft/on mode the engine acts
+    // through the breaker/backoff ledger and maybeAutoClear steps aside.
+    static const std::set<std::string> kClearSkip{"comms", "primary"};
     if (ax.turn == TurnAxis::Ready && !pending && !has_in_flight &&
         info.last.event == "Stop" &&
-        (now - info.last.ts_ms) >= idle_clear_ms) {
-      logWould(name, "idle-context", "clear",
-               std::format("idle_min={},inbox=empty,in_flight=0",
-                           (now - info.last.ts_ms) / 60'000));
+        (now - info.last.ts_ms) >= idle_clear_ms &&
+        !kClearSkip.contains(name)) {
+      const std::string signals =
+          std::format("idle_min={},inbox=empty,in_flight=0",
+                      (now - info.last.ts_ms) / 60'000);
+      if (!acting || !recoverClear(name, signals)) {
+        // observe mode, or backoff blocked the act → log the intent.
+        logWould(name, "idle-context", "clear", signals);
+      }
     }
 
-    // R2 relaunch-idle → nudge: at a ready prompt with queued mail not
-    // draining (the doorbell's condition, surfaced as a recovery row).
+    // R2 relaunch-idle → nudge: at a ready prompt with queued mail. This is
+    // the DELIVERY doorbell's exact condition (maybeWakeIdleOffTty), which
+    // already acts and is NOT mode-gated — so the engine only LOGS here (acting
+    // would double-wake). The doorbell owns this action; the row stays for a
+    // whole would-recover stream.
     if (ax.turn == TurnAxis::Ready && pending) {
       logWould(name, "relaunch-idle", "nudge",
                std::format("turn=ready,mail=pending,in_flight={}",
@@ -1332,7 +1404,12 @@ auto Loop::maybeAutoRecover() -> void {
     }
 
     // R3 hung-turn → nudge: an OPEN turn past 2x budget with no transcript
-    // progress (fork-free — event + transcript signals only).
+    // progress (fork-free — event + transcript signals only). OBSERVE-ONLY even
+    // in soft mode: a nudge here injects into a MID-TURN pane, which is the
+    // mid-stream-dropped-turn failure (the streamed text finishes but planned
+    // tool calls are dropped). Escalation (maybeEscalateStuck) and relaunch
+    // (Phase C, through the breaker) are the safe responses to a hung turn, not
+    // a nudge — so this row logs intent and never acts.
     if (info.turn_start_ms > 0 &&
         (now - info.turn_start_ms) > 2 * stuck_budget && transcript_stale) {
       logWould(name, "hung-turn", "nudge",

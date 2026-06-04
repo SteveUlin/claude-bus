@@ -116,6 +116,22 @@ cache_dir="$HOME/.cache/claude-bus/agents"
 color_file="$cache_dir/$name.color"
 mkdir -p "$cache_dir"
 
+# Bus state root — mirrors src/state_paths.h::stateRoot() (KEEP IN SYNC). The
+# `bus recover` verb + the broker breaker read these same paths, so resolving
+# here by the identical 4-branch rule makes the recovery sentinel + pidfile
+# agree with every C++ reader by construction. Inline (not `bus state-root`) so
+# it works during bootstrap — before the drift-rebuild below may refresh bin/bus.
+if [ -n "${CLAUDE_BUS_STATE:-}" ]; then STATE_ROOT="$CLAUDE_BUS_STATE"
+elif [ -n "${XDG_STATE_HOME:-}" ]; then STATE_ROOT="$XDG_STATE_HOME/claude-bus"
+elif [ -n "${HOME:-}" ]; then STATE_ROOT="$HOME/.local/state/claude-bus"
+else STATE_ROOT="/tmp/claude-bus"; fi
+mkdir -p "$STATE_ROOT/recovery" "$STATE_ROOT/pids" 2>/dev/null || true
+# A fresh, INTENDED launch clears the down-sentinel (docs/bus-recover.md §5.1):
+# fleet.kdl's respawn-loop breaks while this file exists, so a human relaunch /
+# spawn / `bus recover` must remove it to resume auto-respawn after a breaker
+# opened (or a deliberate despawn). Clearing on every launch = "intended up".
+rm -f "$STATE_ROOT/recovery/$name.down"
+
 # The repo the agent WORKS in. Defaults to BUS_ROOT (claude-bus) — unchanged
 # for the existing fleet. With --project-dir it's a second repo (e.g. ~/taro);
 # the agent gets its workspace + cwd there but remains a claude-bus citizen
@@ -501,6 +517,15 @@ case "$profile" in
         claude_effort_flag=() ;;
 esac
 claude_cmd=(claude --name "$name" "${claude_flag[@]}" "${claude_role_flag[@]}" "${claude_effort_flag[@]}" "${bypass_flag[@]}" "${perm_flag[@]}")
+
+# Record claude's PID for `bus recover` (deterministic — no pgrep heuristic).
+# The non-caged `exec "${claude_cmd[@]}"` below keeps THIS shell's PID ($$) as
+# claude's PID (exec replaces the process image in place). The caged systemd-run
+# path forks a transient scope, so $$ is the launcher's PID there — `bus recover`
+# falls back to pgrep "claude --name <name>" when the pidfile PID isn't a live
+# match (the cage stays dormant until the NixOS module lands, so the common path
+# is exact). Written here, just before the exec, so it reflects the live process.
+printf '%s\n' "$$" > "$STATE_ROOT/pids/$name" 2>/dev/null || true
 
 if [ -n "$netns" ] && [ -e "/run/netns/$netns" ]; then
     # Cage present (NixOS module applied). Enter the netns via PID 1, then DROP

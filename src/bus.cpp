@@ -33,6 +33,7 @@ const Subcommand kSubcommands[] = {
     {"despawn", subDespawn,
      "tear down a dynamic peer: prune its registry entry + close its tab"},
     {"state", subState, "broker's view of agent lifecycle"},
+    {"state-root", subStateRoot, "print the resolved bus state dir (state_paths.h)"},
     {"task", subTask, "set an agent's monitor TASK column: task set AGENT \"<action>\""},
     {"tasks", subTasks, "fleet task model: per-task owner/state/done + owner-liveness overlay"},
     {"topic", subTopic, "topic registry: create / list / show / inbox"},

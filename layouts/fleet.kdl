@@ -112,7 +112,7 @@ layout {
                 // and CLAUDE_BUS_AGENT_SESSION reach the agent-register
                 // hook.
                 pane name="comms" size="55%" command="bash" {
-                    args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role comms comms"
+                    args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; S=$(\"$B/bin/bus\" state-root 2>/dev/null) || S=${CLAUDE_BUS_STATE:-$HOME/.local/state/claude-bus}; while :; do ( exec \"$B/bin/agent-launch\" --role comms comms ); [ -e \"$S/recovery/comms.down\" ] && break; sleep 2; done"
                 }
                 // Right column: task viewer + jj-log stacked. alt+↑/↓
                 // toggles between them; only one is expanded at a time.
@@ -149,7 +149,7 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar bast; printf '\\033[1;31m[bast-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
         pane name="bast" command="bash" {
-            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role bast bast"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; S=$(\"$B/bin/bus\" state-root 2>/dev/null) || S=${CLAUDE_BUS_STATE:-$HOME/.local/state/claude-bus}; while :; do ( exec \"$B/bin/agent-launch\" --role bast bast ); [ -e \"$S/recovery/bast.down\" ] && break; sleep 2; done"
         }
     }
 
@@ -158,7 +158,7 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar kvothe; printf '\\033[1;31m[kvothe-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
         pane name="kvothe" command="bash" {
-            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role kvothe kvothe"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; S=$(\"$B/bin/bus\" state-root 2>/dev/null) || S=${CLAUDE_BUS_STATE:-$HOME/.local/state/claude-bus}; while :; do ( exec \"$B/bin/agent-launch\" --role kvothe kvothe ); [ -e \"$S/recovery/kvothe.down\" ] && break; sleep 2; done"
         }
     }
 
@@ -167,7 +167,7 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar elodin; printf '\\033[1;31m[elodin-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
         pane name="elodin" command="bash" {
-            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role elodin elodin"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coder CLAUDE_BUS_AGENT_SESSION=fleet; S=$(\"$B/bin/bus\" state-root 2>/dev/null) || S=${CLAUDE_BUS_STATE:-$HOME/.local/state/claude-bus}; while :; do ( exec \"$B/bin/agent-launch\" --role elodin elodin ); [ -e \"$S/recovery/elodin.down\" ] && break; sleep 2; done"
         }
     }
 
@@ -181,7 +181,7 @@ layout {
             args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; trap 'exit 0' INT; while :; do \"$B/bin/bus\" agent-bar auri; printf '\\033[1;31m[auri-bar exited rc=%d -- restarting in 2s]\\033[0m' \"$?\"; sleep 2; done"
         }
         pane name="auri" command="bash" {
-            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; exec \"$B/bin/agent-launch\" --role auri auri"
+            args "-c" "B=${CLAUDE_BUS_ROOT:-$PWD}; cd \"$B\"; export CLAUDE_BUS_AGENT_KIND=coordinator CLAUDE_BUS_AGENT_SESSION=fleet; S=$(\"$B/bin/bus\" state-root 2>/dev/null) || S=${CLAUDE_BUS_STATE:-$HOME/.local/state/claude-bus}; while :; do ( exec \"$B/bin/agent-launch\" --role auri auri ); [ -e \"$S/recovery/auri.down\" ] && break; sleep 2; done"
         }
     }
 }

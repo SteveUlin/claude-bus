@@ -11,6 +11,7 @@ namespace bus {
 // Built-in meta subcommands (defined in src/sub/sub_meta.cpp).
 auto subHelp(std::span<const char* const>) -> int;
 auto subVersion(std::span<const char* const>) -> int;
+auto subStateRoot(std::span<const char* const>) -> int;
 
 // Pane helpers (defined in src/sub/sub_pane.cpp).
 auto subPaneId(std::span<const char* const>) -> int;

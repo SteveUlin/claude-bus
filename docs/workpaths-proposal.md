@@ -190,7 +190,7 @@ fragility.*
   before it lands. Safety rail for automation.
 - **Shared blackboard as boot-memory** — promote the blackboard kind to a typed
   "decisions / what-we-learned" store every (re)launched agent reads on boot
-  (CrewAI-style shared memory).
+  (CrewAI-style shared memory; feeds the O2 learnings ladder).
 - **Verify-and-converge reviewer role** — on task completion auto-route the diff
   to a reviewer; mark done only on approval. A quality gate that's a natural
   consumer of the tracker + request/reply.

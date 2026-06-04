@@ -80,7 +80,11 @@ orchestration/learning capabilities that the substrate now unlocks.
 | ID | Project/Task | Scope | Depends-on | Effort | Payoff | Lane |
 |----|--------------|-------|------------|--------|--------|------|
 | O1 | Gather/join barrier on the `correlation` field | `topic_log.h:61` `correlation` (u128) is read by nothing. Add a `results-<corr>` topic + a gather-complete-on-quorum/timeout primitive. Keystone for map-reduce + judge panels. | D8, R4 | high | very-high | bast |
-| O6 | Specialist long-lived roles (supervisor / judge) | No such roles exist. Judge backs verify-and-converge; supervisor coordinates long-lived orchestration over the gather barrier. | O1 | med | high | bast |
+| O2 | Reflection → per-agent `learnings.md` (write side) | Read path (inject-learnings.sh) landed; the distillation side is missing. A `claude -p` reflector over transcripts (or broker-drained continuous capture), with a co-designed prune/consolidate path. | — | med | high | bast |
+| O3 | Promotion ladder: episodic → learnings → roles → CLAUDE.md | Read path exists; add the recurrence+survival promotion mechanism that accretes durable lessons upward. | O2 | low | high | bast |
+| O4 | `bus learnings append` write verb | A model-driven verb to commit a lesson at the moment of insight. | O2 | low | med | bast |
+| O5 | Wire the inert PreCompact hook to checkpoint | PreCompact slot exists but is inert; snapshot episodic detail to a file before compaction (the moment richest in context). Feeds O2. | — | low | med | bast |
+| O6 | Specialist long-lived roles (supervisor / judge / librarian) | No such roles exist. Librarian unifies reflection + cross-agent promotion + novel-failure triage; judge backs verify-and-converge. | O1, O2 | med | high | bast |
 | O7 | Typed-completion pipeline gate (`deliver_after=<corr>`) | Broker releases stage B on observing A's `Stop` for a correlation — a robust stage-gate. | D8, O1 | med | high | bast |
 | O8 | Judge-panel / verify-and-converge over panes | Orchestration reusing broadcast + inbox + mail, gated on the gather barrier. | O1, O6 | med | high | bast |
 
@@ -117,7 +121,10 @@ The dependency spine runs through **identity → exactness → the join barrier*
    field). O1 is the keystone: it unblocks O7 (pipeline gate), O8 (judge panel),
    and the judge/supervisor specialist roles in O6.
 
-5. **C4** (off-TTY/doorbell verification) gates D5 and R7; run it early since
+5. The learning ladder (**O2 → O3 → O4**, fed by O5) is independent of the
+   delivery spine and can run in parallel on the `bast` lane.
+
+6. **C4** (off-TTY/doorbell verification) gates D5 and R7; run it early since
    off-TTY is the fleet's default delivery path and an unverified default is the
    highest-blast-radius gap. **D1/D2** (log rotation, retention) are independent,
    low-effort latency wins — schedule them whenever a lane has slack.

@@ -35,7 +35,7 @@ Loop along the seams three independent analyses all found.
 | **Log** | durable bytes + cursor + epoch; **retention/trim math** | append; peek/dump; cursor read/advance; trimHead | — |
 | **Router** | in-flight + gate stack + **ack-deadline** (retry == the deadline) | `tick()`→≤1 gated record/inbox via Transport; `onAck(msgId)`→cursor advance + in-flight clear; `drain(agent)`; `drop(msgId)`; `nextDeadlineMs()` | Log, Transport, Readers |
 | **Transport** | last-mile actuator | `deliver(record)`→{Delivered\|Deferred} | — |
-| **Readers** | recomputable caches only (no authority) | snapshot for Router gates + viewers | Log |
+| **Readers** | pure derivations only — no authority, no caches (pane caches stay in the loop plane; `PaneState` is injected) | snapshot for Router gates + viewers | Log |
 | **Policy** | autonomous-actor decisions + own cooldowns | reads a Readers snapshot, enqueues actions **through Router** | Router, Readers |
 | **Daemon** | OS resources + wiring loop; **no message state** | `run()`; `serve(req)`; `arm(nextDeadline)` | Router, Readers |
 
@@ -48,9 +48,20 @@ Loop along the seams three independent analyses all found.
   `deliver()`'s asleep-recipient branch. `tty_policy.h isOffTty` selects the arm.
 - **Readers** consolidates the derivation core (`parseEvent`/`readAgents`/
   `computeAxes`/`computeState`/`foldTurnState`), token-scan (EVICTED from the
-  tick where it never belonged), trigger_feed, task_model, `verify`, the one
-  remaining pane read, presence. It owns **no mutable authority** — every output
-  reconstructs from `events.jsonl` + pane dumps, so losing a cache costs nothing.
+  tick where it never belonged), trigger_feed, task_model, `verify`. It owns
+  **no mutable authority** — every output reconstructs from `events.jsonl` + an
+  **injected `PaneState` value**, so losing a cache costs nothing.
+  **Pane acquisition stays OUT (kvothe's value-boundary correction).** The
+  pane-dump fetch and its two process-static TTL caches (`paneStateCached`,
+  `listPanesJsonCached`) are lock-free ONLY because the single loop thread owns
+  them; pulling them into Readers would re-introduce a shared mutable field and
+  break the no-authority invariant on day one. So pane acquisition + its caches
+  live in the **loop/Daemon plane** (where the single-thread safety already
+  holds); Readers consumes `PaneState` as a value parameter, exactly as
+  `wakeReadyForMail(…, const PaneState*)` does today. The derivation core
+  already never calls `paneState()` internally — every `paneStateCached` call
+  site is in broker/delivery/dispatch, never the core — so this boundary
+  already exists in the code; drawing it explicitly costs nothing.
 - **Policy** is where future coordination patterns plug in WITHOUT touching the
   kernel — *a coordination pattern is a Policy actor*. The recovery signature
   table (`maybeAutoRecover` / P2) is the first Policy actor.
@@ -113,15 +124,29 @@ cuts touch, so finishing P2 before the cuts avoids a self-collision.
 auri: *the doc PROPOSES their shape; code waits for the gate.* The artifact is
 honest that these two are relabel-risk:
 
-- **Readers megafold (HONEST RISK):** a ~1/7-of-the-system fold concentrated in
-  one box is *the same god-object risk relocated to the read plane* — it passes
-  ONLY because it holds no mutable authority. **Proposed shape:** keep Readers a
-  *namespace of pure functions over (events.jsonl, pane dumps)*, NOT a stateful
-  class — the no-authority property is the load-bearing invariant, so enforce it
-  structurally (free functions + value snapshots, no shared mutable field). If
-  it grows a mutable field, the seam has failed and should re-split. Internal
-  sub-seams (derivation core vs token-scan vs trigger/task vs verify) are the
-  part that waits on sulin's scope call.
+- **Readers megafold (risk RESOLVED by kvothe, the Readers owner):** the
+  honest-risk framing said a ~1/7 fold in one box is the god-object risk
+  relocated to the read plane. kvothe verified it **evaporates once pane
+  acquisition is drawn out** (§2): the only stateful part (pane.cpp's two
+  process-static TTL caches) was never in the box once Readers consumes
+  `PaneState` as an injected value. What remains is **four already-separate,
+  already-unit-tested pure TUs** (agent_status/derivation, trigger_feed,
+  task_model, verify) sharing only the `(events.jsonl + injected snapshot) →
+  value` contract — `test_fold`/`test_agent_status`/`test_readiness` exist
+  *today*, broker-free, which is the litmus already passed. Nothing to fuse ⟹
+  no god-object **by construction**. **Proposed shape:** keep them sibling
+  free-function TUs under a `bus::readers` namespace — the component is
+  *conceptual*, NOT one class/file; the no-authority property is structural
+  (free fns + value snapshots, no shared mutable field). If any reader grows a
+  mutable field, the seam has failed and should re-split. **Internal sub-seam
+  fault-lines (kvothe's owner view, offered for sulin's scope call):**
+  derivation core (event→AgentInfo→axes/state) is one tight pure cluster —
+  leave whole; `task_model` (readTasks + buildTaskGraph over done/triggers/
+  tasks-topic) is the cleanest standalone, own tests; `verify` is a one-shot
+  claimed-vs-present reader, standalone; **token-scan** is shrinking post
+  monitor-truth (tokens now arrive via the statusline-wrapper → `$STATE` file),
+  so its future is a *thin `$STATE` reader*, not a heavy transcript scan — the
+  tick-eviction stands.
 - **Transport thin-fork (HONEST RISK):** the off-TTY arm is *nearly vacuous*
   (the hook pulls), so a Transport component is "ceremony over a two-case fork."
   **Proposed shape:** accept the interface anyway for ONE reason — it quarantines

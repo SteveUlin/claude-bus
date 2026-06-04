@@ -27,6 +27,7 @@
 
 #include "broker.h"
 #include "json_min.h"
+#include "recovery.h"
 #include "topic_log.h"
 #include "topic_registry.h"
 
@@ -77,38 +78,9 @@ struct InFlight {
 auto ackTimeoutMs() -> std::int64_t;
 constexpr std::int32_t kMaxAttempts = 3;
 
-// ── P2 auto-recovery ledger (docs/broker-auto-recovery.md §6.1, §7) ──────
-// Per-agent recovery state, persisted to $STATE/recovery/<agent>.json so the
-// breaker survives a broker restart (a crash-looping agent that bounced the
-// broker must NOT get a fresh MaxR budget). ALL timestamps are MONOTONIC ms
-// (steady_clock == CLOCK_MONOTONIC on Linux): continuous across same-boot
-// processes (restart preserves the windows), reset on reboot via the boot_id
-// tag (mismatch → clear). Never wall-clock — a suspend/resume jump must not
-// perturb the breaker.
-enum class BreakerState { Closed, Open, HalfOpen };
-
-// Per-signature exponential-backoff state (one row × one agent).
-struct RecoverySig {
-  std::int64_t last_fired_mono_ms{0};
-  std::int32_t attempts{0};
-  std::int64_t backoff_until_mono_ms{0};
-};
-
-struct RecoveryLedger {
-  std::string boot_id;                          // boot this state belongs to
-  std::map<std::string, RecoverySig> sigs;      // keyed by signature id
-  std::vector<std::int64_t> relaunch_mono_ms;   // MaxR/MaxT rolling window
-  BreakerState breaker{BreakerState::Closed};
-  std::int64_t open_until_mono_ms{0};           // half-open probe gate
-};
-
-// Monotonic now (ms) — steady_clock, suspend-immune ordering for the engine.
-auto nowMonoMs() -> std::int64_t;
-// Current boot's UUID (/proc/sys/kernel/random/boot_id); "" if unreadable.
-auto readBootId() -> std::string;
-// Ledger <-> JSON (module-level; persistence roundtrips through these).
-auto ledgerToJson(const RecoveryLedger& l) -> json::Value;
-auto ledgerFromJson(const json::Value& v) -> RecoveryLedger;
+// P2 auto-recovery ledger + breaker/backoff guards live in recovery.h (a pure,
+// unit-testable unit). The Loop's I/O wrappers (loadRecovery/saveRecovery, the
+// recovery_ member) below consume those types.
 
 class Loop {
  public:

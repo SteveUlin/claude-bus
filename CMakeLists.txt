@@ -21,6 +21,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 add_library(bus_core STATIC
     src/event.cpp
     src/json_min.cpp
+    src/recovery.cpp
     src/topic_log.cpp
 )
 target_include_directories(bus_core PUBLIC src)
@@ -111,6 +112,7 @@ add_executable(bus_tests
     tests/unit/test_retention.cpp
     tests/unit/test_topic_registry.cpp
     tests/unit/test_task_graph.cpp
+    tests/unit/test_recovery.cpp
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)

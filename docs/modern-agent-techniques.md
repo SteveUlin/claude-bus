@@ -1,5 +1,12 @@
 # Modern Agent Engineering — A Reference for claude-bus
 
+> **FROZEN — pre-refactor research (Phase-4 doc cleanup, 2026-06-03).**
+> Broad prior-art survey, cited by-section across the frozen `deep/`
+> references. Retained with that corpus rather than folded into
+> `docs/prior-art.md` (folding would orphan those citations); re-evaluated
+> after the broker-seam refactor (Phase 2) lands. Historical context, not
+> current truth.
+
 > Written 2026-05-28. A learning artifact and a backlog. Every technique leads
 > with the **principle** (the mechanism, the tradeoff, the design pressure),
 > then the concrete mapping to claude-bus. Read it for the *why*; the *what to

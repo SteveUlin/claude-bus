@@ -1,5 +1,12 @@
 # Observability research — per-agent tracking + orchestrator docs
 
+> **FROZEN — pre-refactor research (Phase-4 doc cleanup, 2026-06-03).**
+> Broad prior-art survey, cited by-section across the frozen `deep/`
+> references. Retained with that corpus rather than folded into
+> `docs/prior-art.md` (folding would orphan those citations); re-evaluated
+> after the broker-seam refactor (Phase 2) lands. Historical context, not
+> current truth.
+
 Author: elodin · 2026-05-27 · For: comms / sulin
 Status: research only; no implementation. Pick a design after reading.
 

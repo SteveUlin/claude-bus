@@ -1,5 +1,12 @@
 # Delivery alternatives — push vs Monitor vs /loop vs hybrid
 
+> **FROZEN — pre-refactor research (Phase-4 doc cleanup, 2026-06-03).**
+> Broad prior-art survey, cited by-section across the frozen `deep/`
+> references. Retained with that corpus rather than folded into
+> `docs/prior-art.md` (folding would orphan those citations); re-evaluated
+> after the broker-seam refactor (Phase 2) lands. Historical context, not
+> current truth.
+
 Author: elodin · For: auri / sulin · Status: proposal, no code yet.
 
 Today's broker delivers mail by typing into the recipient agent's TTY: dispatch reads pane state, the broker's `sendToPaneSafe` writes the formatted record into the claude TUI's input buffer, presses Enter, the model wakes on a fresh UserPromptSubmit, broker observes the UPS event and acks the record. That path is simple in concept but has been the source of every delivery bug we've debugged this session: focus contention, mid-stream drops, `detectMode` brittleness, the wedge-from-slow-zellij, `mode=unknown` false-positive defers. Each fix has narrowed the failure mode without dismantling the underlying physical mechanism (typing into a shared TTY).

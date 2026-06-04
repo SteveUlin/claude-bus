@@ -4,6 +4,7 @@
 #include "build_info.h"
 #include "delivery.h"
 #include "json_min.h"
+#include "pane.h"  // paneState() — was transitive via agent_status.h.
 #include "rpc.h"
 #include "state_paths.h"
 #include "topic_log.h"

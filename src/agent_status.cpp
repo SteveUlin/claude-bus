@@ -1,7 +1,7 @@
 #include "agent_status.h"
 
 #include "event.h"
-#include "pane.h"
+#include "pane_state.h"  // PaneState value only — no acquisition in the core.
 #include "state_paths.h"
 
 #include <sys/stat.h>

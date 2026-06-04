@@ -10,7 +10,8 @@
 
 #pragma once
 
-#include "pane.h"  // PaneState struct + paneState() live here now.
+#include "pane_state.h"  // PaneState VALUE only — Readers never acquire a
+                         // pane; the snapshot is injected (broker-seam §2).
 
 #include <cstdint>
 #include <map>

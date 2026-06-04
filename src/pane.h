@@ -10,6 +10,8 @@
 // `bus pane-state`, `bus msg send` subcommands are thin CLI shells around
 // these.
 
+#include "pane_state.h"  // PaneState (value type) — acquisition added below.
+
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -74,19 +76,9 @@ auto sendToPaneSafe(std::string_view agent_name,
 // presses (normalize via Esc Esc + i, etc.). Returns true on success.
 auto sendKey(std::string_view pane_id, std::string_view key) -> bool;
 
-// State of a Claude Code TUI pane derived from
-// `zellij action dump-screen --ansi`. All fields are best-effort:
-// `ok=false` means the dump failed (pane gone, zellij absent, etc.);
-// empty strings on individual fields are the wire-level "(empty)"
-// sentinel from the pane parser.
-struct PaneState {
-  bool ok{false};
-  std::string mode;          // INSERT / NORMAL / VISUAL / LOCKED / unknown
-  std::string buffer;        // typed input; "(empty)" when blank
-  std::string suggestion;    // ghost autocomplete; "(none)" when blank
-  std::string bypass_perms;  // "on" / "off" / "" (unknown)
-};
-
+// PaneState (the value type) lives in pane_state.h so the Readers seam can
+// consume a snapshot without seeing the acquisition API below. pane.h is the
+// loop/Daemon-plane header: it adds the fetch + actuators on top of the struct.
 auto paneState(std::string_view name) -> PaneState;
 
 // Per-name TTL cache over paneState (roadmap 1.1 — the broker-wedge fix).

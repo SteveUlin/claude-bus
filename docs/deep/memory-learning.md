@@ -1,5 +1,11 @@
 # Long-Running Agents That Learn Over Time — A Deep Reference for claude-bus
 
+> **FROZEN — pre-refactor archaeology (Phase-4 doc cleanup, 2026-06-03).**
+> Documents the pre-shatter `delivery::Loop` architecture. Not maintained
+> through the broker-seam refactor (`docs/broker-seam-redesign.md`); a lean set
+> mapped to Log / Router / Transport / Readers is regenerated after Phase 2
+> lands. Historical context, not current truth.
+
 > Written 2026-05-28. The deep companion to `docs/modern-agent-techniques.md` §3.2,
 > for one topic only: **how a durable, pane-backed agent accumulates competence a
 > headless fan-out structurally cannot.** Principle-first: every technique leads

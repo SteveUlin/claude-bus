@@ -1,5 +1,11 @@
 # Communication Patterns & Resiliency — A Deep Reference for claude-bus
 
+> **FROZEN — pre-refactor archaeology (Phase-4 doc cleanup, 2026-06-03).**
+> Documents the pre-shatter `delivery::Loop` architecture. Not maintained
+> through the broker-seam refactor (`docs/broker-seam-redesign.md`); a lean set
+> mapped to Log / Router / Transport / Readers is regenerated after Phase 2
+> lands. Historical context, not current truth.
+
 > Written 2026-05-28. The deep companion to `docs/modern-agent-techniques.md`,
 > scoped to **one topic: how agents talk and how that conversation survives
 > failure.** Every section leads with the **principle** — the mechanism, the

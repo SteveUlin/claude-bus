@@ -31,6 +31,7 @@ target_include_directories(bus_core PUBLIC src)
 add_library(bus_agent_status STATIC
     src/agent_status.cpp
     src/pane.cpp
+    src/task_model.cpp
 )
 target_include_directories(bus_agent_status PUBLIC src)
 # readAgents parses each event line with json::parse (json_min), so the
@@ -66,7 +67,6 @@ add_executable(bus
     src/delivery.cpp
     src/dispatch.cpp
     src/rpc.cpp
-    src/task_model.cpp
     src/topic_registry.cpp
     src/trigger_feed.cpp
     src/sub/sub_agent_bar.cpp
@@ -110,6 +110,7 @@ add_executable(bus_tests
     tests/unit/test_pane_cache.cpp
     tests/unit/test_retention.cpp
     tests/unit/test_topic_registry.cpp
+    tests/unit/test_task_graph.cpp
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)

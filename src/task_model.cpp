@@ -190,4 +190,92 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
   return tasks;
 }
 
+auto buildTaskGraph(const std::vector<Task>& tasks) -> TaskGraph {
+  TaskGraph g;
+
+  std::map<std::string, const Task*, std::less<>> by_id;
+  for (const auto& t : tasks) by_id.emplace(t.id, &t);
+
+  // Longest dependency chain by hops. depth(id) = 1 + max depth over deps;
+  // pred[id] = the dep achieving that max. Memoized DFS; a node seen while
+  // still in-progress is a cycle (flagged, excluded from the depth so the
+  // recursion still terminates).
+  std::map<std::string, int> depth;   // 0 = uncomputed/leaf-root
+  std::map<std::string, std::string> pred;
+  std::map<std::string, int> color;   // 0=unseen 1=in-progress 2=done
+  auto computeDepth = [&](auto&& self, const std::string& id) -> int {
+    auto byIt = by_id.find(id);
+    if (byIt == by_id.end()) return 0;  // dangling — handled separately
+    if (color[id] == 1) {               // back-edge → cycle
+      g.has_cycle = true;
+      return 0;
+    }
+    if (color[id] == 2) return depth[id];
+    color[id] = 1;
+    int best = 0;
+    std::string best_dep;
+    for (const auto& d : byIt->second->deps) {
+      if (!by_id.contains(d)) continue;  // dangling dep adds no depth
+      const int cand = self(self, d) + 1;
+      if (cand > best) {
+        best = cand;
+        best_dep = d;
+      }
+    }
+    color[id] = 2;
+    depth[id] = best;
+    if (!best_dep.empty()) pred[id] = best_dep;
+    return best;
+  };
+
+  std::string deepest;
+  int deepest_d = -1;
+  for (const auto& t : tasks) {
+    const int d = computeDepth(computeDepth, t.id);
+    if (d > deepest_d) {
+      deepest_d = d;
+      deepest = t.id;
+    }
+  }
+  // Reconstruct leaf→root via pred, then reverse to root→leaf. A cycle leaves
+  // pred self-referential (pred[a]=b, pred[b]=a), so guard the walk against
+  // revisiting a node — the chain is best-effort under a cycle anyway.
+  if (deepest_d > 0) {
+    std::set<std::string> walked;
+    std::string cur = deepest;
+    while (walked.insert(cur).second) {
+      g.longest_chain.push_back(cur);
+      auto it = pred.find(cur);
+      if (it == pred.end()) break;
+      cur = it->second;
+    }
+    std::ranges::reverse(g.longest_chain);
+  }
+
+  // Ready / blocked (open + in_flight only) + dangling deps. A task is ready
+  // when every dep is present AND done; any missing-or-not-done dep blocks.
+  for (const auto& t : tasks) {
+    for (const auto& d : t.deps)
+      if (!by_id.contains(d)) g.dangling.push_back({t.id, d});
+
+    if (t.state != "open" && t.state != "in_flight") continue;
+    bool deps_met = true;
+    for (const auto& d : t.deps) {
+      auto it = by_id.find(d);
+      if (it == by_id.end() || it->second->state != "done") {
+        deps_met = false;
+        break;
+      }
+    }
+    if (!deps_met) {
+      g.blocked.push_back(t.id);  // open OR in_flight, waiting on a dep
+    } else if (t.state == "open") {
+      g.ready.push_back(t.id);  // not started + deps satisfied = actionable
+    }
+    // in_flight + deps_met → already running; shown in the chain, no bucket.
+  }
+
+  return g;
+}
+
 }  // namespace bus

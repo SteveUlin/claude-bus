@@ -62,4 +62,36 @@ struct Task {
 // triggers overlay) read-only.
 auto readTasks(const std::set<std::string>& only) -> std::vector<Task>;
 
+// ── critical-path / dependency graph (the structural half) ──
+// Derived purely from Task.deps — the slowest-chain *structure*. Edge weight
+// is hop count until elodin's span durations land (then weight = duration and
+// the same longest-path query becomes the true critical path). See
+// docs/critical-path.md.
+
+// A dep edge that points at a task id with no matching task (typo, or a
+// spine record the broker GC'd). Surfaced as a data-integrity warning.
+struct DanglingDep {
+  std::string task_id;     // the task that declared the dep
+  std::string missing_id;  // the dep id with no matching task
+};
+
+struct TaskGraph {
+  // OPEN tasks whose deps are all done (or which have none) — not yet
+  // started + actionable. (An in_flight task with met deps is already
+  // running, so it's neither ready nor blocked.) Newest-first.
+  std::vector<std::string> ready;
+  // Open OR in_flight tasks with at least one not-done dep. Newest-first.
+  std::vector<std::string> blocked;
+  // Longest dependency chain by hop count, ordered root → leaf (a dep comes
+  // before the task that needs it). The structural critical-path proxy.
+  std::vector<std::string> longest_chain;
+  std::vector<DanglingDep> dangling;
+  bool has_cycle{false};  // deps loop — a dispatch mistake; chain is then
+                          // best-effort (the cycle is excluded from depth).
+};
+
+// Pure graph derivation over a task set (typically readTasks's output).
+// Self-contained: no I/O. Unit-tested in tests/unit.
+auto buildTaskGraph(const std::vector<Task>& tasks) -> TaskGraph;
+
 }  // namespace bus

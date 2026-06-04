@@ -290,6 +290,92 @@ auto tasksView(std::span<const char* const> args) -> int {
   return 0;
 }
 
+// Compact per-state mark for the graph view.
+auto stateMark(std::string_view st) -> std::string_view {
+  if (st == "done") return "✓";
+  if (st == "in_flight") return "◐";
+  if (st == "cancelled") return "✗";
+  return "○";  // open
+}
+
+// `bus tasks graph` — the critical-path view, structural half (deps DAG).
+// Durations (the true critical path) graft in when elodin's spans land; this
+// shows the chain *structure* + blocked/ready + integrity warnings today.
+// See docs/critical-path.md.
+auto tasksGraph(std::span<const char* const> args) -> int {
+  (void)args;  // deps cross owners — no per-owner filter on the graph
+  const auto tasks = readTasks({});
+  if (tasks.empty()) {
+    std::println("no tasks yet — the graph fills as dispatch threads --deps");
+    return 0;
+  }
+  const auto g = buildTaskGraph(tasks);
+
+  std::map<std::string, const Task*, std::less<>> by_id;
+  for (const auto& t : tasks) by_id.emplace(t.id, &t);
+  auto label = [&](const std::string& id) -> std::string {
+    auto it = by_id.find(id);
+    const std::string_view st = it != by_id.end() ? std::string_view{it->second->state}
+                                                  : std::string_view{"open"};
+    std::string ttl = (it != by_id.end() && !it->second->title.empty())
+                          ? truncate(it->second->title, 24)
+                          : id;
+    return std::format("{}{}{} {}", stateColor(st), stateMark(st), kReset, ttl);
+  };
+
+  std::println("{}TASK DAG{}  {}deps advisory · durations pending spans{}",
+               kBold, kReset, kDim, kReset);
+
+  if (!g.longest_chain.empty()) {
+    std::println("");
+    std::println("{}critical chain (structural, {} hop{}):{}", kBold,
+                 g.longest_chain.size() - 1,
+                 g.longest_chain.size() == 2 ? "" : "s", kReset);
+    std::string line = "  ";
+    for (std::size_t i = 0; i < g.longest_chain.size(); ++i) {
+      if (i) line += std::string{kDim} + " → " + std::string{kReset};
+      line += label(g.longest_chain[i]);
+    }
+    std::println("{}", line);
+  }
+
+  if (!g.ready.empty()) {
+    std::println("");
+    std::println("{}ready{} (deps satisfied — can start):", kBrightGreen, kReset);
+    for (const auto& id : g.ready) std::println("  {}", label(id));
+  }
+
+  if (!g.blocked.empty()) {
+    std::println("");
+    std::println("{}blocked{} (waiting on deps):", kYellow, kReset);
+    for (const auto& id : g.blocked) {
+      auto it = by_id.find(id);
+      std::string unmet;
+      if (it != by_id.end())
+        for (const auto& d : it->second->deps) {
+          auto dit = by_id.find(d);
+          if (dit == by_id.end() || dit->second->state != "done") {
+            if (!unmet.empty()) unmet += ", ";
+            unmet += dit != by_id.end() && !dit->second->title.empty()
+                         ? truncate(dit->second->title, 18)
+                         : d;
+          }
+        }
+      std::println("  {} {}⊣{} {}", label(id), kDim, kReset, unmet);
+    }
+  }
+
+  if (!g.dangling.empty() || g.has_cycle) {
+    std::println("");
+    if (g.has_cycle)
+      std::println("  {}⚠ cycle in deps — chain is best-effort{}", kRed, kReset);
+    for (const auto& d : g.dangling)
+      std::println("  {}⚠ dangling{}: {} → dep \"{}\" (no such task)", kRed,
+                   kReset, label(d.task_id), d.missing_id);
+  }
+  return 0;
+}
+
 // `bus tasks watch [OWNER...]` — continuous full-screen refresh, the live
 // fleet-activity surface (the pane that replaced bus-deck). Mirrors the
 // monitor viewer idiom: alt-screen + EINTR-able signal handling +
@@ -323,6 +409,7 @@ auto subTasks(std::span<const char* const> args) -> int {
     if (verb == "open") return tasksOpen(args.subspan(1));
     if (verb == "close") return tasksClose(args.subspan(1));
     if (verb == "watch") return tasksWatch(args.subspan(1));
+    if (verb == "graph") return tasksGraph(args.subspan(1));
   }
   return tasksView(args);
 }

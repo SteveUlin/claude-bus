@@ -40,6 +40,7 @@ auto subTasks(std::span<const char* const>) -> int;
 auto subSpawn(std::span<const char* const>) -> int;
 auto subRestorePeers(std::span<const char* const>) -> int;
 auto subDespawn(std::span<const char* const>) -> int;
+auto subRecover(std::span<const char* const>) -> int;
 
 // Broker daemon (defined in src/sub/sub_broker.cpp).
 auto subBroker(std::span<const char* const>) -> int;

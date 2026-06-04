@@ -26,6 +26,8 @@ const Subcommand kSubcommands[] = {
     {"pane-id", subPaneId, "resolve pane name → terminal_N"},
     {"pane-send", subPaneSend, "raw TTY write to a pane id (no flock)"},
     {"pane-state", subPaneState, "introspect a pane (mode, buffer, …)"},
+    {"recover", subRecover,
+     "relaunch a wedged agent: kill → respawn-loop → verify (exit 0/10/20/30)"},
     {"roles", subRoles, "list role files (no args) or print one role's body (NAME)"},
     {"spawn", subSpawn, "open a new zellij tab for an agent"},
     {"restore-peers", subRestorePeers,

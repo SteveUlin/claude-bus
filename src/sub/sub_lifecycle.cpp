@@ -4,21 +4,29 @@
 // (session UUID discovery, color assignment) is still in the shell
 // bin/agent-launch; this only ports the outer "create a tab" wrapper.
 
+#include "../agent_status.h"
 #include "../sub.h"
 #include "../broker.h"
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../state_paths.h"
 
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <print>
 #include <sstream>
@@ -146,6 +154,36 @@ auto tabNameExists(std::string_view name) -> bool {
     if (line == name) return true;
   }
   return false;
+}
+
+// True if PID is this agent's live claude — guards against killing a stale or
+// recycled PID from the pidfile. Reads /proc/<pid>/cmdline (NUL-separated argv);
+// the live launch is `claude --name <name>` so both tokens appear.
+auto isClaudeFor(pid_t pid, const std::string& name) -> bool {
+  std::ifstream f{"/proc/" + std::to_string(pid) + "/cmdline",
+                  std::ios::binary};
+  if (!f) return false;
+  std::string c{std::istreambuf_iterator<char>(f),
+                std::istreambuf_iterator<char>()};
+  for (auto& ch : c) {
+    if (ch == '\0') ch = ' ';
+  }
+  return c.find("claude") != std::string::npos &&
+         c.find(name) != std::string::npos;
+}
+
+// Fallback PID resolution when the pidfile is missing/stale or points at the
+// wrong process (e.g. the caged systemd-run path, where $$ is the launcher not
+// claude). `pgrep -f "claude --name <name>"` matches the live process's full
+// command line. Returns the first match, or -1.
+auto pgrepClaude(const std::string& name) -> pid_t {
+  const std::string pat = "claude --name " + name;
+  const auto [rc, out] = runCaptureLocal({"pgrep", "-f", pat.c_str()});
+  if (rc != 0) return -1;
+  std::istringstream in{out};
+  long p = -1;
+  in >> p;
+  return p > 1 ? static_cast<pid_t>(p) : -1;
 }
 
 }  // namespace
@@ -374,6 +412,164 @@ auto subDespawn(std::span<const char* const> args) -> int {
                pruned ? "" : " (was not in the dynamic-peer registry)",
                reaped);
   return 0;
+}
+
+// `bus recover <agent> [--no-verify] [--timeout-ms N]` — the relaunch primitive
+// (docs/bus-recover.md; P2 Phase C dep). KILL the wedged claude; the pane's
+// fleet.kdl respawn-loop relaunches it (fresh `claude --continue`). VERIFY by
+// waiting for a fresh events.jsonl line for the agent. REPORT exit code + one
+// JSON line. STATELESS w.r.t. recovery policy — the broker's engine decides
+// WHETHER to recover (guard) and records the outcome (ledger); this verb is the
+// dumb, idempotent, safe-to-call primitive. Exit codes (the breaker's signal):
+//   0  recovered + verified (fresh claude up, fresh event landed)
+//   10 relaunched but verify timed out (process up, no event yet — boot-stuck)
+//   20 failed (no relaunch came up)
+//   30 attached-pane defer (human on the pane; did nothing)
+//   2  usage / refused target
+auto subRecover(std::span<const char* const> args) -> int {
+  std::string name;
+  bool no_verify = false;
+  long timeout_ms = 12000;  // §6: 10-15s boot headroom
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string a{args[i]};
+    if (a == "--no-verify") {
+      no_verify = true;
+    } else if (a == "--timeout-ms" && i + 1 < args.size()) {
+      timeout_ms = std::strtol(args[++i], nullptr, 10);
+    } else if (a.starts_with("--") || !name.empty()) {
+      std::println(stderr, "usage: bus recover <agent> [--no-verify] "
+                           "[--timeout-ms N]");
+      return 2;
+    } else {
+      name = a;
+    }
+  }
+  if (name.empty()) {
+    std::println(stderr,
+                 "usage: bus recover <agent> [--no-verify] [--timeout-ms N]");
+    return 2;
+  }
+  // Never the broker/ops pane — recover only targets agent panes (§7).
+  if (name == "broker") {
+    std::println(stderr, "bus recover: refusing to target the broker pane");
+    return 2;
+  }
+
+  namespace fs = std::filesystem;
+  const std::string state = stateRoot();
+  std::error_code ec;
+  fs::create_directories(state + "/recovery", ec);
+
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto elapsed = [&] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+  // One JSON line to stdout — the audit record the engine's ledger folds in.
+  const auto emit = [&](long killed_pid, bool relaunched, bool verified,
+                        const char* error) {
+    const std::string err =
+        error ? std::format("\"{}\"", error) : std::string{"null"};
+    std::println(
+        R"({{"agent":"{}","action":"recover","killed_pid":{},"relaunched":{},)"
+        R"("verified":{},"elapsed_ms":{},"session_resumed":{},"error":{}}})",
+        name, killed_pid, relaunched ? "true" : "false",
+        verified ? "true" : "false", elapsed(), verified ? "true" : "false",
+        err);
+  };
+
+  // 1. Per-agent flock — two concurrent recovers can't double-fire (§7). The
+  //    lock releases when this fd closes at return.
+  const int lockfd = ::open((state + "/recovery/" + name + ".lock").c_str(),
+                            O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+  if (lockfd < 0 || ::flock(lockfd, LOCK_EX) != 0) {
+    if (lockfd >= 0) ::close(lockfd);
+    emit(0, false, false, "lock-failed");
+    return 20;
+  }
+
+  // 2. Attached-pane defer — the human holds the pane; never kill under them.
+  if (hasPresenceFile(name)) {
+    ::close(lockfd);
+    emit(0, false, false, "attached");
+    return 30;
+  }
+
+  // 3. Resolve the wedged PID: pidfile (deterministic), pgrep fallback.
+  pid_t pid = -1;
+  {
+    std::ifstream pf{state + "/pids/" + name};
+    long p = -1;
+    if (pf && (pf >> p) && p > 1) pid = static_cast<pid_t>(p);
+  }
+  if (pid > 1 && !isClaudeFor(pid, name)) pid = -1;  // stale/recycled
+  if (pid <= 1) pid = pgrepClaude(name);
+
+  // 4. The events.jsonl byte offset is the "fresh event" boundary for verify —
+  //    any line appended past it (the respawn's SessionStart/first hook) proves
+  //    a fresh process booted. Avoids parsing ISO-8601 timestamps.
+  const std::string events = state + "/events.jsonl";
+  std::uintmax_t off = fs::file_size(events, ec);
+  if (ec) off = 0;
+
+  // 5. Kill (SIGTERM, 3s grace, SIGKILL backstop). Idempotent: if nothing live
+  //    is found, skip straight to verify — the respawn-loop brings it up anyway.
+  long killed_pid = 0;
+  if (pid > 1 && ::kill(pid, 0) == 0) {
+    ::kill(pid, SIGTERM);
+    for (int i = 0; i < 30 && ::kill(pid, 0) == 0; ++i) ::usleep(100 * 1000);
+    if (::kill(pid, 0) == 0) ::kill(pid, SIGKILL);
+    killed_pid = pid;
+  }
+
+  // 6a. --no-verify: return as soon as a fresh process is up (caller re-checks).
+  if (no_verify) {
+    bool up = false;
+    while (elapsed() < timeout_ms) {
+      if (pgrepClaude(name) > 1) {
+        up = true;
+        break;
+      }
+      ::usleep(200 * 1000);
+    }
+    ::close(lockfd);
+    emit(killed_pid, up, false, up ? nullptr : "no-relaunch");
+    return up ? 0 : 20;
+  }
+
+  // 6b. Event-based verify: poll events.jsonl[off:] for a fresh line for <name>.
+  const std::string needle = "\"agent\":\"" + name + "\"";
+  bool verified = false;
+  while (elapsed() < timeout_ms && !verified) {
+    std::ifstream in{events, std::ios::binary};
+    if (in) {
+      in.seekg(static_cast<std::streamoff>(off));
+      std::string line;
+      while (std::getline(in, line)) {
+        if (line.find(needle) != std::string::npos) {
+          verified = true;
+          break;
+        }
+      }
+    }
+    if (!verified) ::usleep(250 * 1000);
+  }
+
+  // 7. At verify-timeout, a live process with no event = boot-stuck (10); no
+  //    process at all = relaunch never came up (20). Verified = 0.
+  const bool relaunched = verified || pgrepClaude(name) > 1;
+  ::close(lockfd);
+  if (verified) {
+    emit(killed_pid, true, true, nullptr);
+    return 0;
+  }
+  if (relaunched) {
+    emit(killed_pid, true, false, "verify-timeout");
+    return 10;
+  }
+  emit(killed_pid, false, false, "no-relaunch");
+  return 20;
 }
 
 }  // namespace bus

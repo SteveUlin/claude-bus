@@ -23,7 +23,7 @@ state durability — lives where you work.
   fallbacks) when changes are protocol-shaped rather than display-
   shaped.
 - Design docs in `docs/` — evals, proposals, policies (e.g.
-  clear-policy, context-budget).
+  broker-auto-recovery, broker-seam-redesign, clear-policy).
 
 ## Out of scope
 

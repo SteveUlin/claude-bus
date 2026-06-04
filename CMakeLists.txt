@@ -17,7 +17,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 # Pure, dependency-light broker logic — no zellij, no sockets, no clock
 # beyond what the caller passes. Linked into both the `bus` binary and
 # the `bus_tests` unit suite so the tested code IS the shipped code.
-# (tail_reader is header-only; computeAxes lives in bus_agent_status.)
+# (tail_reader is header-only; computeAxes lives in bus_readers.)
 add_library(bus_core STATIC
     src/event.cpp
     src/json_min.cpp
@@ -26,18 +26,32 @@ add_library(bus_core STATIC
 )
 target_include_directories(bus_core PUBLIC src)
 
-# Agent state derivation + pane helpers. Shared with the bus binary;
-# kept as a static library only for compile-time isolation, no longer
-# needed by separate executables (watcher / mailbox are retired).
-add_library(bus_agent_status STATIC
+# The Readers seam (broker-seam-redesign §2/§6): pure derivations over
+# events.jsonl + an INJECTED PaneState value. Links bus_core ONLY — no pane
+# acquisition, no sockets, no clock beyond the caller's. That link boundary is
+# the structural half of the no-authority guard: a reader that grows a mutable
+# field or reaches for pane.h fails to build here, broker-free, which is the §3
+# litmus passed by construction. The TUs stay separate free-function units —
+# the "Readers" component is conceptual, not one class. (The verify reader is
+# the one-shot `bus verify` in src/sub/, still bound to its CLI shell.)
+add_library(bus_readers STATIC
     src/agent_status.cpp
-    src/pane.cpp
     src/task_model.cpp
+    src/trigger_feed.cpp
 )
-target_include_directories(bus_agent_status PUBLIC src)
-# readAgents parses each event line with json::parse (json_min), so the
+target_include_directories(bus_readers PUBLIC src)
+# readAgents / deriveTrig parse each line with json::parse (json_min), so the
 # json symbols must resolve after this archive on the link line.
-target_link_libraries(bus_agent_status PUBLIC bus_core)
+target_link_libraries(bus_readers PUBLIC bus_core)
+
+# Pane acquisition + actuators (paneState, sendToPaneSafe, the loop-thread TTL
+# cache). The loop/Daemon plane: single-thread-owned mutable caches that must
+# NOT enter Readers. Kept its own unit so the read plane can't pull pane.cpp by
+# accident — bus_readers does not link it, only the binary + tests do.
+add_library(bus_pane STATIC
+    src/pane.cpp
+)
+target_include_directories(bus_pane PUBLIC src)
 
 # Build-commit stamp (D4 code-drift detection). Capture the source commit at
 # configure time into a generated header; agent-launch compares it against
@@ -69,7 +83,6 @@ add_executable(bus
     src/dispatch.cpp
     src/rpc.cpp
     src/topic_registry.cpp
-    src/trigger_feed.cpp
     src/sub/sub_agent_bar.cpp
     src/sub/sub_agents.cpp
     src/sub/sub_broker.cpp
@@ -91,7 +104,7 @@ add_executable(bus
     src/sub/sub_verify.cpp
 )
 target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})
-target_link_libraries(bus PRIVATE bus_core bus_agent_status)
+target_link_libraries(bus PRIVATE bus_core bus_readers bus_pane)
 
 # Unit tests for the pure logic (json::parse, topic::parseFrom,
 # computeAxes, the TailReader split/offset dance). Minimal in-tree
@@ -116,7 +129,7 @@ add_executable(bus_tests
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
-target_link_libraries(bus_tests PRIVATE bus_core bus_agent_status)
+target_link_libraries(bus_tests PRIVATE bus_core bus_readers bus_pane)
 set_target_properties(bus_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_test(NAME unit COMMAND bus_tests)

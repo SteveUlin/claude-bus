@@ -18,7 +18,7 @@ Critical-path view (next) joins tasks↔elodin's span schema.
 
 Durable anchor (survives /clear). Builds on
 [docs/p3-trigger-feed.md](p3-trigger-feed.md) and
-[docs/observability-pillar.md](observability-pillar.md).
+[docs/observability-viewers.md](observability-viewers.md).
 
 ## Goal
 

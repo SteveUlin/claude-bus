@@ -17,7 +17,8 @@ C++23 broker daemon**. The architecture maps to four directories: `layouts/`
 Code config + shared hooks), and `coordination/` (layerable patterns).
 
 The moat is the broker as **durable system-of-record**: it owns the topic
-registry, append-only logs, per-consumer cursors, a 250 ms delivery loop, and
+registry, append-only logs, per-consumer cursors, a delivery loop (250 ms
+base-cadence floor, also woken by RPC arrival + pending-deadline timerfds), and
 the in-flight / retry / ACK / audit / `inbox-human` escalation path — all
 *outside* every agent's context, costing zero context tokens and surviving
 compaction. That is the differentiator versus context-coupled agent-messaging.

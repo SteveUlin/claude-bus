@@ -60,7 +60,8 @@ The message lands in the peer's prompt buffer and submits. The peer receives it 
 direct messages, but it contends with the human keyboard. For queued / async /
 typed delivery, go through the **broker daemon** (`bus broker run`), the bus's
 single source of truth: it owns the topic registry, append-only topic logs,
-per-consumer cursors, the 250 ms delivery loop, and the retry / ack / audit /
+per-consumer cursors, the delivery loop (250 ms base-cadence floor, also woken
+by RPC arrival + pending-deadline timerfds), and the retry / ack / audit /
 `inbox-human` escalation path. Hooks only emit state events to `events.jsonl`;
 the broker decides when to push.
 

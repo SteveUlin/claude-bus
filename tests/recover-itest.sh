@@ -38,8 +38,12 @@ cleanup() { for p in "${fakes[@]:-}"; do kill "$p" 2>/dev/null; done
   pkill -f 'while :; do sleep 3600' 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT
 
-emit_event() {  # append a fresh events.jsonl line for agent $1
-  printf '%s\n' "{\"ts\":\"2026-06-04T00:00:00Z\",\"agent\":\"$1\",\"event\":\"SessionStart\"}" \
+emit_event() {  # the respawn's first event: a fresh SessionStart for agent $1
+  printf '%s\n' "{\"ts\":\"2026-06-04T00:00:00Z\",\"agent\":\"$1\",\"event\":\"SessionStart\",\"payload\":{\"source\":\"resume\"}}" \
+    >> "$T/events.jsonl"
+}
+emit_death() {  # the kill's death event: a SessionEnd bearing the agent name
+  printf '%s\n' "{\"ts\":\"2026-06-04T00:00:00Z\",\"agent\":\"$1\",\"event\":\"SessionEnd\"}" \
     >> "$T/events.jsonl"
 }
 
@@ -66,6 +70,19 @@ case "$out" in *"\"killed_pid\":$fp"*) ck yes yes "JSON killed_pid = the fake PI
   *) ck "$out" "killed_pid:$fp" "JSON killed_pid = the fake PID";; esac
 ck "$(kill -0 "$fp" 2>/dev/null && echo alive || echo dead)" "dead" \
    "the wedged claude was killed"
+wait
+
+echo "3b. REGRESSION: kill's own SessionEnd must NOT verify (the auri false-positive)"
+# The kill makes the dying claude emit a SessionEnd that bears "agent":"frank"
+# and lands past the pre-kill offset. The OLD verify matched any agent-name line
+# → false-positived verified:true on the death. No SessionStart is emitted (no
+# respawn here), so the fixed verify must time out → exit 20, verified:false.
+fp=$(fake_claude frank)
+( sleep 0.4; emit_death frank ) &           # only the death event lands
+out=$("$BUS" recover frank --timeout-ms 2500 2>/dev/null); rc=$?
+ck "$rc" "20" "SessionEnd alone does NOT verify → 20 (no-relaunch)"
+case "$out" in *'"verified":false'*) ck yes yes "JSON verified:false (no false-positive on SessionEnd)";;
+  *) ck "$out" '"verified":false' "JSON verified:false on SessionEnd-only";; esac
 wait
 
 echo "4. idempotent on already-down → exit 0"

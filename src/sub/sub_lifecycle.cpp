@@ -538,8 +538,18 @@ auto subRecover(std::span<const char* const> args) -> int {
     return up ? 0 : 20;
   }
 
-  // 6b. Event-based verify: poll events.jsonl[off:] for a fresh line for <name>.
-  const std::string needle = "\"agent\":\"" + name + "\"";
+  // 6b. Event-based verify: poll events.jsonl[off:] for the RESPAWN's first
+  //    event — a fresh SessionStart for <name>. CRUCIAL: match the event TYPE,
+  //    not just the agent name. The kill in step 5 makes the dying claude emit a
+  //    SessionEnd that ALSO carries "agent":"<name>" and lands past `off`; a bare
+  //    agent-name match counts that death as a relaunch (false-positive
+  //    verified:true → the auto-recovery engine believes a dead agent recovered).
+  //    Only a fresh SessionStart (the respawn's `claude --continue`, source
+  //    "resume"/"startup") proves it came back. An in-session SessionStart with
+  //    source "compact" is a compaction, NOT a relaunch — exclude it.
+  const std::string agentNeedle = "\"agent\":\"" + name + "\"";
+  const std::string startNeedle = "\"event\":\"SessionStart\"";
+  const std::string compactNeedle = "\"source\":\"compact\"";
   bool verified = false;
   while (elapsed() < timeout_ms && !verified) {
     std::ifstream in{events, std::ios::binary};
@@ -547,7 +557,9 @@ auto subRecover(std::span<const char* const> args) -> int {
       in.seekg(static_cast<std::streamoff>(off));
       std::string line;
       while (std::getline(in, line)) {
-        if (line.find(needle) != std::string::npos) {
+        if (line.find(agentNeedle) != std::string::npos &&
+            line.find(startNeedle) != std::string::npos &&
+            line.find(compactNeedle) == std::string::npos) {
           verified = true;
           break;
         }

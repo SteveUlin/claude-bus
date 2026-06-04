@@ -416,7 +416,7 @@ table for traceability:
 | maybeAutoClear one-off / no anti-thrash | 3.1, 3.2 | `delivery.cpp:805–905` |
 | No typed-completion pipeline gate | 4.5 | `delivery.cpp:231–399` |
 | Dead role frontmatter / false tool claim | 1.7, 2.6 | `agent-launch:194–230`, `roles/comms.md:176` |
-| CLAUDE.md bloat / stale loop-mailbox.sh example | 1.6 | CLAUDE.md, `settings/hooks/examples/loop-mailbox.sh:13–20` |
+| CLAUDE.md bloat | 1.6 | CLAUDE.md |
 
 ---
 

@@ -212,11 +212,12 @@ explains via `permissionDecisionReason`.**
 ### 3.2 The Stop-hook "keep working" / self-pull pattern
 
 **The principle: `Stop` + exit 2 means "don't go idle — here's more to do."**
-This is the mechanism behind every "autonomous loop" harness. Our own
-`settings/hooks/examples/loop-mailbox.sh` is a textbook instance: it drains the
-agent's mailbox on `Stop`, and *if anything was queued*, prints it to stderr
-and exits 2, so the agent treats the mail as a new turn and keeps working until
-the box empties. `disler`'s Stop hook does the cosmetic version (LLM-generated
+This is the mechanism behind every "autonomous loop" harness. A Stop-hook
+mail-drain loop is the textbook instance: drain the agent's mailbox on `Stop`,
+and *if anything was queued*, print it to stderr and exit 2, so the agent treats
+the mail as a new turn and keeps working until the box empties. (claude-bus had
+such an example hook early on; it has since been superseded by the broker's
+push delivery.) `disler`'s Stop hook does the cosmetic version (LLM-generated
 completion message + TTS). The "Ralph Wiggum" family (`ralph-orchestrator`,
 `ralph-wiggum-bdd`) generalizes it: loop a `claude -p` against a prompt file
 until a completion marker appears, with **circuit-breaker / rate-limit
@@ -227,7 +228,7 @@ version lacks.
 token burn. Every production implementation pairs it with a **bounded
 condition** (mailbox empty, marker found, max-iterations, rate-limit budget).
 claude-bus's broker is the bound — it only re-injects when a record exists —
-which is why the self-pull pattern is safe in our `loop-mailbox.sh`.
+which is why the self-pull pattern is safe here.
 
 ### 3.3 Hook-only multi-agent comms (HCOM) — the architecture we *didn't* pick
 
@@ -446,12 +447,6 @@ telemetry, health) but run none of it.
   prompt agent. The behavioral ban works (prose is persuasive) but the *stated
   mechanism* is wrong. Fix the wording to "you are instructed not to edit" or
   make it real via a `PreToolUse` deny hook scoped to the comms agent.
-- **`loop-mailbox.sh` references a legacy binary.** It calls
-  `$BUS_ROOT/bin/mailbox` (line 14/20), but the architecture moved to the
-  unified `bin/bus` broker; `bin/mailbox` is listed only as a gitignored
-  compiled artifact. This example hook is stale relative to the broker design
-  and would mislead anyone copying it. Update to `bus msg fetch` or mark it
-  clearly as historical.
 - **`UserPromptSubmit` hot-path cost.** `log-event.sh` runs `jq` + a subshell
   `date` on `UserPromptSubmit`, which has a **30s timeout** (not 600s). Fine
   now, but the doc/comment should flag that this event is the latency-critical
@@ -477,7 +472,7 @@ telemetry, health) but run none of it.
 3. **Adopt the hook-only *pull* path (HCOM-style) as a delivery fallback**
    (principle: the agent draining its own mail via `UserPromptSubmit`/`Stop`
    `additionalContext` is race-free and TTY-free). Keep the broker as
-   scheduler; let the hook be the transport. Our `loop-mailbox.sh` is half of
+   scheduler; let the hook be the transport. The off-TTY drain hook is half of
    this already. **Effort: med. Payoff: very high** — kills the TTY race the
    whole prior doc centers on.
 4. **Tier CLAUDE.md: move the broker spec + `bus help` to `@`-linked `docs/`**

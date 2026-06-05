@@ -183,6 +183,42 @@ TEST(dispatch_assigns_head_to_idle_agent) {
   CHECK_EQ(out[0].protocol, std::string{"work-assignment"});
 }
 
+TEST(dispatch_batch_assigns_one_task_per_idle_agent) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  ctx.queue_head.push_back({"work-queue", "t1", "task-1"});
+  ctx.queue_head.push_back({"work-queue", "t2", "task-2"});
+  for (const char* n : {"alice", "bob"}) {
+    policy::AgentSnapshot s;
+    s.name = n;
+    s.info = nullptr;
+    s.axes.turn = TurnAxis::Ready;
+    ctx.agents.push_back(s);
+  }
+  auto out = actor.evaluate(ctx);
+  // FIFO, head order: task-1 → alice, task-2 → bob (one per idle agent).
+  CHECK_EQ(static_cast<int>(out.size()), 2);
+  CHECK_EQ(out[0].topic, std::string{"inbox-alice"});
+  CHECK_EQ(out[0].body, std::string{"task-1"});
+  CHECK_EQ(out[1].topic, std::string{"inbox-bob"});
+  CHECK_EQ(out[1].body, std::string{"task-2"});
+}
+
+TEST(dispatch_batch_bounded_by_task_count) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  ctx.queue_head.push_back({"work-queue", "t1", "only-task"});
+  for (const char* n : {"alice", "bob", "carol"}) {
+    policy::AgentSnapshot s;
+    s.name = n;
+    s.info = nullptr;
+    s.axes.turn = TurnAxis::Ready;
+    ctx.agents.push_back(s);
+  }
+  // 1 task, 3 idle agents → exactly one assignment.
+  CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 1);
+}
+
 TEST(dispatch_empty_queue_is_inert) {
   DispatchActor actor;
   policy::PolicyContext ctx;

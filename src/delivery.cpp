@@ -1189,7 +1189,7 @@ auto Loop::runPolicy() -> void {
                                   : static_cast<std::int64_t>(
                                         topic::kFileHeaderBytes);
     topic::TopicLog log{cfg_.state_dir + "/topics/" + tcfg.name + ".log"};
-    auto r = log.peek(start, 1);  // one-per-tick MVP → head only
+    auto r = log.peek(start, 16);  // bounded head window → batch-assign
     if (!r) continue;
     for (const auto& m : *r) {
       ctx.queue_head.push_back({tcfg.name, m.id, m.body});

@@ -136,8 +136,11 @@ needs are new snapshot fields").
 
 ### 3.2 MVP simplifications (deliberate, noted)
 
-- **One assignment per tick** (assign the single head to one idle agent) for the
-  first cut — avoids multi-consume ordering. Batch/rebalance is a follow-on.
+- **Batch-assign** (v2, landed): one task per eligible idle agent per tick, in
+  FIFO head order — the loop's in-order consume gives task[i] → agent[i], so the
+  multi-consume ordering is safe (single-threaded execution). The first cut was
+  one-per-tick; batch drains a burst across the idle fleet in a single tick.
+  Load-balancing / rebalance is still a follow-on.
 - **Assign-and-forget**: the assigned-set / cursor prevents re-assignment; what
   happens if an agent dies mid-task (re-queue) is a v2 concern, not the MVP.
 - **Sole consumer**: the `DispatchActor` is the only work-queue consumer in the

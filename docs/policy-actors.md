@@ -106,6 +106,14 @@ class PolicyActor {
   // context and no broker.
   virtual auto evaluate(const PolicyContext& ctx)
       -> std::vector<PolicyAction> = 0;
+
+  // Lifecycle: reclaim per-agent soft state (cooldowns, etc.) for agents not
+  // in `live`. The actor owns its state (§4), so it must GC it — driven by the
+  // broker's dead-agent prune so dynamic-peer churn can't grow it unbounded.
+  // Default no-op; actors with per-agent state override. (Surfaced during the
+  // C1 extraction: recovery's would-recover cooldown map needed this; the
+  // record-on-confirmed `onResult` hook of §1.5 stays a future addition.)
+  virtual auto pruneDeadAgents(const std::set<std::string>& live) -> void {}
 };
 
 class PolicyEngine {
@@ -148,9 +156,14 @@ struct PolicyContext {
   std::int64_t now_wall_ms;           // hooks wall-stamp events.jsonl (age math)
   std::int64_t now_mono_ms;           // ledger/guard clock (suspend-immune)
   std::vector<AgentSnapshot> agents;  // live panes only (paneId resolved)
-  std::function<const PaneState&(const std::string&)> pane;  // lazy, cached
+  std::function<PaneState(const std::string&)> pane;  // lazy; BY VALUE
 };
 ```
+
+The resolver returns **by value** (not `const&`): the loop's TTL cache is
+process-static and the actor copies into a local for its R4-style check, so no
+lifetime coupling crosses the seam — the value return is the lifetime-safe form
+of "the loop owns acquisition, the actor consumes a snapshot."
 
 **What it deliberately does NOT carry:** the registry, topic logs, the socket,
 the in-flight map by reference, or any mutable broker field. An actor sees
@@ -187,6 +200,15 @@ are named:
   later is a flag flip, not an interface change.)
 - **`Nudge`** — a doorbell sentinel submit (`[bus-wake]`) via Transport's TTY
   arm. Wakes an idle agent; named because it actuates a pane.
+
+**The conflict rule (an actor-author contract, not just §2.1's argument):** the
+engine never arbitrates. Two actors emitting actions on the same target in one
+tick resolve at execution via each topic's existing in-flight / breaker — a
+double `/clear` coalesces in tui-commands' in-flight, a double `Recover` dedups
+in the recovery breaker, exactly as two human-typed commands would. Arbitration
+in the engine would be the god-object creeping back, so it is deliberately
+absent. Author an actor assuming its action will be *serialized and de-duped at
+execution*, never pre-empted by a peer.
 
 **The load-bearing omission: there is no `AdvanceCursor` verb, no `WriteCursor`,
 no `Ack`.** A Policy actor *cannot* move a cursor, ack a record, or rewrite the

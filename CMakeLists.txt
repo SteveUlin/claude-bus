@@ -53,6 +53,19 @@ add_library(bus_pane STATIC
 )
 target_include_directories(bus_pane PUBLIC src)
 
+# The Policy seam (docs/policy-actors.md): autonomous broker behaviors as
+# actors that observe a Readers snapshot, apply their own guards, and return
+# DECLARATIVE actions the loop executes. Links bus_readers + bus_core ONLY — no
+# bus_pane, no socket. That link boundary is the structural guard: an actor that
+# reaches for pane acquisition or a shared mutable broker field fails to build
+# here. RecoveryActor (the reference actor) is the extracted P2 auto-recovery.
+add_library(bus_policy STATIC
+    src/policy.cpp
+    src/recovery_actor.cpp
+)
+target_include_directories(bus_policy PUBLIC src)
+target_link_libraries(bus_policy PUBLIC bus_readers)
+
 # Build-commit stamp (D4 code-drift detection). Capture the source commit at
 # configure time into a generated header; agent-launch compares it against
 # landed main and auto-rebuilds bin/bus on drift. Colocated git HEAD == the
@@ -104,7 +117,7 @@ add_executable(bus
     src/sub/sub_verify.cpp
 )
 target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})
-target_link_libraries(bus PRIVATE bus_core bus_readers bus_pane)
+target_link_libraries(bus PRIVATE bus_core bus_readers bus_pane bus_policy)
 
 # Unit tests for the pure logic (json::parse, topic::parseFrom,
 # computeAxes, the TailReader split/offset dance). Minimal in-tree
@@ -126,10 +139,11 @@ add_executable(bus_tests
     tests/unit/test_topic_registry.cpp
     tests/unit/test_task_graph.cpp
     tests/unit/test_recovery.cpp
+    tests/unit/test_policy.cpp
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
-target_link_libraries(bus_tests PRIVATE bus_core bus_readers bus_pane)
+target_link_libraries(bus_tests PRIVATE bus_core bus_readers bus_pane bus_policy)
 set_target_properties(bus_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_test(NAME unit COMMAND bus_tests)

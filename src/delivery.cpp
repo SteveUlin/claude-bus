@@ -5,6 +5,8 @@
 #include "event.h"
 #include "json_min.h"
 #include "pane.h"
+#include "recovery.h"
+#include "recovery_actor.h"
 #include "retention.h"
 #include "tail_reader.h"
 #include "topic_log.h"
@@ -16,7 +18,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -194,9 +195,17 @@ auto Loop::loadBlockingOps() -> void {
 }
 
 auto Loop::load() -> void {
-  // Recovery ledger first — independent of the in-flight dir, and the early
-  // return below (missing in-flight dir on a fresh boot) must not skip it.
-  loadRecovery();
+  // Register the P2 auto-recovery Policy actor first — it loads its ledger in
+  // its constructor (independent of the in-flight dir, and the early return
+  // below on a fresh boot must not skip it). The observe/soft/on mode is a
+  // runtime decision read here and handed to the actor; the engine never sees
+  // it. Add future autonomous behaviors as additional registerActor calls.
+  const char* mode_env = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
+  const std::string mode = (mode_env != nullptr && *mode_env != '\0')
+                               ? mode_env
+                               : "observe";
+  engine_.registerActor(
+      std::make_unique<RecoveryActor>(cfg_.state_dir, mode));
   // Read every $STATE/in-flight/*.json into memory. Survives restart.
   in_flight_.clear();
   const auto dir = inflightDir(cfg_);
@@ -853,7 +862,7 @@ auto Loop::tick() -> void {
   scanEvents();
   scanRetries();
   maybeAutoClear();
-  maybeAutoRecover();
+  runPolicy();
   maybeScanTokens();
   maybeWakeIdleOffTty();
   maybeTrimLogs();
@@ -1110,319 +1119,88 @@ auto Loop::maybeAutoClear() -> void {
   }
 }
 
-// Boot load: read every $STATE/recovery/<agent>.json. A boot_id mismatch
-// means the machine rebooted since the ledger was written, so its monotonic
-// windows are meaningless (steady_clock reset) — discard them and keep a
-// fresh ledger tagged with the current boot. Same-boot (broker restart)
-// preserves the breaker, which is the whole point.
-auto Loop::loadRecovery() -> void {
-  namespace fs = std::filesystem;
-  const std::string dir = cfg_.state_dir + "/recovery";
-  const std::string boot = readBootId();
-  std::error_code ec;
-  for (const auto& e : fs::directory_iterator(dir, ec)) {
-    if (e.path().extension() != ".json") continue;
-    const auto agent = e.path().stem().string();
-    std::ifstream f{e.path()};
-    std::stringstream ss;
-    ss << f.rdbuf();
-    auto parsed = json::parse(ss.str());
-    if (!parsed) continue;
-    auto l = ledgerFromJson(*parsed);
-    if (l.boot_id != boot) {
-      l = RecoveryLedger{};  // reboot → windows invalid; reset
-      l.boot_id = boot;
-    }
-    recovery_.insert_or_assign(agent, std::move(l));
-  }
+// True iff a record sits past agent's inbox cursor. A pure read fed into the
+// PolicyContext snapshot (was an inline lambda in maybeAutoRecover).
+auto Loop::inboxPending(const std::string& agent) const -> bool {
+  const auto cursor_p = topic::cursorPath(cfg_.state_dir, "inbox-" + agent, "");
+  const auto cursor = topic::readCursor(cursor_p);
+  const auto start = cursor > 0 ? cursor
+                                : static_cast<std::int64_t>(
+                                      topic::kFileHeaderBytes);
+  topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + agent + ".log"};
+  auto r = inbox.peek(start, 1);
+  return r && !r->empty();
 }
 
-// Persist one agent's ledger atomically (tmp + rename). Called after any
-// breaker/backoff/relaunch-window mutation so the breaker survives a restart.
-auto Loop::saveRecovery(const std::string& agent) -> void {
-  namespace fs = std::filesystem;
-  auto it = recovery_.find(agent);
-  if (it == recovery_.end()) return;
-  if (it->second.boot_id.empty()) it->second.boot_id = readBootId();
-  const std::string dir = cfg_.state_dir + "/recovery";
-  std::error_code ec;
-  fs::create_directories(dir, ec);
-  const std::string path = dir + "/" + agent + ".json";
-  const std::string tmp = path + ".tmp";
-  {
-    std::ofstream f{tmp, std::ios::trunc};
-    f << json::serialize(ledgerToJson(it->second));
-  }
-  fs::rename(tmp, path, ec);
-}
-
-// P2 auto-recovery triage — Phase A (OBSERVE-ONLY). Evaluates the recovery
-// signature table for every live agent and logs what it WOULD do
-// ("would-recover ...") to the audit topic, taking NO action. This is the
-// false-positive shakedown on the live stream (auri's gate before any action
-// ships in Phase B/C). The 2-signals-agree requirement for the would-relaunch
-// row lives in its predicate, so the log is honest about what would fire.
-//
-// Gated by CLAUDE_BUS_AUTO_RECOVERY (default "observe"; "off"/"0" disables).
-// Caveat (Phase A): ages are wall-clock-derived event timestamps, so this WILL
-// emit suspend/resume false positives — an intentional shakedown signal, and
-// exactly why Phase B/C must add the monotonic-clock gate before any action
-// fires. The Δtokens/Δt progress signal is consumed from kvothe's token-monitor
-// once available; until then transcript staleness is the stand-in. See
-// docs/broker-auto-recovery.md.
-auto Loop::maybeAutoRecover() -> void {
-  const char* mode_env = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
-  const std::string mode = (mode_env != nullptr && *mode_env != '\0')
-                               ? mode_env
-                               : "observe";
-  if (mode == "off" || mode == "0") return;
-  // "soft" enables the non-destructive rows (R1 clear); "on" additionally
-  // arms relaunch (Phase C). "observe" (default) only logs would-recover and
-  // leaves the standalone loops (maybeAutoClear / doorbell) as the actors —
-  // so the default config has ZERO behavior change. See §8.
-  const bool acting = (mode == "soft" || mode == "on");
-  const auto rec_th = recoveryThresholds();
-
-  const auto now = nowMs();
-  if (now - auto_recover_last_scan_ms_ < 30'000) return;  // every 30 s
-  auto_recover_last_scan_ms_ = now;
-
-  // §6.1a WALL-JUMP GRACE. Event ages are wall-clock (hooks wall-stamp
-  // events.jsonl), so a suspend/resume / NTP step / restart-across-reboot
-  // inflates every age → false STUCK/idle. steady_clock PAUSES across
-  // suspend while wall LEAPS, so Δwall − Δmono between scans is the jump
-  // signature. On a jump, arm a grace window during which the engine NO-OPS:
-  // every age spanning the jump is untrustworthy until agents emit fresh
-  // post-resume events. This is the "recognize-don't-chase" W1 deferred —
-  // recovery ACTS, so it's the first consumer that needs it for real.
-  const auto mono = nowMonoMs();
-  std::int64_t jump_threshold_ms = 5'000;
-  if (const char* e = std::getenv("CLAUDE_BUS_CLOCK_JUMP_MS");
-      e != nullptr && *e != '\0') {
-    if (const auto v = std::atoll(e); v > 0) jump_threshold_ms = v;
-  }
-  std::int64_t grace_ms = 60'000;
-  if (const char* e = std::getenv("CLAUDE_BUS_SUSPEND_GRACE_MS");
-      e != nullptr && *e != '\0') {
-    if (const auto v = std::atoll(e); v > 0) grace_ms = v;
-  }
-  if (last_tick_wall_ms_ > 0) {
-    const auto d_wall = now - last_tick_wall_ms_;
-    const auto d_mono = mono - last_tick_mono_ms_;
-    if (d_wall - d_mono > jump_threshold_ms) {
-      suspend_grace_until_mono_ms_ = mono + grace_ms;
-      std::println(stderr,
-                   "recovery: clock jump (d_wall={}ms d_mono={}ms) — "
-                   "suspending auto-recovery for {}ms",
-                   d_wall, d_mono, grace_ms);
-    }
-  }
-  last_tick_wall_ms_ = now;
-  last_tick_mono_ms_ = mono;
-  if (mono < suspend_grace_until_mono_ms_) return;  // in grace → take no action
-
-  // Budgets (env-tunable; reuse the escalation budget where it matches).
-  std::int64_t stuck_budget = 5 * 60'000;
-  if (const char* e = std::getenv("CLAUDE_BUS_STUCK_BUDGET_MS");
-      e != nullptr && *e != '\0') {
-    if (const auto v = std::atoll(e); v > 0) stuck_budget = v;
-  }
-  std::int64_t wedge_budget = 5 * 60'000;  // transcript-stale threshold
-  if (const char* e = std::getenv("CLAUDE_BUS_WEDGE_BUDGET_MS");
-      e != nullptr && *e != '\0') {
-    if (const auto v = std::atoll(e); v > 0) wedge_budget = v;
-  }
-  std::int64_t idle_clear_ms = 10 * 60'000;
-  if (const char* e = std::getenv("CLAUDE_BUS_AUTO_CLEAR_MIN");
-      e != nullptr && *e != '\0') {
-    if (const auto v = std::atoll(e); v > 0) idle_clear_ms = v * 60'000;
-  }
-
-  // would-recover audit logger with a per-(agent,signature) cooldown so a
-  // persistently-wedged agent logs once, not every scan. Sets the cooldown
-  // only when it actually logs.
-  auto logWould = [&](const std::string& agent, std::string_view sig,
-                      std::string_view action, const std::string& signals) {
-    const std::string key = agent + "\x1f" + std::string{sig};
-    if (now < would_recover_next_log_ms_[key]) return;
-    would_recover_next_log_ms_[key] = now + 5 * 60'000;  // per-sig cooldown
-    TopicConfig audit;
-    audit.name = "audit";
-    audit.kind = std::string{kKindAppendLog};
-    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-    topic::SendOpts opts;
-    opts.protocol = "would-recover";
-    stampEpoch(opts, current_epoch_);
-    auto _ = audit_log.append(
-        "broker",
-        std::format(
-            "would-recover agent={} signature={} action={} signals=[{}]",
-            agent, sig, action, signals),
-        opts);
-  };
-
-  // R1 ACT (soft/on mode): the engine OWNS idle-context clearing, superseding
-  // maybeAutoClear (which steps aside at mode≥soft). Gate on the ledger's
-  // per-signature backoff, enqueue /clear to commands-<agent> exactly as
-  // maybeAutoClear did, then record the fire so backoff arms + persists.
-  // Uses the MONOTONIC clock (the ledger's clock). Returns true if it cleared.
-  auto recoverClear = [&](const std::string& agent,
-                          const std::string& signals) -> bool {
-    auto& led = recovery_[agent];
-    if (led.boot_id.empty()) led.boot_id = readBootId();
-    if (!recoveryDecide(led, "idle-context", RecoveryAction::Clear, mono,
-                        rec_th)
-             .allow) {
-      return false;  // backoff — too soon since the last clear
-    }
-    const auto commands_topic = "commands-" + agent;
-    if (auto cr = registry_.getOrAutoCreate(commands_topic); !cr) return false;
-    topic::TopicLog cmd_log{cfg_.state_dir + "/topics/" + commands_topic +
-                            ".log"};
-    topic::SendOpts opts;
-    opts.protocol = "auto-recover-clear";
-    opts.deliver_when = 1;  // idle
-    stampEpoch(opts, current_epoch_);
-    auto _ig = cmd_log.append("broker", "/clear", opts);
-    recoveryRecord(led, "idle-context", RecoveryAction::Clear, mono, rec_th);
-    saveRecovery(agent);
-    // Audit the acted recovery (protocol=recover) — the same place the human
-    // sees delivery failures + would-recover rows.
-    TopicConfig audit;
-    audit.name = "audit";
-    audit.kind = std::string{kKindAppendLog};
-    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-    topic::SendOpts a;
-    a.protocol = "recover";
-    stampEpoch(a, current_epoch_);
-    auto _ = audit_log.append(
-        "broker",
-        std::format("recover agent={} signature=idle-context action=clear "
-                    "signals=[{}]",
-                    agent, signals),
-        a);
-    return true;
-  };
-
-  // Inbox-pending probe (a head record exists past the cursor).
-  auto inboxPending = [&](const std::string& agent) -> bool {
-    const auto cursor_p =
-        topic::cursorPath(cfg_.state_dir, "inbox-" + agent, "");
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start = cursor > 0 ? cursor
-                                  : static_cast<std::int64_t>(
-                                        topic::kFileHeaderBytes);
-    topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + agent + ".log"};
-    auto r = inbox.peek(start, 1);
-    return r && !r->empty();
-  };
+// Build the per-tick PolicyContext (the Readers snapshot + clocks + a lazy pane
+// resolver), run every registered actor, and execute the declarative actions
+// they return. The snapshot fields are exactly what the inline maybeAutoRecover
+// computed per agent; pane acquisition stays here (the loop plane owns the TTL
+// cache), pulled lazily via ctx.pane only when an actor's cheap signals match.
+auto Loop::runPolicy() -> void {
+  policy::PolicyContext ctx;
+  ctx.now_wall_ms = nowMs();
+  ctx.now_mono_ms = nowMonoMs();
+  ctx.pane = [](const std::string& n) { return paneStateCached(n); };
 
   const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  auto agents = readAgents(events_log, {});
-
-  for (const auto& [name, info] : agents) {
-    // Live pane only; defer if the human is attached or mid blocking-op.
-    if (paneId(name).empty()) continue;
-    if (hasPresenceFile(name)) continue;
-    if (blocking_ops_.contains(name)) continue;
-
-    const bool pending = inboxPending(name);
-    bool has_in_flight = false;
+  auto agents = readAgents(events_log, {});  // stable for the tick
+  for (auto& [name, info] : agents) {
+    if (paneId(name).empty()) continue;  // live pane only
+    policy::AgentSnapshot s;
+    s.name = name;
+    s.info = &info;
+    s.inbox_pending = inboxPending(name);
     for (const auto& [id, f] : in_flight_) {
       (void)id;
-      if (f.agent == name) { has_in_flight = true; break; }
+      if (f.agent == name) { s.has_in_flight = true; break; }
     }
-    const auto ax = computeAxes(info, pending ? 1 : 0, now, true);
-
-    // Transcript-staleness (cheap stat; the progress proxy until kvothe's
-    // Δtokens/Δt is wired). transcript_age < 0 = unknown (no path / stat fail).
-    std::int64_t transcript_age = -1;
+    s.attached = hasPresenceFile(name);
+    s.blocking_op = blocking_ops_.contains(name);
+    s.axes = computeAxes(info, s.inbox_pending ? 1 : 0, ctx.now_wall_ms, true);
     if (!info.last.transcript_path.empty()) {
       struct stat st{};
       if (::stat(info.last.transcript_path.c_str(), &st) == 0) {
-        transcript_age = now - static_cast<std::int64_t>(st.st_mtime) * 1000;
+        s.transcript_age_ms =
+            ctx.now_wall_ms - static_cast<std::int64_t>(st.st_mtime) * 1000;
       }
     }
-    const bool transcript_stale =
-        transcript_age >= 0 && transcript_age > wedge_budget;
+    ctx.agents.push_back(std::move(s));
+  }
 
-    // R1 idle-context → clear. comms/primary are excluded exactly as
-    // maybeAutoClear excluded them (high cross-thread continuity — clear only
-    // on human cue; see clear-policy.md §6). In observe mode this logs what it
-    // WOULD do (maybeAutoClear still acts); in soft/on mode the engine acts
-    // through the breaker/backoff ledger and maybeAutoClear steps aside.
-    static const std::set<std::string> kClearSkip{"comms", "primary"};
-    if (ax.turn == TurnAxis::Ready && !pending && !has_in_flight &&
-        info.last.event == "Stop" &&
-        (now - info.last.ts_ms) >= idle_clear_ms &&
-        !kClearSkip.contains(name)) {
-      const std::string signals =
-          std::format("idle_min={},inbox=empty,in_flight=0",
-                      (now - info.last.ts_ms) / 60'000);
-      if (!acting || !recoverClear(name, signals)) {
-        // observe mode, or backoff blocked the act → log the intent.
-        logWould(name, "idle-context", "clear", signals);
-      }
-    }
+  for (const auto& a : engine_.evaluate(ctx)) executePolicyAction(a);
+}
 
-    // R2 relaunch-idle → nudge: at a ready prompt with queued mail. This is
-    // the DELIVERY doorbell's exact condition (maybeWakeIdleOffTty), which
-    // already acts and is NOT mode-gated — so the engine only LOGS here (acting
-    // would double-wake). The doorbell owns this action; the row stays for a
-    // whole would-recover stream.
-    if (ax.turn == TurnAxis::Ready && pending) {
-      logWould(name, "relaunch-idle", "nudge",
-               std::format("turn=ready,mail=pending,in_flight={}",
-                           has_in_flight ? 1 : 0));
-    }
-
-    // R3 hung-turn → nudge: an OPEN turn past 2x budget with no transcript
-    // progress (fork-free — event + transcript signals only). OBSERVE-ONLY even
-    // in soft mode: a nudge here injects into a MID-TURN pane, which is the
-    // mid-stream-dropped-turn failure (the streamed text finishes but planned
-    // tool calls are dropped). Escalation (maybeEscalateStuck) and relaunch
-    // (Phase C, through the breaker) are the safe responses to a hung turn, not
-    // a nudge — so this row logs intent and never acts.
-    if (info.turn_start_ms > 0 &&
-        (now - info.turn_start_ms) > 2 * stuck_budget && transcript_stale) {
-      logWould(name, "hung-turn", "nudge",
-               std::format("turn_open_ms={},transcript_stale_ms={}",
-                           now - info.turn_start_ms, transcript_age));
-    }
-
-    // R4 wedged → relaunch: the agent LOOKS busy/stuck by events AND its
-    // transcript is stale (cheap, event-only pre-filter — idle agents at a
-    // ready prompt are excluded WITHOUT a fork) AND the pane is NOT at an
-    // input-ready prompt (the second, independent signal). Two signals must
-    // agree — the cardinal relaunch rule; never on transcript-staleness alone.
-    // Fork the pane only after the cheap signals match and only when the
-    // cooldown would let us log (so a confirmed-wedged agent forks ~once per
-    // cooldown, not every scan).
-    const bool looks_busy = ax.turn == TurnAxis::Working ||
-                            ax.turn == TurnAxis::Stuck ||
-                            ax.process == ProcessAxis::Stuck;
-    if (transcript_stale && looks_busy) {
-      const std::string wkey = name + "\x1f" + std::string{"wedged"};
-      if (now >= would_recover_next_log_ms_[wkey]) {
-        const auto pane = paneStateCached(name);  // forks zellij — gated above
-        const auto ax_pane =
-            computeAxes(info, pending ? 1 : 0, now, true, &pane);
-        const bool awaiting_input = wakeReadyForMail(ax_pane, &pane) ||
-                                    ax_pane.turn == TurnAxis::NeedsInput;
-        if (!awaiting_input) {
-          logWould(name, "wedged", "relaunch",
-                   std::format("transcript_stale_ms={},looks_busy=true,"
-                               "pane_awaiting_input=false",
-                               transcript_age));
+// Execute one declarative Policy action via the broker's existing paths. The
+// only kind emitted in observe/soft is Enqueue (audit rows + the R1 /clear);
+// the create-then-append replicates the former logWould / recoverClear lambdas
+// exactly (including the explicit append-log create for "audit"), so the audit
+// stream is byte-identical. Recover/Nudge are Phase-C (gated) — no-op here.
+auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
+  using Kind = policy::PolicyAction::Kind;
+  switch (a.kind) {
+    case Kind::Enqueue: {
+      if (a.topic == "audit") {
+        if (!registry_.contains("audit")) {
+          TopicConfig audit;
+          audit.name = "audit";
+          audit.kind = std::string{kKindAppendLog};
+          auto _ = registry_.create(audit);
         }
+      } else if (auto cr = registry_.getOrAutoCreate(a.topic); !cr) {
+        return;
       }
+      topic::TopicLog log{cfg_.state_dir + "/topics/" + a.topic + ".log"};
+      topic::SendOpts opts;
+      opts.protocol = a.protocol;
+      opts.deliver_when = a.deliver_when;
+      stampEpoch(opts, current_epoch_);
+      auto _ = log.append("broker", a.body, opts);
+      break;
     }
-
-    // R5 thinking-block (#10) needs an error-signature source (TBD); R6
-    // context-100% needs P5 output-verification. Both are documented
-    // placeholders, not yet evaluated. See docs/broker-auto-recovery.md.
+    case Kind::Recover:
+    case Kind::Nudge:
+      break;  // Phase C (gated); not emitted in observe/soft.
   }
 }
 
@@ -1888,12 +1666,8 @@ auto Loop::forgetAgent(std::string_view name) -> void {
   strand_alarmed_.erase(n);
   turn_stuck_alarmed_.erase(n);
   tool_wedged_alarmed_.erase(n);
-  // would_recover_next_log_ms_ is keyed by "<agent>\x1f<sig>" — drop every
-  // signature entry for this agent.
-  const std::string prefix = n + "\x1f";
-  std::erase_if(would_recover_next_log_ms_, [&](const auto& kv) {
-    return kv.first.starts_with(prefix);
-  });
+  // Policy-actor per-agent state (e.g. recovery's would-recover cooldowns) is
+  // reclaimed by engine_.pruneDeadAgents in the same sweep — see pruneDeadAgents.
 }
 
 // Prune soft per-agent state for agents no longer present in the events log.
@@ -1914,12 +1688,12 @@ auto Loop::pruneDeadAgents() -> void {
   for (const auto& k : strand_alarmed_) if (isDead(k)) dead.insert(k);
   for (const auto& k : turn_stuck_alarmed_) if (isDead(k)) dead.insert(k);
   for (const auto& k : tool_wedged_alarmed_) if (isDead(k)) dead.insert(k);
-  for (const auto& [k, _] : would_recover_next_log_ms_) {
-    const auto sep = k.find('\x1f');
-    const auto agent = sep == std::string::npos ? k : k.substr(0, sep);
-    if (isDead(agent)) dead.insert(agent);
-  }
   for (const auto& agent : dead) forgetAgent(agent);
+  // Policy actors GC their own per-agent state given the live set — the loop
+  // can't enumerate their maps (e.g. recovery's would-recover cooldowns).
+  std::set<std::string> live_names;
+  for (const auto& [k, _] : live) live_names.insert(k);
+  engine_.pruneDeadAgents(live_names);
 }
 
 }  // namespace bus::delivery

@@ -27,7 +27,7 @@
 
 #include "broker.h"
 #include "json_min.h"
-#include "recovery.h"
+#include "policy.h"
 #include "topic_log.h"
 #include "topic_registry.h"
 
@@ -78,9 +78,10 @@ struct InFlight {
 auto ackTimeoutMs() -> std::int64_t;
 constexpr std::int32_t kMaxAttempts = 3;
 
-// P2 auto-recovery ledger + breaker/backoff guards live in recovery.h (a pure,
-// unit-testable unit). The Loop's I/O wrappers (loadRecovery/saveRecovery, the
-// recovery_ member) below consume those types.
+// P2 auto-recovery is now a Policy actor (RecoveryActor) registered on the
+// Loop's PolicyEngine — its ledger, cooldowns, and clock-jump state moved onto
+// the actor (the Policy seam; docs/policy-actors.md). recovery.h still provides
+// nowMonoMs() to runPolicy and the pure guard types to RecoveryActor.
 
 class Loop {
  public:
@@ -151,19 +152,11 @@ class Loop {
   // the scan doesn't fire on every 250 ms broker tick.
   std::int64_t auto_clear_last_scan_ms_{0};
 
-  // P2 auto-recovery triage (observe-only Phase A). Rate-limit for the
-  // would-recover scan + a per-(agent,signature) cooldown so a persistently
-  // wedged agent logs once, not every scan. See docs/broker-auto-recovery.md.
-  std::int64_t auto_recover_last_scan_ms_{0};
-  std::map<std::string, std::int64_t> would_recover_next_log_ms_;
-
-  // P2 recovery ledger (per agent), loaded on boot, persisted on mutation.
-  std::map<std::string, RecoveryLedger> recovery_;
-  // Wall-jump detection (§6.1a): a (wall,mono) pair from the previous tick;
-  // Δwall − Δmono past the threshold marks a suspend/clock-jump → arm grace.
-  std::int64_t last_tick_wall_ms_{0};
-  std::int64_t last_tick_mono_ms_{0};
-  std::int64_t suspend_grace_until_mono_ms_{0};
+  // P2 auto-recovery is a Policy actor (RecoveryActor) registered on this
+  // engine in load(); its ledger + cooldowns + clock-jump state live on the
+  // actor. runPolicy() drives the engine each tick. Add future autonomous
+  // behaviors as actors here, not as new Loop methods (docs/policy-actors.md).
+  policy::PolicyEngine engine_;
 
   // Last time the log-retention sweep ran (events.jsonl rewrite +
   // per-topic head trim). Rate-limited; see maybeTrimLogs.
@@ -219,12 +212,16 @@ class Loop {
   auto escalate(const InFlight& f, std::string_view reason,
                 std::string_view body) -> void;
   auto maybeAutoClear() -> void;
-  auto maybeAutoRecover() -> void;
-  // Recovery-ledger persistence ($STATE/recovery/<agent>.json). loadRecovery
-  // runs on boot; saveRecovery after any breaker/backoff mutation. On load,
-  // a boot_id mismatch (reboot) resets the agent's monotonic windows.
-  auto loadRecovery() -> void;
-  auto saveRecovery(const std::string& agent) -> void;
+  // Policy engine driver (replaces the inline maybeAutoRecover): build the
+  // per-tick PolicyContext (a Readers snapshot + clocks + a lazy pane
+  // resolver), run every registered actor, and execute the declarative actions
+  // they return through the existing append paths. The engine never advances a
+  // cursor — docs/policy-actors.md.
+  auto runPolicy() -> void;
+  auto executePolicyAction(const policy::PolicyAction& a) -> void;
+  // True iff a record sits past agent's inbox cursor — a snapshot input for the
+  // policy context. Pure read.
+  auto inboxPending(const std::string& agent) const -> bool;
   auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;

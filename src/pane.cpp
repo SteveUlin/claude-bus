@@ -93,6 +93,16 @@ auto runCapture(const std::vector<const char*>& argv,
   int pipefd[2]{};
   if (::pipe(pipefd) != 0) return {-1, {}};
 
+  // Build the execvp argv BEFORE fork. In a multithreaded process the
+  // child inherits only the forking thread; any other thread holding
+  // the malloc arena lock at fork time leaves it locked forever in the
+  // child, so a heap alloc (vector push_back) between fork and execvp
+  // can deadlock. Keep the child path async-signal-safe (syscalls only).
+  std::vector<char*> a;
+  a.reserve(argv.size() + 1);
+  for (const auto* s : argv) a.push_back(const_cast<char*>(s));
+  a.push_back(nullptr);
+
   const pid_t pid = ::fork();
   if (pid < 0) {
     ::close(pipefd[0]);
@@ -110,10 +120,6 @@ auto runCapture(const std::vector<const char*>& argv,
       ::dup2(devnull, STDERR_FILENO);
       ::close(devnull);
     }
-    std::vector<char*> a;
-    a.reserve(argv.size() + 1);
-    for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-    a.push_back(nullptr);
     ::execvp(a[0], a.data());
     _exit(127);
   }
@@ -146,6 +152,12 @@ auto runCapture(const std::vector<const char*>& argv,
 auto runSilent(const std::vector<const char*>& argv,
                std::chrono::milliseconds timeout =
                    kDefaultSubprocessTimeout) -> int {
+  // Build argv before fork — see runCapture for the arena-lock rationale.
+  std::vector<char*> a;
+  a.reserve(argv.size() + 1);
+  for (const auto* s : argv) a.push_back(const_cast<char*>(s));
+  a.push_back(nullptr);
+
   const pid_t pid = ::fork();
   if (pid < 0) return -1;
   if (pid == 0) {
@@ -156,10 +168,6 @@ auto runSilent(const std::vector<const char*>& argv,
       ::dup2(devnull, STDERR_FILENO);
       ::close(devnull);
     }
-    std::vector<char*> a;
-    a.reserve(argv.size() + 1);
-    for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-    a.push_back(nullptr);
     ::execvp(a[0], a.data());
     _exit(127);
   }

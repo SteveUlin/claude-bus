@@ -459,25 +459,33 @@ made structural, not a code-review convention.
 
 ## 6. The unification — coordination patterns are Policy actors
 
-This is the *north star* (§0.1) made into a build milestone. After §5 proves the
-substrate with recovery, the next deliverable proves the substrate is **general**
+This is the *north star* (§0.1) made into a build milestone. After §5 proved the
+substrate with recovery, the next deliverable proved the substrate is **general**
 — that a coordination pattern, which looks nothing like recovery, drops onto the
-same interface and needs no separate hooks-and-scripts layer.
+same interface and needs no separate hooks-and-scripts layer. **DEMONSTRATED:**
+the substrate now runs **three live actors of distinct shape** — `RecoveryActor`
+(broker-internal), `DispatchActor` (competing-consumer *claim*, 1→1), and
+`BlackboardActor` (*fan-out*, 1→N). Two fundamental coordination shapes on one
+interface ⟹ the substrate is *coordination-shaped*, not work-queue-shaped.
 
-**The reframe.** `coordination/`'s patterns are today specified as per-agent
+**The reframe.** `coordination/`'s patterns were originally specified as per-agent
 plumbing (an agent-prompt teaching idle behavior + a Stop hook that pulls the
 next queue item + CLI helpers). Re-expressed as Policy actors, the *broker-side*
 of a pattern becomes one central actor:
 
-| Coordination pattern | As a Policy actor | Reuses (already built) |
-|---|---|---|
-| **work-queue** — agents pull tasks when idle | `QueueActor`: watch queue depth × ready agents → `Enqueue` an assignment to the next idle agent | queue = append-Log; claim = cursor; assignment = in-flight; readiness = the snapshot |
-| **blackboard** — shared notes all read | `BlackboardActor`: on a new post to the board topic → `Enqueue` a notify to subscribers | board = a topic; fan-out = Enqueue per subscriber |
-| **maildir** — async per-agent mailboxes | *already the agent-inbox topic + delivery loop* — the pattern mostly exists | inbox topic + cursor + the delivery kernel |
+| Coordination pattern | As a Policy actor | Reuses (already built) | Status |
+|---|---|---|---|
+| **work-queue** — competing-consumer 1→1 | `DispatchActor`: queue head × idle agents → `Enqueue{inbox, consume_from}`; the loop claims (consume-on-assign, reusing `fetch`) | queue = append-Log; claim = cursor; assignment = in-flight; readiness = snapshot | **SHIPPED** (M2 `bb3a56c9`; batch `13f0033c`); [[work-queue-dispatch]] |
+| **blackboard** — fan-out 1→N | `BlackboardActor` (stateless): new post → `Enqueue` notify to every live agent but the author; loop consumes-on-read via a `_dispatch` cursor | board = a topic; fan-out = Enqueue per agent | **SHIPPED** (`810426c5`); [[blackboard-notify]] |
+| **maildir** — async per-agent mailboxes | *already the agent-inbox topic + delivery loop* | inbox topic + cursor + the delivery kernel | already exists |
 
-The point of the table is not the specific patterns — it is that **the broker
-already owns most of every cell's right column.** A coordination pattern is the
-thin policy actor on top of primitives the kernel already provides.
+The two shipped patterns map the design space: a **claim** pattern needs
+consume-on-assign (the `consume_from` field, loop-executed); a **fan-out**
+pattern needs only pure `Enqueue` + a loop-owned read cursor (the stateless
+actor). The point of the table is not the specific patterns — it is that **the
+broker already owns most of every cell's "reuses" column.** A coordination
+pattern is the thin policy actor on top of primitives the kernel already
+provides.
 
 ### 6.1 The unification MVP (the milestone, MVP-first)
 

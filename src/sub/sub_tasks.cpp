@@ -8,12 +8,18 @@
 // view to come. See docs/task-model.md.
 //
 // Verbs:
-//   bus tasks                       — render the model (default)
-//   bus tasks [OWNER...]            — render, filtered to owners
+//   bus tasks                       — render the model (default table)
+//   bus tasks list [OWNER...]       — render (alias), optionally owner-filtered
 //   bus tasks open --id ID --owner NAME --title "..." [--deps a,b]
-//   bus tasks close --id ID
+//   bus tasks cancel --id ID        — mark cancelled (`close` is an alias)
+//   bus tasks graph | watch | mint-id
 //
-// open/close are thin sugar over the broker enqueue RPC — they write task
+// An UNKNOWN verb ERRORS (exit 2) — it must never fall through to the table's
+// empty-state. A mistyped verb silently read as an authoritative "no tasks
+// yet" is the monitor-must-not-lie class: it once fooled the hub into
+// reporting a false spine-reset and minting duplicate tasks.
+//
+// open/cancel are thin sugar over the broker enqueue RPC — they write task
 // records to the `tasks` append-log topic (the broker is the only writer to
 // topic logs). No broker code changes; the reader reads the log file
 // directly via TopicLog::dump().
@@ -225,7 +231,12 @@ auto tasksOpen(std::span<const char* const> args) -> int {
 // `bus tasks close --id ID` — append a cancellation so an abandoned /
 // dispatched-but-dropped task leaves the open list. The reader folds it
 // (state precedence: a done-claim still wins over a cancel).
-auto tasksClose(std::span<const char* const> args) -> int {
+// Mark a task cancelled (writes `cancelled=true` to the spine). Distinct from
+// `bus done`, which stamps a completion claim — readTasks renders a done task
+// "done" and a cancelled-but-not-done task "cancelled", so a mistaken/dup task
+// cancelled here reads as ✗, NOT as a false ✓ completion. `close` routes here
+// too (back-compat alias for the original, ambiguously-named verb).
+auto tasksCancel(std::span<const char* const> args) -> int {
   std::string id;
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string_view a{args[i]};
@@ -233,12 +244,12 @@ auto tasksClose(std::span<const char* const> args) -> int {
       if (++i >= args.size()) return 2;
       id = args[i];
     } else {
-      std::println(stderr, "bus tasks close: unknown flag \"{}\"", a);
+      std::println(stderr, "bus tasks cancel: unknown flag \"{}\"", a);
       return 2;
     }
   }
   if (id.empty()) {
-    std::println(stderr, "usage: bus tasks close --id ID");
+    std::println(stderr, "usage: bus tasks cancel --id ID");
     return 2;
   }
 
@@ -250,7 +261,7 @@ auto tasksClose(std::span<const char* const> args) -> int {
       json::serialize(json::Value::fromObject(std::move(rec)));
 
   const int rc = enqueueTaskRecord(body);
-  if (rc == 0) std::println("task close: {}", id);
+  if (rc == 0) std::println("task cancel: {}", id);
   return rc;
 }
 
@@ -262,8 +273,17 @@ auto emitTable(const std::set<std::string>& only, bool live) -> void {
   const auto eol = live ? kClearEol : std::string_view{""};
   const auto tasks = readTasks(only);
   if (tasks.empty()) {
-    std::println("no tasks yet — dispatch mints them with "
-                 "`bus tasks open`, agents close with `bus done`{}", eol);
+    if (!only.empty()) {
+      std::string who;
+      for (const auto& o : only) {
+        if (!who.empty()) who += ", ";
+        who += o;
+      }
+      std::println("no tasks for: {}{}", who, eol);  // filtered, not global
+    } else {
+      std::println("no tasks yet — dispatch mints them with "
+                   "`bus tasks open`, agents stamp `bus done`{}", eol);
+    }
     return;
   }
   const std::int64_t now = nowMs();
@@ -403,15 +423,26 @@ auto tasksWatch(std::span<const char* const> args) -> int {
 }  // namespace
 
 auto subTasks(std::span<const char* const> args) -> int {
-  if (!args.empty()) {
-    const std::string_view verb{args[0]};
-    if (verb == "mint-id") return tasksMintId(args.subspan(1));
-    if (verb == "open") return tasksOpen(args.subspan(1));
-    if (verb == "close") return tasksClose(args.subspan(1));
-    if (verb == "watch") return tasksWatch(args.subspan(1));
-    if (verb == "graph") return tasksGraph(args.subspan(1));
-  }
-  return tasksView(args);
+  if (args.empty()) return tasksView(args);  // bare `bus tasks` = full table
+
+  const std::string_view verb{args[0]};
+  if (verb == "mint-id") return tasksMintId(args.subspan(1));
+  if (verb == "open") return tasksOpen(args.subspan(1));
+  if (verb == "cancel" || verb == "close")
+    return tasksCancel(args.subspan(1));
+  if (verb == "watch") return tasksWatch(args.subspan(1));
+  if (verb == "graph") return tasksGraph(args.subspan(1));
+  // `list`/`view` are the table with optional OWNER filters. Filtering lives
+  // under an explicit verb so a mistyped verb can NOT masquerade as an owner
+  // filter that matches nothing — that masquerade was the empty-state lie.
+  if (verb == "list" || verb == "view") return tasksView(args.subspan(1));
+
+  std::println(stderr,
+               "bus tasks: unknown subcommand '{}'\n"
+               "  verbs: list [OWNER...] | open | cancel | graph | watch | "
+               "mint-id   (bare `bus tasks` = table)",
+               verb);
+  return 2;
 }
 
 }  // namespace bus

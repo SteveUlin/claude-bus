@@ -53,6 +53,8 @@ auto computeStateFromLabel(std::string_view label) -> State {
   if (label == "IDLE") return State::Idle;
   if (label == "HAS_MAIL") return State::HasMail;
   if (label == "WORKING") return State::Working;
+  if (label == "QUIET") return State::Quiet;
+  if (label == "NEEDS_NUDGE") return State::NeedsNudge;
   if (label == "ORCHESTRATING") return State::Orchestrating;
   if (label == "STUCK") return State::Stuck;
   if (label == "COMPACTING") return State::Compacting;

@@ -20,6 +20,11 @@ auto mk(std::string event, std::string source = "", std::string tool = "",
   a.last.source = std::move(source);
   a.last.tool = std::move(tool);
   a.last.ts_ms = ts_ms;
+  // Fold the event into the turn/tool accumulator just as readAgents does in
+  // production — so a PreToolUse fixture carries the "tool in flight" fact
+  // (open_tool) the structure-aware turn split keys off. Without this the
+  // fixtures would be unrealistic (open_tool always empty).
+  foldTurnState(a);
   return a;
 }
 
@@ -110,24 +115,77 @@ TEST(sessionend_is_ended) {
            std::string_view{"ended"});
 }
 
-// ─── The mid-stream dropped turn (the documented GAP) ───
-// computeAxes is f(last_event), not fold(events): it keeps only the latest
-// event, so a PreToolUse with no matching PostToolUse (the "dropped turn")
-// carries NO "open tool pending" fact. The turn looks like ordinary work
-// until the 5-min wall-clock threshold finally flips it to Stuck — the
-// machine cannot distinguish "mid-tool, healthy" from "tool dropped, wedged"
-// until time passes. This test asserts that CURRENT behavior and marks the
-// gap that roadmap 2.5 (a true fold carrying open_tool) would close.
-TEST(dropped_turn_invisible_until_wallclock_threshold) {
-  // PreToolUse:Bash, no PostToolUse — recent: indistinguishable from work.
+// ─── Structure-aware STUCK vs QUIET (Part B, docs/reporting-truth.md) ───
+// computeAxes now keys the stale-turn verdict off turn STRUCTURE (the D8
+// fold's open_tool), not raw last-event age — making the display agree with
+// the broker's maybeEscalateStuck. A tool open with no PostToolUse past
+// budget is a real wedge (STUCK); a turn merely silent with nothing in
+// flight is QUIET (parked / lost-Stop / dropped-turn), never alarm-red.
+
+TEST(open_tool_stale_is_stuck) {
+  // PreToolUse:Bash, no PostToolUse — the tool call never returned. Recent
+  // is ordinary work; past budget it is a structure-confirmed wedge.
   CHECK_EQ(turnOf(mk("PreToolUse", "", "Bash", ago(60))),
            std::string_view{"working"});
-  // Only after 5 min does age alone surface it as stuck.
   CHECK_EQ(turnOf(mk("PreToolUse", "", "Bash", ago(6 * 60))),
            std::string_view{"stuck"});
-  // NOTE: when 2.5 lands, an open-tool accumulator should flag the dropped
-  // turn immediately rather than waiting out the wall clock — update this
-  // test to assert detection at ago(60).
+}
+
+TEST(tool_done_then_silent_is_quiet_not_stuck) {
+  // PostToolUse:Bash — the tool RETURNED, nothing is in flight. Stale past
+  // budget means the agent simply went quiet (parked / lost Stop), NOT
+  // wedged. This is the false-STUCK fix: it must read QUIET, not STUCK.
+  CHECK_EQ(turnOf(mk("PostToolUse", "", "Bash", ago(6 * 60))),
+           std::string_view{"quiet"});
+  // End-to-end through computeState — the headline: no longer red STUCK.
+  CHECK_EQ(stateName(computeState(mk("PostToolUse", "", "Bash", ago(6 * 60)),
+                                  0, kNow, true)),
+           std::string_view{"QUIET"});
+}
+
+TEST(dropped_turn_is_quiet_not_stuck) {
+  // The mid-stream dropped turn: UserPromptSubmit arrives, claude streams
+  // text but emits no tool call and never closes the turn. No tool in
+  // flight → QUIET (recovers by nudge), not a tool-wedge.
+  CHECK_EQ(turnOf(mk("UserPromptSubmit", "", "", ago(6 * 60))),
+           std::string_view{"quiet"});
+}
+
+TEST(quiet_recent_is_still_working) {
+  // A just-completed tool with no follow-up yet is ordinary mid-turn work,
+  // not Quiet — Quiet only after the staleness budget elapses.
+  CHECK_EQ(turnOf(mk("PostToolUse", "", "Bash", ago(60))),
+           std::string_view{"working"});
+}
+
+// ─── NEEDS_NUDGE: blocked mail made visible (c, reporting-truth.md) ───
+// Mail pending on a Quiet agent would otherwise hide behind a calm state.
+// Surface it: Quiet + mail → NEEDS_NUDGE (a human poke delivers it). A
+// Ready agent keeps the benign HAS_MAIL (broker about to deliver), and a
+// genuine wedge stays red STUCK regardless of mail.
+
+TEST(quiet_with_mail_is_needs_nudge) {
+  const auto a = mk("PostToolUse", "", "Bash", ago(6 * 60));
+  CHECK_EQ(stateName(computeState(a, 0, kNow, true)),
+           std::string_view{"QUIET"});
+  CHECK_EQ(stateName(computeState(a, 2, kNow, true)),
+           std::string_view{"NEEDS_NUDGE"});
+}
+
+TEST(ready_with_mail_stays_has_mail) {
+  // Unchanged: an idle-at-prompt agent with mail is benign HAS_MAIL, not
+  // NEEDS_NUDGE — the broker delivers on the next tick.
+  const auto a = mk("Stop", "", "", ago(2));
+  CHECK_EQ(stateName(computeState(a, 2, kNow, true)),
+           std::string_view{"HAS_MAIL"});
+}
+
+TEST(wedged_with_mail_stays_stuck) {
+  // A real wedge stays red STUCK even with mail — its alarm already says
+  // intervene; the mail count rides the ✉ column.
+  const auto a = mk("PreToolUse", "", "Bash", ago(6 * 60));
+  CHECK_EQ(stateName(computeState(a, 3, kNow, true)),
+           std::string_view{"STUCK"});
 }
 
 // ─── Orchestrating: mid-turn but receptive (Workflow lease) ───

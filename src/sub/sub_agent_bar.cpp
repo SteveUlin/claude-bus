@@ -70,6 +70,8 @@ auto turnView(TurnAxis t) -> Primary {
       return {"💤", "IDLE", kGreen};
     case TurnAxis::Working:
       return {"🔨", "WORKING", kYellow};
+    case TurnAxis::Quiet:
+      return {"🌙", "QUIET", kDim};
     case TurnAxis::Orchestrating:
       return {"🪐", "ORCHESTRATING", kBrightGreen};
     case TurnAxis::Stuck:
@@ -132,12 +134,17 @@ auto fetchSnap(const std::string& socket_path,
   return s;
 }
 
-// HAS_MAIL is the overlay of Mail::Pending on Turn::Ready — the agent
-// is idle but has unread inbox to act on.
+// Mail overlays on the turn axis. Two flavors, by whether the agent can
+// take the mail on its own (docs/reporting-truth.md):
+//   - Ready + mail → HAS_MAIL: idle at the prompt, broker about to deliver.
+//   - Quiet + mail → NEEDS_NUDGE: silent, won't self-drain — a human poke
+//     unsticks the queued mail. The honest replacement for a HAS_MAIL pin
+//     that would otherwise hide blocked mail behind a calm-looking state.
 auto pickPrimary(const AgentSnap& s) -> Primary {
   if (s.process != ProcessAxis::Alive) return processView(s.process);
-  if (s.turn == TurnAxis::Ready && s.mail == MailAxis::Pending) {
-    return {"🔔", "HAS_MAIL", kCyan};
+  if (s.mail == MailAxis::Pending) {
+    if (s.turn == TurnAxis::Ready) return {"🔔", "HAS_MAIL", kCyan};
+    if (s.turn == TurnAxis::Quiet) return {"📬", "NEEDS_NUDGE", kBrightYellow};
   }
   return turnView(s.turn);
 }

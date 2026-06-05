@@ -81,7 +81,19 @@ enum class State {
   Idle,        // last event Stop, no mail, pane exists
   HasMail,     // last event Stop, mail waiting, pane exists
   Working,     // last non-Stop event recent (<5 min)
-  Stuck,       // last non-Stop event old (>5 min)
+  Quiet,       // mid-turn but silent past budget with NO tool in flight —
+               //   parked at the prompt / lost-Stop / long-think / the
+               //   mid-stream dropped-turn. NOT a wedge: nothing is hung,
+               //   the agent just went quiet. Distinct from Idle (turn
+               //   never cleanly closed) and from Stuck (no obligation
+               //   overdue). See docs/reporting-truth.md.
+  NeedsNudge,  // queued mail the agent can't take on its own — Quiet (or
+               //   otherwise can't-self-drain) + mail pending. The honest
+               //   replacement for a silent HAS_MAIL pin: a human nudge
+               //   unsticks it. Rides the mail axis, so it overlays the
+               //   turn rather than replacing it.
+  Stuck,       // structure-confirmed wedge: a tool call opened and never
+               //   returned (open_tool overdue). NOT raw last-event age.
   Compacting,  // SessionStart source=compact — claude is summarizing
                //   the conversation; the agent looks idle from events
                //   but is actually busy. Auto-clears on the next event.
@@ -128,7 +140,10 @@ enum class TurnAxis {
   None,        // process not Alive — axis N/A
   Ready,       // last event Stop or Notification(idle_prompt)
   Working,     // last non-Stop event, age < 5 min
-  Stuck,       // last non-Stop event, age > 5 min
+  Quiet,       // mid-turn, silent past budget, NO tool in flight (open_tool
+               //   empty) — parked / lost-Stop / dropped-turn. Not wedged.
+  Stuck,       // a tool call opened and never returned (open_tool overdue) —
+               //   a structure-confirmed wedge, not raw last-event age.
   NeedsInput,  // AskUserQuestion or Notification(permission_prompt)
   Compacting,  // SessionStart source=compact within 60 s
   Orchestrating,  // mid-turn but RECEPTIVE — a Workflow ran within the lease

@@ -28,6 +28,15 @@ namespace {
 // crashed/finished orchestrator never lies as Orchestrating for long.
 constexpr std::int64_t kOrchestrationLeaseMs = 90 * 1000;
 
+// Staleness budget — a turn with no progress (no new event) for this long
+// has stopped advancing. Matches the broker's CLAUDE_BUS_STUCK_BUDGET_MS /
+// CLAUDE_BUS_TOOL_BUDGET_MS defaults (delivery.cpp maybeEscalateStuck) so
+// the displayed turn agrees with the broker's escalation logic. (Kept a
+// compile-time constant here — computeAxes is a pure per-render-tick
+// function; honoring the env knob on the display is a future nicety, not a
+// correctness property. The structure-aware split below is what matters.)
+constexpr std::int64_t kStaleBudgetMs = 5 * 60 * 1000;
+
 }  // namespace
 
 auto axisName(ProcessAxis p) -> std::string_view {
@@ -48,6 +57,7 @@ auto axisName(TurnAxis t) -> std::string_view {
     case TurnAxis::None: return "none";
     case TurnAxis::Ready: return "ready";
     case TurnAxis::Working: return "working";
+    case TurnAxis::Quiet: return "quiet";
     case TurnAxis::Stuck: return "stuck";
     case TurnAxis::NeedsInput: return "needs_input";
     case TurnAxis::Compacting: return "compacting";
@@ -86,6 +96,7 @@ auto processAxisFrom(std::string_view s) -> ProcessAxis {
 auto turnAxisFrom(std::string_view s) -> TurnAxis {
   if (s == "ready") return TurnAxis::Ready;
   if (s == "working") return TurnAxis::Working;
+  if (s == "quiet") return TurnAxis::Quiet;
   if (s == "stuck") return TurnAxis::Stuck;
   if (s == "needs_input") return TurnAxis::NeedsInput;
   if (s == "compacting") return TurnAxis::Compacting;
@@ -115,6 +126,10 @@ auto stateName(State s) -> std::string_view {
       return "HAS_MAIL";
     case State::Working:
       return "WORKING";
+    case State::Quiet:
+      return "QUIET";
+    case State::NeedsNudge:
+      return "NEEDS_NUDGE";
     case State::Orchestrating:
       return "ORCHESTRATING";
     case State::Stuck:
@@ -145,6 +160,13 @@ auto stateGlyph(State s) -> std::string_view {
       return "🔔";
     case State::Working:
       return "🔨";  // Single-codepoint emoji, unambiguous 2-cell width.
+    case State::Quiet:
+      return "🌙";  // Crescent moon: quiet, at rest. Single-codepoint,
+                    //   unambiguous 2-cell width. Calm, never alarm.
+    case State::NeedsNudge:
+      return "📬";  // Mailbox, flag up: mail sitting uncollected — a nudge
+                    //   away. Single-codepoint, unambiguous 2-cell width.
+                    //   Distinct from HasMail's 🔔 (benign, broker has it).
     case State::Orchestrating:
       return "🪐";  // Ringed planet: subagents orbit the orchestrator.
                     //   Single-codepoint, unambiguous 2-cell width.
@@ -176,6 +198,16 @@ auto stateColor(State s) -> std::string_view {
       return ansi::kCyan;
     case State::Working:
       return ansi::kYellow;
+    case State::Quiet:
+      // Dim — "quiet, nothing in flight." Calm by design: the whole point
+      // is to STOP painting healthy idle panes alarm-red. Distinct from
+      // Idle's green (Idle = turn cleanly closed; Quiet = uncertain-but-ok).
+      return ansi::kDim;
+    case State::NeedsNudge:
+      // Bright-yellow — attention without alarm-red, matching the
+      // NeedsInput intervention idiom. Mail is queued but stuck; a human
+      // nudge unsticks it.
+      return ansi::kBrightYellow;
     case State::Orchestrating:
       // Bright-green = "busy but RECEPTIVE" — the healthy, mail-takeable
       // sibling of Working's plain yellow. Distinct from Idle's plain green.
@@ -295,11 +327,19 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
     // Compacting / Stuck, which set turn=None above). Both land at a
     // prompt waiting for input.
     ax.turn = TurnAxis::Ready;
-  } else if (age_s > 5 * 60) {
-    // PreToolUse / PostToolUse / UserPromptSubmit, but stale > 5 min — a
-    // genuine stall outranks an orchestration lease (which is shorter than
-    // this anyway, so it has already decayed).
-    ax.turn = TurnAxis::Stuck;
+  } else if (age_s * 1000 > kStaleBudgetMs) {
+    // Mid-turn (PreToolUse / PostToolUse / UserPromptSubmit) but stale past
+    // budget — no progress for a while. Part B (docs/reporting-truth.md):
+    // disambiguate WEDGED from QUIET by turn STRUCTURE (the D8 fold), not
+    // raw age, so the display agrees with the broker's maybeEscalateStuck:
+    //   - a tool call open with no PostToolUse → it never returned → Stuck
+    //     (a real wedge). open_tool is the broker's tool-wedged signal.
+    //   - nothing in flight (last event was PostToolUse / UserPromptSubmit)
+    //     → the agent simply went silent: parked at the prompt, a lost Stop,
+    //     a long think, or the mid-stream dropped-turn → Quiet, NOT red.
+    // A stall outranks an orchestration lease (shorter than this, already
+    // decayed).
+    ax.turn = a.open_tool.empty() ? TurnAxis::Quiet : TurnAxis::Stuck;
   } else if (a.last_orchestration_ms > 0 &&
              now_ms - a.last_orchestration_ms < kOrchestrationLeaseMs) {
     // Mid-turn AND a Workflow dispatched within the lease window — the
@@ -356,6 +396,13 @@ auto computeState(const AgentInfo& a, std::size_t unread,
       return ax.mail == MailAxis::Pending ? State::HasMail : State::Idle;
     case TurnAxis::Working:
       return State::Working;
+    case TurnAxis::Quiet:
+      // (c) docs/reporting-truth.md: a Quiet agent looks calm, so queued
+      // mail it can't take on its own would otherwise hide behind it. Make
+      // it visible — Quiet + pending mail → NeedsNudge (a human poke
+      // delivers it). Stuck stays red (its alarm already says intervene);
+      // the ✉ column still carries the count there.
+      return ax.mail == MailAxis::Pending ? State::NeedsNudge : State::Quiet;
     case TurnAxis::Orchestrating:
       return State::Orchestrating;
     case TurnAxis::Stuck:

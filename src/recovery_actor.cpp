@@ -217,8 +217,19 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
     // Fork the pane only after the cheap signals match and only when the
     // cooldown would let us log (so a confirmed-wedged agent forks ~once per
     // cooldown, not every scan).
+    // Behavior-preserving across the reporting-truth turn split
+    // (docs/reporting-truth.md): the old TurnAxis::Stuck (raw last-event age
+    // > budget) now splits into Stuck (a tool call overdue — a real wedge)
+    // and Quiet (stale but nothing in flight). Both were "stale" to R4
+    // before, so keep both to preserve recovery coverage. NOTE (recovery
+    // owner): if a Quiet agent (dropped-turn / lost-Stop, typically parked
+    // at an INSERT prompt) should recover by NUDGE rather than relaunch,
+    // this is the seam to refine — the pane-not-input-ready check below
+    // already spares parked agents, so this only bites a genuinely-hung
+    // tool-less turn.
     const bool looks_busy = ax.turn == TurnAxis::Working ||
                             ax.turn == TurnAxis::Stuck ||
+                            ax.turn == TurnAxis::Quiet ||
                             ax.process == ProcessAxis::Stuck;
     if (transcript_stale && looks_busy) {
       const std::string wkey = name + "\x1f" + std::string{"wedged"};

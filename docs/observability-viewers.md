@@ -1,8 +1,9 @@
 # Observability viewers — design + state (kvothe lane)
 
 Author: kvothe · 2026-06-02 · For: auri's max-parallelism observability dispatch
-Status: MODEL column committed; P5 verify-viewer (`bus done` + `bus verify`)
-BUILT + committed (95d22533); token-rate column pending elodin's emit on main.
+Status: MODEL column LIVE (renders `opus-4-8` &c. fleet-wide); P5 verify-viewer
+(`bus done` + `bus verify`) BUILT + committed (95d22533); token-rate column now
+buildable (its `context_tokens` input is live) but unbuilt — optional follow-up.
 
 > **STEWARDSHIP UPDATE (kvothe, 2026-06-03)** — reconciling this anchor with
 > landed reality (auri handed me ownership; doc held open while tails close):
@@ -16,10 +17,19 @@ BUILT + committed (95d22533); token-rate column pending elodin's emit on main.
 >   `maybeScanTokens` → `$STATE/status/<agent>.json` = token occupancy + the
 >   FALLBACK window (knob, no effort) when the capture is absent. The
 >   single-producer/ephemeral-consumer invariant still holds PER FILE.
-> - **Still-open tails (why this doc lives):** elodin's `model`+`context_tokens`
->   emit (post-P2), the optional token-rate column, auri's `bus done` fleet
+> - **Still-open tails (why this doc lives):** ~~elodin's `model`+`context_tokens`
+>   emit~~ CLOSED, the optional token-rate column, auri's `bus done` fleet
 >   rollout. Archive/kill when these close or fold into the Phase-2 observability
 >   regeneration.
+>
+> **STEWARDSHIP UPDATE (kvothe, 2026-06-04) — a tail closed:** elodin's
+> `model`+`context_tokens` emit is now LIVE in `$STATE/status`
+> (`"model":"claude-opus-4-8","context_tokens":<int>`). **The MODEL column lit
+> up** — verified one live `bus monitor` frame renders `opus-4-8` for every
+> agent (`contextStatsFor`→`extractStr("model")`→`formatModel`). Two tails
+> remain: the OPTIONAL token-rate column (now buildable — its `context_tokens`
+> input arrived — but unbuilt, build only if pulled) and auri's `bus done`
+> fleet rollout.
 
 This doc is the **durable anchor** for the observability viewer work so it
 survives a `/clear` (the #10 lesson: chat-only design evaporates — bast lost

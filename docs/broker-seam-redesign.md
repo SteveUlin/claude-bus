@@ -168,7 +168,22 @@ honest that these two are relabel-risk:
   the `if (isOffTty) … else deliverInline` model stands, now authoritatively
   documented.
 
-## 7. Per-seam discipline (every seam)
+## 7. The Policy seam — see [docs/policy-actors.md](policy-actors.md)
+
+Policy is the last cut and the only one that *adds a capability*: the
+extension point future autonomous behaviors (facts-log distiller, recovery,
+coordination hooks) plug into without reopening the seam. The full,
+self-contained design + implementation plan — the actor interface, P2 as the
+proving actor (no behavior change), and the incremental build sequence — lives
+in **[docs/policy-actors.md](policy-actors.md)**, which gates the extraction
+(sulin approves it → code lands). One-line shape: `PolicyActor.evaluate(ctx) →
+vector<PolicyAction>` (pure), `PolicyAction = Enqueue|Recover|Nudge` with **no
+cursor verb** (kernel-untouchable by construction), `PolicyEngine` the
+registration surface; P2 (`maybeAutoRecover`) is the reference actor; the
+observe/soft/on flag stays orthogonal. dependsOn Router+Readers — a DAG leaf,
+hence last.
+
+## 8. Per-seam discipline (every seam)
 
 - **Incremental + behind tests:** each seam lands as its own commit with the
   `Router.plan()`-style fake-backed unit test that proves the cut.
@@ -177,7 +192,7 @@ honest that these two are relabel-risk:
   broker delivers mail at EVERY commit — no commit may leave it unable to push.
 - **No shared mutable field across a seam** — the relabel test.
 
-## 8. Free hygiene (tracked junk, config-honesty class)
+## 9. Free hygiene (tracked junk, config-honesty class)
 
 The artifact flags tracked build/scratch junk in the PUBLIC repo against the
 repo's own rules: `test_getline.cpp`, `test.txt`, `bin/migrate-state` (a
@@ -185,7 +200,7 @@ one-time `/tmp`→XDG migrator, now dead). Removing these is a zero-risk hygiene
 commit (same config-honesty class as the `max_record_bytes` removal), landable
 independently of the seam work. Verify zero-callers (migrate-state) first.
 
-## 9. Interleave with P2 (locked)
+## 10. Interleave with P2 (locked)
 
 `[P2 breaker on current shape] + [this doc in parallel]` → P2 lands → auri acks
 the doc → bottom-up extraction (cuts #1/#2 free; Transport/Readers gated;

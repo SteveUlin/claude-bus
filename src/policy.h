@@ -66,6 +66,16 @@ struct QueuedTask {
   std::string body;   // the task payload
 };
 
+// A new post on a blackboard topic, folded into the snapshot by the loop plane
+// (which advances a loop-owned _dispatch cursor as it folds — consume-on-read,
+// so a BlackboardActor stays stateless). A fan-out actor notifies every live
+// agent except the author. See docs/blackboard-notify.md.
+struct BoardUpdate {
+  std::string topic;   // the blackboard topic
+  std::string author;  // record sender — excluded from the fan-out
+  std::string body;    // the post content
+};
+
 // The per-(topic,consumer) read snapshot the loop plane builds for every actor.
 // Pure values + a LAZY pane resolver: pane acquisition and its TTL cache stay in
 // the loop plane (broker-seam-redesign §2); an actor pulls a pane only after its
@@ -89,6 +99,7 @@ struct PolicyContext {
   std::vector<AgentSnapshot> agents;   // live panes only (paneId resolved)
   std::function<PaneState(const std::string&)> pane;  // lazy, loop-cached
   std::vector<QueuedTask> queue_head;  // head window of work-queue topic(s)
+  std::vector<BoardUpdate> board_updates;  // new posts on blackboard topic(s)
 };
 
 class PolicyActor {

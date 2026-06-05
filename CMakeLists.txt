@@ -63,6 +63,7 @@ add_library(bus_policy STATIC
     src/policy.cpp
     src/recovery_actor.cpp
     src/dispatch_actor.cpp
+    src/blackboard_actor.cpp
 )
 target_include_directories(bus_policy PUBLIC src)
 target_link_libraries(bus_policy PUBLIC bus_readers)

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "agent_status.h"
+#include "blackboard_actor.h"
 #include "dispatch_actor.h"
 #include "policy.h"
 #include "recovery_actor.h"
@@ -223,4 +224,43 @@ TEST(dispatch_skips_ineligible_agents) {
   ctx.agents.push_back(pending);
 
   CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 0);  // none eligible
+}
+
+// ── BlackboardActor::evaluate (M2 second pattern — fan-out, broker-free) ────
+
+TEST(blackboard_fans_out_to_all_but_author) {
+  BlackboardActor actor;
+  policy::PolicyContext ctx;
+  ctx.board_updates.push_back({"notes", "alice", "ship plan A"});
+  for (const char* n : {"alice", "bob", "carol"}) {
+    policy::AgentSnapshot s;
+    s.name = n;
+    s.info = nullptr;  // BlackboardActor reads only s.name (fan-out by name)
+    s.axes.turn = TurnAxis::Ready;
+    ctx.agents.push_back(s);
+  }
+  auto out = actor.evaluate(ctx);
+  CHECK_EQ(static_cast<int>(out.size()), 2);  // bob + carol, NOT alice (author)
+  bool to_bob = false, to_carol = false, to_alice = false;
+  for (const auto& a : out) {
+    CHECK_EQ(a.protocol, std::string{"blackboard-notify"});
+    if (a.topic == "inbox-bob") to_bob = true;
+    if (a.topic == "inbox-carol") to_carol = true;
+    if (a.topic == "inbox-alice") to_alice = true;
+  }
+  CHECK(to_bob);
+  CHECK(to_carol);
+  CHECK(!to_alice);
+}
+
+TEST(blackboard_no_updates_is_inert) {
+  BlackboardActor actor;
+  policy::PolicyContext ctx;
+  AgentInfo info = mkInfo("Stop", 1000);
+  policy::AgentSnapshot s;
+  s.name = "bob";
+  s.info = &info;
+  s.axes.turn = TurnAxis::Ready;
+  ctx.agents.push_back(s);
+  CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 0);  // no posts → no-op
 }

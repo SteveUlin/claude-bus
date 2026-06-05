@@ -1,6 +1,7 @@
 #include "delivery.h"
 
 #include "agent_status.h"
+#include "blackboard_actor.h"
 #include "dispatch.h"
 #include "dispatch_actor.h"
 #include "event.h"
@@ -211,6 +212,9 @@ auto Loop::load() -> void {
   // queue_head → no assignments), so registering it is behavior-neutral on a
   // fleet with no work-queue. See docs/work-queue-dispatch.md.
   engine_.registerActor(std::make_unique<DispatchActor>());
+  // M2 second pattern: the blackboard fan-out notifier. Also inert until a
+  // blackboard topic exists. See docs/blackboard-notify.md.
+  engine_.registerActor(std::make_unique<BlackboardActor>());
   // Read every $STATE/in-flight/*.json into memory. Survives restart.
   in_flight_.clear();
   const auto dir = inflightDir(cfg_);
@@ -1190,6 +1194,28 @@ auto Loop::runPolicy() -> void {
     for (const auto& m : *r) {
       ctx.queue_head.push_back({tcfg.name, m.id, m.body});
     }
+  }
+
+  // Fold new blackboard posts (consume-on-read: advance a loop-owned _dispatch
+  // cursor as we fold, so a BlackboardActor stays stateless). The cursor file
+  // persists, so a restart resumes past already-notified posts.
+  for (const auto& tcfg : registry_.list()) {
+    if (tcfg.kind != std::string{kKindBlackboard}) continue;
+    const auto cursor_p =
+        topic::cursorPath(cfg_.state_dir, tcfg.name, "_dispatch");
+    const auto cursor = topic::readCursor(cursor_p);
+    const auto start = cursor > 0 ? cursor
+                                  : static_cast<std::int64_t>(
+                                        topic::kFileHeaderBytes);
+    topic::TopicLog log{cfg_.state_dir + "/topics/" + tcfg.name + ".log"};
+    auto r = log.peek(start, 16);  // bounded window of new posts
+    if (!r || r->empty()) continue;
+    std::int64_t advance = start;
+    for (const auto& m : *r) {
+      ctx.board_updates.push_back({tcfg.name, m.sender, m.body});
+      advance = m.next_offset;
+    }
+    topic::writeCursor(cursor_p, advance);
   }
 
   for (const auto& a : engine_.evaluate(ctx)) executePolicyAction(a);

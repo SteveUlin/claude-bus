@@ -22,6 +22,37 @@ interface that admits new actors **without reopening the seam**. P2
 auto-recovery is the *proving* actor — it fitting cleanly is the evidence the
 interface is sufficient, not the goal itself.
 
+### 0.1 The north star — one coordination substrate
+
+The reason to build this well: **the Policy model is the single coordination
+substrate for the whole bus.** The same `observe snapshot → guard → emit action`
+engine serves *broker-internal autonomy* (recovery, auto-clear, the doorbell)
+**and** the *user-facing coordination patterns* (`coordination/`: queue,
+blackboard, maildir) that the original design pencilled as a *separate* layer of
+per-agent hooks + scripts. Unifying them is the point — and it is a concrete
+deliverable improvement, not architecture for its own sake:
+
+- **It answers `coordination/README`'s open question.** That doc leaves "how
+  does a pattern activate" *unresolved* ("the shape will emerge when the second
+  pattern lands"). Policy is the answer: **the broker-side of a coordination
+  pattern IS a Policy actor.** No bespoke loader, no hooks-wiring step.
+- **It moves coordination from distributed-and-racy to central-and-durable.** A
+  work-queue as per-agent Stop hooks means each agent races to pull the next
+  item, only while it's alive, with no shared arbiter. As a Policy actor it runs
+  *once, centrally, in the broker*, observing every agent's readiness at once —
+  and it **reuses primitives the broker already has**: the queue is an
+  append-Log, a claim is a cursor, an assignment is an in-flight record,
+  readiness is the snapshot. Most of a coordination pattern is *already built*;
+  the actor is the thin part that's missing.
+- **One mechanism, one audit trail, one test harness** for recovery and
+  coordination alike — instead of two subsystems with two mental models.
+
+This is the direction the build moves toward. But **MVP-first beats any
+particular policy**: §5 lands the substrate (proven by recovery) before §6
+proves the unification with *one* coordination pattern end-to-end. The bold
+extensions (§8) are great-to-have, explicitly non-gating. We earn the vision one
+deliverable at a time.
+
 The bet this protects (the broker's thesis): *a durable, out-of-context broker
 is a cheaper, more reliable system-of-record than in-context coordination.* Its
 irreducible kernel is a **triad** — an append-only byte-offset **Log**, a
@@ -404,7 +435,51 @@ made structural, not a code-review convention.
 
 ---
 
-## 6. The litmus, restated
+## 6. The unification — coordination patterns are Policy actors
+
+This is the *north star* (§0.1) made into a build milestone. After §5 proves the
+substrate with recovery, the next deliverable proves the substrate is **general**
+— that a coordination pattern, which looks nothing like recovery, drops onto the
+same interface and needs no separate hooks-and-scripts layer.
+
+**The reframe.** `coordination/`'s patterns are today specified as per-agent
+plumbing (an agent-prompt teaching idle behavior + a Stop hook that pulls the
+next queue item + CLI helpers). Re-expressed as Policy actors, the *broker-side*
+of a pattern becomes one central actor:
+
+| Coordination pattern | As a Policy actor | Reuses (already built) |
+|---|---|---|
+| **work-queue** — agents pull tasks when idle | `QueueActor`: watch queue depth × ready agents → `Enqueue` an assignment to the next idle agent | queue = append-Log; claim = cursor; assignment = in-flight; readiness = the snapshot |
+| **blackboard** — shared notes all read | `BlackboardActor`: on a new post to the board topic → `Enqueue` a notify to subscribers | board = a topic; fan-out = Enqueue per subscriber |
+| **maildir** — async per-agent mailboxes | *already the agent-inbox topic + delivery loop* — the pattern mostly exists | inbox topic + cursor + the delivery kernel |
+
+The point of the table is not the specific patterns — it is that **the broker
+already owns most of every cell's right column.** A coordination pattern is the
+thin policy actor on top of primitives the kernel already provides.
+
+### 6.1 The unification MVP (the milestone, MVP-first)
+
+**Deliverable:** *one* coordination pattern, end-to-end, as a single Policy
+actor — proving "coordination = policy" with running code, not a doc claim.
+
+- **Pick the leanest, not the favourite.** The work-queue is the natural first
+  *because the broker primitives already exist* (append-Log + cursor + in-flight
+  + readiness) — so the new code is just the dispatch actor, the smallest
+  possible proof. But the milestone is the *framework result* — "a non-recovery,
+  coordination-shaped actor runs on the same engine" — not the queue's feature
+  set. Resist gold-plating the chosen pattern (§0.1: MVP over any particular
+  policy).
+- **What it proves:** a pattern activates by *registering an actor*, with **no
+  bespoke loader and no per-agent hooks** — closing `coordination/README`'s open
+  "how does a pattern activate" question.
+- **Gating:** this is the milestone *after* the seam lands (§5 C1). It does NOT
+  gate C1, and it is its own design-doc + sulin-review pass — same discipline as
+  the seam. Named here so the build has a north star, scoped here so it stays
+  MVP.
+
+---
+
+## 7. The litmus, restated
 
 A seam is real iff it's testable without a broker. `RecoveryActor::evaluate(ctx)`
 takes a hand-built `PolicyContext` (synthetic `AgentSnapshot`s, a fake `pane`
@@ -417,17 +492,53 @@ a relabel.
 
 ---
 
-## 7. Gate + sequence
+## 8. Gate + sequence
 
-1. **This doc → auri review → sulin approval.** (You are here.) No
-   seam-extraction commits until sulin signs off.
+1. **This doc → auri review → sulin approval.** No seam-extraction commits until
+   sulin signs off.
 2. **Commit 1** (§5.1) — `bus::policy` lib + `RecoveryActor` verbatim + engine
    wired; zero behavior change; deploy-verified vs the live observe audit stream.
-   This is the seam.
-3. **Commit 2** (§5.2, later) — `AutoClearActor` fold — and **Commit 3** (§5.3,
+   This is the seam — it lands the substrate.
+3. **Unification MVP** (§6.1, its own design+review pass) — *one* coordination
+   pattern (lean first: the work-queue) as a Policy actor, proving the substrate
+   is general. The north star; does not gate Commit 1.
+4. **Commit 2** (§5.2, later) — `AutoClearActor` fold — and **Commit 3** (§5.3,
    Phase C, gated) — wire `Recover`/`Nudge` — are *separate*, behavior-reviewed
    steps downstream of the P2 activation sequence
    ([[project_p2_auto_recovery]]), not the seam refactor.
+
+## 9. Future directions (non-gating, great-to-have)
+
+The substrate already admits these — none needs a kernel change; each is a new
+actor (or a small engine affordance), landed when it earns priority. Listed so
+the design space is on record, *not* as committed scope.
+
+- **Coordination breadth.** Once the §6 MVP proves the shape, the remaining
+  `coordination/` patterns (blackboard, richer queues, maildir niceties) land as
+  further actors — and the originally-planned hooks+scripts coordination layer is
+  *retired in favour of actors*. One subsystem, not two.
+- **A declarative policy DSL.** Most policies reduce to `(predicate over
+  snapshot) → Enqueue(topic, body)`. Express them as *data* on a
+  `policy-registry` topic the engine hot-loads — add a coordination rule with no
+  recompile. The compiled actors stay the privileged core; the DSL covers the
+  long tail.
+- **A self-tuning meta-actor.** Recovery thresholds (backoff, MaxR/MaxT,
+  idle-clear-min) are human-guessed env knobs. A `MetaActor` observes the audit
+  log of *would-recover vs. actual outcome* and rewrites other actors'
+  parameters — the breaker's false-positive rate becomes a gradient it descends.
+  This is "policy is a theory that UPDATES" ([[project_p3_context_watchdog]])
+  made structural.
+- **Adversarial actors.** Borrow the workflow adversarial-verify pattern, live:
+  a proposer `Enqueue`s to a `proposed-actions` topic; a skeptic actor must
+  *refute* before a destructive action (clear/relaunch) executes. The
+  engine's no-arbitration rule (§2.1) is what *enables* this — the debate isn't
+  engine machinery, it's just more actors talking through the Log.
+
+The through-line: **once actors are kernel-safe (§1.4) and converse through the
+durable Log, the broker stops being a delivery mechanism and becomes a
+programmable, self-observing control plane.** Boldness is cheap here precisely
+because the kernel triad is fenced off by construction — the worst a runaway
+actor can do is emit an auditable record.
 
 See [[project_broker_seam_redesign]] for the full six-seam decomposition this
 completes; this doc is the durable contract future actor-authors read.

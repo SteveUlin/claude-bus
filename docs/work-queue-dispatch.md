@@ -219,3 +219,43 @@ purest (zero executor change) at the cost of actor-owned claim state and a
 sole-consumer assumption. I recommend **(A)**. Everything else (the actor shape,
 the snapshot fold, the activation story, the build sequence) is identical between
 them. One ratify, then build.
+
+**RESOLVED: sulin ratified (A); built + landed (M2.1 `bb3a56c9`); batch-assign
+v2 `13f0033c`.**
+
+## 8. Re-queue-on-death — PROPOSED (needs review; delivery-layer change)
+
+The remaining robustness gap: a task assigned to an agent whose pane vanishes
+before it drains the task. Today the dead-pane handling releases / escalates the
+record to `inbox-ops` (a human) — a work-queue would rather **re-assign it to
+another idle agent**.
+
+**Why this is NOT a pure actor (the honest finding).** A `DispatchActor` that
+tracked assignments and re-queued on "agent gone" cannot reliably tell *task
+done* from *task never received*: both read as `inbox_pending == false` in the
+snapshot. The clean "done" signal is the **inbox ack** (the inbox cursor
+advancing past the task) — which lives in the delivery layer. So a correct
+re-queue must be delivery-layer aware; a pure-actor version would re-queue
+already-completed work on a normal despawn.
+
+**Proposed shape (delivery-layer, design-gated):**
+- Tag work-assignment inbox records with their source queue (the assignment
+  `Enqueue` already sets `protocol="work-assignment"`; carry the source-queue
+  name alongside — e.g. in the in-flight tracker / a record field).
+- In the dead-pane release path (where an agent's pane vanishes with undelivered
+  in-flight / pending inbox records), for each **undelivered** work-assignment,
+  re-enqueue its body to the source work-queue instead of escalating. Delivered-
+  and-acked tasks are already past the cursor → not re-queued (the ack is the
+  done signal). The `DispatchActor` then re-assigns the re-queued task normally.
+
+**Why it's gated:** it touches the at-least-once delivery core (the dead-pane
+release in `scanEvents` + the in-flight tracker), so — like every kernel-adjacent
+change — design-doc-first, auri review, then build behind tests (an itest:
+assign a task, kill the recipient's pane pre-drain, assert it re-appears on the
+queue and re-assigns to a survivor; and the inverse: a *completed* task is NOT
+re-queued on a later despawn). Not bundled into the inert-by-default actor work.
+
+**Lower-value alternative (pure actor, no kernel touch):** re-queue only on the
+narrow pre-delivery window (agent gone between assignment and the task landing in
+its inbox). Safe but covers little — most deaths are post-delivery. Documented;
+not recommended over the delivery-layer version.

@@ -119,6 +119,10 @@ auto defaultSocketPath() -> std::string {
 
 auto Server::requestStop() -> void { gStopFlag.store(1); }
 
+auto Server::stopRequested() -> bool {
+  return gStopFlag.load(std::memory_order_acquire) != 0;
+}
+
 Server::Server(std::string socket_path) : socket_path_{std::move(socket_path)} {}
 
 Server::~Server() {

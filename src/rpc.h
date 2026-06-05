@@ -74,6 +74,11 @@ class Server {
   // (sets a volatile atomic flag the accept loop polls).
   static auto requestStop() -> void;
 
+  // True once requestStop()/SIGTERM has been observed. Lets bounded
+  // waits elsewhere (e.g. dispatchTui's backoff) bail promptly on
+  // shutdown instead of sleeping out their full budget.
+  static auto stopRequested() -> bool;
+
  private:
   std::string socket_path_;
   int listen_fd_{-1};

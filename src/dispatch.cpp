@@ -1,6 +1,7 @@
 #include "dispatch.h"
 
 #include "pane.h"
+#include "rpc.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -20,6 +21,20 @@ namespace {
 
 auto sleepFor(std::chrono::milliseconds d) -> void {
   std::this_thread::sleep_for(d);
+}
+
+// Sleep up to d, waking every ~50ms to recheck the broker stop flag.
+// Returns false the moment a shutdown is observed so a multi-second
+// backoff can't park the delivery thread past SIGTERM.
+auto sleepUnlessStopping(std::chrono::milliseconds d) -> bool {
+  constexpr std::chrono::milliseconds kSlice{50};
+  for (auto left = d; left > std::chrono::milliseconds::zero();) {
+    if (rpc::Server::stopRequested()) return false;
+    const auto chunk = left < kSlice ? left : kSlice;
+    std::this_thread::sleep_for(chunk);
+    left -= chunk;
+  }
+  return !rpc::Server::stopRequested();
 }
 
 // Acquire the per-pane TTY flock. The lock is the same one
@@ -88,11 +103,12 @@ auto dispatchTui(const BrokerConfig& cfg, std::string_view agent,
       std::chrono::milliseconds{4000},
   };
   for (int i = 0; i < 3; ++i) {
+    if (rpc::Server::stopRequested()) return false;
     if (isReady(agent)) {
       return sendToPane(pane, body);
     }
     normalize(pane);
-    sleepFor(backoffs[i]);
+    if (!sleepUnlessStopping(backoffs[i])) return false;
   }
   return false;
 }

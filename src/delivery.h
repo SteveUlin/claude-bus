@@ -219,6 +219,9 @@ class Loop {
   // cursor — docs/policy-actors.md.
   auto runPolicy() -> void;
   auto executePolicyAction(const policy::PolicyAction& a) -> void;
+  // Consume a topic's head (advance its "" cursor past the head, like `fetch`).
+  // The M2 work-queue claim, performed by the loop on a consume_from intent.
+  auto consumeQueueHead(const std::string& topic) -> void;
   // True iff a record sits past agent's inbox cursor — a snapshot input for the
   // policy context. Pure read.
   auto inboxPending(const std::string& agent) const -> bool;

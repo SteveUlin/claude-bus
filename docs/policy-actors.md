@@ -498,6 +498,12 @@ actor — proving "coordination = policy" with running code, not a doc claim.
   gate C1, and it is its own design-doc + sulin-review pass — same discipline as
   the seam. Named here so the build has a north star, scoped here so it stays
   MVP.
+- **The plan:** see **[docs/work-queue-dispatch.md](work-queue-dispatch.md)** —
+  the M2 design + build sequence. Key finding it surfaces: a competing-consumer
+  queue must *claim* tasks (a cursor advance), which §1.4 forbids actors from
+  doing — resolved by the loop executor performing the consume (reusing the
+  existing `fetch`) on the actor's declarative intent, so the actor still touches
+  no cursor. The extension point, exercised for real.
 
 ---
 

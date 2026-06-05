@@ -2,6 +2,7 @@
 
 #include "agent_status.h"
 #include "dispatch.h"
+#include "dispatch_actor.h"
 #include "event.h"
 #include "json_min.h"
 #include "pane.h"
@@ -206,6 +207,10 @@ auto Loop::load() -> void {
                                : "observe";
   engine_.registerActor(
       std::make_unique<RecoveryActor>(cfg_.state_dir, mode));
+  // M2: the work-queue dispatcher. Inert until a work-queue topic exists (empty
+  // queue_head → no assignments), so registering it is behavior-neutral on a
+  // fleet with no work-queue. See docs/work-queue-dispatch.md.
+  engine_.registerActor(std::make_unique<DispatchActor>());
   // Read every $STATE/in-flight/*.json into memory. Survives restart.
   in_flight_.clear();
   const auto dir = inflightDir(cfg_);
@@ -1168,6 +1173,25 @@ auto Loop::runPolicy() -> void {
     ctx.agents.push_back(std::move(s));
   }
 
+  // Fold the head of every work-queue topic into the snapshot so a DispatchActor
+  // (pure, reads only ctx) can pair tasks with idle agents. Bounded window — the
+  // cost is O(work-queue count), and only the head matters for one-per-tick
+  // assignment.
+  for (const auto& tcfg : registry_.list()) {
+    if (tcfg.kind != std::string{kKindWorkQueue}) continue;
+    const auto cursor_p = topic::cursorPath(cfg_.state_dir, tcfg.name, "");
+    const auto cursor = topic::readCursor(cursor_p);
+    const auto start = cursor > 0 ? cursor
+                                  : static_cast<std::int64_t>(
+                                        topic::kFileHeaderBytes);
+    topic::TopicLog log{cfg_.state_dir + "/topics/" + tcfg.name + ".log"};
+    auto r = log.peek(start, 1);  // one-per-tick MVP → head only
+    if (!r) continue;
+    for (const auto& m : *r) {
+      ctx.queue_head.push_back({tcfg.name, m.id, m.body});
+    }
+  }
+
   for (const auto& a : engine_.evaluate(ctx)) executePolicyAction(a);
 }
 
@@ -1196,12 +1220,35 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
       opts.deliver_when = a.deliver_when;
       stampEpoch(opts, current_epoch_);
       auto _ = log.append("broker", a.body, opts);
+      // M2 work-queue claim: after the task is durably in the recipient inbox,
+      // consume the source queue head (advance its "" cursor past the head),
+      // reusing the fetch primitive's semantics. Append-then-consume = if the
+      // broker dies between, the task re-assigns (at-least-once) rather than
+      // being lost — the broker's delivery ethos. The cursor advance happens
+      // HERE in the loop (kernel plane), never in the actor (§1.4).
+      if (!a.consume_from.empty()) consumeQueueHead(a.consume_from);
       break;
     }
     case Kind::Recover:
     case Kind::Nudge:
       break;  // Phase C (gated); not emitted in observe/soft.
   }
+}
+
+// Consume one record from a topic's head: advance its "" (shared) cursor past
+// the head, exactly as the `fetch` RPC does. The M2 work-queue claim — the loop
+// (kernel plane) performs it on a DispatchActor's consume_from intent, so the
+// actor never advances a cursor. No-op if the queue is empty.
+auto Loop::consumeQueueHead(const std::string& topic) -> void {
+  const auto cursor_p = topic::cursorPath(cfg_.state_dir, topic, "");
+  const auto cursor = topic::readCursor(cursor_p);
+  const auto start = cursor > 0 ? cursor
+                                : static_cast<std::int64_t>(
+                                      topic::kFileHeaderBytes);
+  topic::TopicLog log{cfg_.state_dir + "/topics/" + topic + ".log"};
+  auto r = log.peek(start, 1);
+  if (!r || r->empty()) return;
+  topic::writeCursor(cursor_p, r->front().next_offset);
 }
 
 // Doorbell — wake an idle off-TTY agent that has queued mail.

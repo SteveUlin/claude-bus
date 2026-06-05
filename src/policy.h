@@ -46,6 +46,24 @@ struct PolicyAction {
   std::string body;      // Enqueue: record body
   std::string protocol;  // Enqueue: SendOpts.protocol (audit / epoch tag)
   int deliver_when{0};   // Enqueue: SendOpts.deliver_when (0 = now, 1 = idle)
+  // Enqueue: if non-empty, the loop ALSO consumes (cursor-advances past) the
+  // head of this source topic after the append — the work-queue claim (M2,
+  // docs/work-queue-dispatch.md §2 resolution A). The consume is performed by
+  // the LOOP (kernel plane, reusing the fetch primitive), never the actor, so
+  // §1.4's no-cursor-verb guard holds: an actor expresses intent, the kernel
+  // advances the cursor. Empty = a plain Enqueue.
+  std::string consume_from;
+};
+
+// A task at the head of a work-queue topic, folded into the snapshot by the
+// loop plane so a DispatchActor can pair it with an idle agent (it is pure and
+// reads only ctx). The component is generic: any pattern that observes a
+// topic's head adds its records here (§1.3 "new observation needs are new
+// snapshot fields").
+struct QueuedTask {
+  std::string topic;  // the work-queue topic this task came from
+  std::string id;     // record id (head ordering)
+  std::string body;   // the task payload
 };
 
 // The per-(topic,consumer) read snapshot the loop plane builds for every actor.
@@ -70,6 +88,7 @@ struct PolicyContext {
   std::int64_t now_mono_ms{0};         // ledger / guard clock (suspend-immune)
   std::vector<AgentSnapshot> agents;   // live panes only (paneId resolved)
   std::function<PaneState(const std::string&)> pane;  // lazy, loop-cached
+  std::vector<QueuedTask> queue_head;  // head window of work-queue topic(s)
 };
 
 class PolicyActor {

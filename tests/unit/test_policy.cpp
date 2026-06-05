@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "agent_status.h"
+#include "dispatch_actor.h"
 #include "policy.h"
 #include "recovery_actor.h"
 
@@ -158,4 +159,68 @@ TEST(recovery_actor_soft_clears_idle) {
   CHECK(saw_clear);
   CHECK(saw_audit);
   CHECK(!saw_would);
+}
+
+// ── DispatchActor::evaluate (M2 — the unification MVP, broker-free) ─────────
+
+TEST(dispatch_assigns_head_to_idle_agent) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  ctx.queue_head.push_back({"work-queue", "t1", "do the thing"});
+  AgentInfo idle = mkInfo("Stop", 1000);
+  policy::AgentSnapshot s;
+  s.name = "alice";
+  s.info = &idle;
+  s.axes.turn = TurnAxis::Ready;  // idle, not attached/blocking/pending/in-flight
+  ctx.agents.push_back(s);
+
+  auto out = actor.evaluate(ctx);
+  CHECK_EQ(static_cast<int>(out.size()), 1);
+  CHECK_EQ(out[0].topic, std::string{"inbox-alice"});
+  CHECK_EQ(out[0].body, std::string{"do the thing"});
+  CHECK_EQ(out[0].consume_from, std::string{"work-queue"});  // the claim intent
+  CHECK_EQ(out[0].protocol, std::string{"work-assignment"});
+}
+
+TEST(dispatch_empty_queue_is_inert) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  AgentInfo idle = mkInfo("Stop", 1000);
+  policy::AgentSnapshot s;
+  s.name = "alice";
+  s.info = &idle;
+  s.axes.turn = TurnAxis::Ready;
+  ctx.agents.push_back(s);
+  CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 0);  // no work → no-op
+}
+
+TEST(dispatch_skips_ineligible_agents) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  ctx.queue_head.push_back({"work-queue", "t1", "task"});
+
+  AgentInfo working = mkInfo("PreToolUse", 1000);
+  policy::AgentSnapshot busy;
+  busy.name = "bob";
+  busy.info = &working;
+  busy.axes.turn = TurnAxis::Working;  // not Ready
+  ctx.agents.push_back(busy);
+
+  AgentInfo r1 = mkInfo("Stop", 1000);
+  policy::AgentSnapshot attached;
+  attached.name = "carol";
+  attached.info = &r1;
+  attached.axes.turn = TurnAxis::Ready;
+  attached.attached = true;  // human present
+  ctx.agents.push_back(attached);
+
+  AgentInfo r2 = mkInfo("Stop", 1000);
+  policy::AgentSnapshot pending;
+  pending.name = "dave";
+  pending.info = &r2;
+  pending.axes.turn = TurnAxis::Ready;
+  pending.inbox_pending = true;  // already holding work
+  ctx.agents.push_back(pending);
+
+  CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 0);  // none eligible
 }

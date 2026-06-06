@@ -131,5 +131,6 @@
     "type": "command",
     "command": "$CLAUDE_PROJECT_DIR/settings/hooks/statusline.sh"
   },
-  "theme": "dark"
+  "theme": "dark",
+  "promptSuggestionEnabled": false
 }

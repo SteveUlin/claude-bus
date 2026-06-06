@@ -71,6 +71,10 @@ auto computeStateFromLabel(std::string_view label) -> State {
 struct Snapshot {
   bool broker_alive{false};
   json::Value state;
+  // Raw resume instant from the broker's loop-plane Δwall−Δmono detector
+  // (top-level on the state RPC; 0 = no jump this broker run). Drives the
+  // post-resume reconciliation banner. See docs/reporting-truth.md (a).
+  std::int64_t continuity_since_ms{0};
 };
 
 auto fetchAll(const std::string& socket_path,
@@ -83,6 +87,7 @@ auto fetchAll(const std::string& socket_path,
                         json::Value::fromObject(std::move(req)));
   if (!resp || !resp->getOrBool("ok")) return snap;
   snap.broker_alive = true;
+  snap.continuity_since_ms = resp->getOrInt("continuity_since_ms", 0);
   const auto* state = resp->get("state");
   if (state == nullptr || !state->isObject()) return snap;
   if (filter.empty()) {
@@ -379,6 +384,27 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
   } else {
     std::println("{}⛔ broker down — retrying...{}{}",
                  kRed, kReset, kClearEol);
+  }
+
+  // Post-resume reconciliation banner (reporting-truth a). Within the
+  // settling window after a reboot/suspend, event ages span the slept-through
+  // gap — the per-agent states are already clamped honest broker-side, but
+  // the AGE column still shows the inflated number. Say so, so a big AGE next
+  // to a calm state reads as "settling," not "stuck." Floor = the same
+  // max(systemBootMs, continuity) the broker clamps to; show it only while
+  // recent (one stale-budget window), then it fades on its own.
+  if (snap.broker_alive) {
+    const auto boot = systemBootMs();
+    const auto floor =
+        snap.continuity_since_ms > boot ? snap.continuity_since_ms : boot;
+    const auto since_s = floor > 0 ? (now_ms - floor) / 1000 : -1;
+    if (since_s >= 0 && since_s < 5 * 60) {
+      const bool jump = snap.continuity_since_ms > boot;
+      std::println("{}🕒 fleet {} {} ago — event ages settling, states "
+                   "reconciled{}{}",
+                   kYellow, jump ? "resumed (clock jump)" : "booted",
+                   formatAge(since_s), kReset, kClearEol);
+    }
   }
 
   std::println("{}", kClearEol);

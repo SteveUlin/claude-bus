@@ -198,7 +198,7 @@ auto subIntroduce(std::span<const char* const> args) -> int {
   if (!resp || !resp->getOrBool("ok")) {
     std::println("state:     (broker unreachable)");
     std::println("");
-    std::println("hint: bus events --agent {} --since 30m", name);
+    std::println("hint: bus events --agent {}", name);
     return 0;
   }
   const auto* state = resp->get("state");

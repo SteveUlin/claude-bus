@@ -222,6 +222,7 @@ auto Loop::load() -> void {
   if (!fs::exists(dir, ec)) return;
   for (const auto& entry : fs::directory_iterator(dir, ec)) {
     if (!entry.is_regular_file()) continue;
+    if (entry.path().extension() != ".json") continue;  // skip .tmp / partials
     std::ifstream in{entry.path()};
     if (!in) continue;
     std::ostringstream buf;
@@ -263,7 +264,11 @@ auto Loop::writeInflight(const InFlight& f) -> void {
   std::ofstream out{tmp};
   out << wire;
   out.close();
-  if (out) ::rename(tmp.c_str(), path.c_str());
+  if (out) {
+    ::rename(tmp.c_str(), path.c_str());
+  } else {
+    fs::remove(tmp, ec);  // don't leave a partial tmp behind on write failure
+  }
 }
 
 auto Loop::removeInflight(const std::string& msg_id) -> void {
@@ -1299,14 +1304,18 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
       opts.protocol = a.protocol;
       opts.deliver_when = a.deliver_when;
       stampEpoch(opts, current_epoch_);
-      auto _ = log.append("broker", a.body, opts);
+      auto appended = log.append("broker", a.body, opts);
       // M2 work-queue claim: after the task is durably in the recipient inbox,
       // consume the source queue head (advance its "" cursor past the head),
       // reusing the fetch primitive's semantics. Append-then-consume = if the
       // broker dies between, the task re-assigns (at-least-once) rather than
       // being lost — the broker's delivery ethos. The cursor advance happens
-      // HERE in the loop (kernel plane), never in the actor (§1.4).
-      if (!a.consume_from.empty()) consumeQueueHead(a.consume_from);
+      // HERE in the loop (kernel plane), never in the actor (§1.4). Gate the
+      // claim on append success: a failed inbox append must leave the source
+      // cursor untouched so the task re-assigns next tick instead of vanishing
+      // (the sibling getOrAutoCreate-fail path above returns for the same
+      // reason).
+      if (appended && !a.consume_from.empty()) consumeQueueHead(a.consume_from);
       break;
     }
     case Kind::Recover:

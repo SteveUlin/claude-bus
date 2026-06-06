@@ -477,10 +477,21 @@ auto listPanesJsonCached() -> std::string {
   }
   const auto [rc, out] = runCapture({"zellij", "action", "list-panes",
                                      "--json"});
-  cached = rc == 0 ? out : std::string{};
-  at = now;
-  valid = true;
-  return cached;
+  // Only a SUCCESSFUL fetch refreshes the cached value. A failed/timed-out
+  // query must NOT cache empty: that makes every caller in the TTL window
+  // read pane-less, flapping the doorbell, skipping token scans and tripping
+  // false GONE across the whole fleet. On a warm failure keep the last good
+  // value and just bump the throttle clock — otherwise the delivery loop's
+  // N back-to-back paneId() calls per scan all refork, re-creating the
+  // serialization wedge this cache exists to prevent.
+  if (rc == 0) {
+    cached = out;
+    at = now;
+    valid = true;
+  } else if (valid) {
+    at = now;
+  }
+  return valid ? cached : std::string{};
 }
 
 }  // namespace

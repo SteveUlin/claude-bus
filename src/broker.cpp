@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -577,6 +578,14 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       agents[wanted] = {};
     }
     const auto now = nowMs();
+    // Reporting-truth continuity floor: events before max(systemBootMs(),
+    // continuity_since_ms) predate the current boot/resume, so clamp event-age
+    // against it (kvothe's clamp param) — a reboot or lid-close can't flip an
+    // agent red on staleness alone. systemBootMs covers reboot; the broker's
+    // loop-plane jump detector ($STATE/continuity.ms) covers suspend.
+    const auto continuity_since_ms =
+        topic::readCursor(cfg.state_dir + "/continuity.ms");
+    const auto continuity_floor = std::max(systemBootMs(), continuity_since_ms);
     std::map<std::string, json::Value> out;
     for (const auto& [name, info] : agents) {
       const auto pane = paneState(name);
@@ -599,8 +608,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         if (r) unread = r->size();
       }
 
-      const auto ax = computeAxes(info, unread, now, pane.ok, &pane);
-      const auto st = computeState(info, unread, now, pane.ok, &pane);
+      const auto ax =
+          computeAxes(info, unread, now, pane.ok, &pane, continuity_floor);
+      const auto st =
+          computeState(info, unread, now, pane.ok, &pane, continuity_floor);
 
       std::map<std::string, json::Value> entry;
       entry.insert({"state", json::Value::from(std::string{stateName(st)})});
@@ -645,6 +656,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"state", json::Value::fromObject(std::move(out))});
+    // Broker-wide reporting-truth signal (kvothe): the raw resume instant the
+    // loop detected (0 = none this run). Viewers take max(systemBootMs(), this)
+    // and clamp event-age; the axes above are already clamped at that floor.
+    resp.insert({"continuity_since_ms",
+                 json::Value::from(continuity_since_ms)});
     return json::okResponse(std::move(resp));
   });
 

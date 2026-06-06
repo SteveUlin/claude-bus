@@ -868,6 +868,7 @@ auto Loop::scanRetries() -> void {
 }
 
 auto Loop::tick() -> void {
+  updateContinuity();
   scanEvents();
   scanRetries();
   maybeAutoClear();
@@ -1139,6 +1140,45 @@ auto Loop::inboxPending(const std::string& agent) const -> bool {
   topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + agent + ".log"};
   auto r = inbox.peek(start, 1);
   return r && !r->empty();
+}
+
+// Detect a forward clock JUMP (suspend/resume / NTP step) by comparing the wall
+// and monotonic deltas between consecutive ticks: steady_clock pauses across
+// suspend while wall leaps, so Δwall − Δmono past the threshold is the jump
+// signature — and it catches lid-close, which btime/systemBootMs() cannot. The
+// broker is the only proc positioned to see it. Records the resume instant as
+// continuity_since_ms_; the reporting-truth clamp (kvothe) floors event-age at
+// max(systemBootMs(), continuitySinceMs()) so a resume can't flip an agent red
+// on staleness alone. This is the loop-plane lift of recovery's §6.1a wall-jump
+// signature into a broker-wide signal (recovery keeps its own grace for now;
+// de-dup + a transcript-age clamp is a follow-on).
+auto Loop::updateContinuity() -> void {
+  const auto now = nowMs();
+  const auto mono = nowMonoMs();
+  std::int64_t jump_threshold_ms = 5'000;
+  if (const char* e = std::getenv("CLAUDE_BUS_CLOCK_JUMP_MS");
+      e != nullptr && *e != '\0') {
+    if (const auto v = std::atoll(e); v > 0) jump_threshold_ms = v;
+  }
+  if (cont_last_wall_ms_ > 0) {
+    const auto d_wall = now - cont_last_wall_ms_;
+    const auto d_mono = mono - cont_last_mono_ms_;
+    if (d_wall - d_mono > jump_threshold_ms) {
+      continuity_since_ms_ = now;  // the resume instant
+      // Persist for cross-scope readers (the state RPC reads this; viewers may
+      // read it directly). An int64 in a file — reuse the cursor codec. Persists
+      // across a broker restart, which is correct: a past suspend instant stays
+      // a valid event-age floor, and max(systemBootMs(),…) supersedes it after a
+      // reboot.
+      topic::writeCursor(cfg_.state_dir + "/continuity.ms", now);
+      std::println(stderr,
+                   "continuity: clock jump (d_wall={}ms d_mono={}ms) — "
+                   "continuity_since_ms={}",
+                   d_wall, d_mono, now);
+    }
+  }
+  cont_last_wall_ms_ = now;
+  cont_last_mono_ms_ = mono;
 }
 
 // Build the per-tick PolicyContext (the Readers snapshot + clocks + a lazy pane

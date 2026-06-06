@@ -6,7 +6,8 @@
 #
 # Setup (seeded BEFORE boot so the boot tick's maybeAutoRecover sees it):
 #   - hungagent: an OPEN turn (UserPromptSubmit, no Stop) 30 s ago + a stale
-#     transcript (mtime 30 s old). With tiny budgets → hung-turn + wedged fire.
+#     transcript (mtime 30 s old). No tool in flight → Quiet. With tiny budgets
+#     → hung-turn + dropped-turn (nudge) fire.
 #   - healthyagent: an OPEN turn just NOW + a fresh transcript → neither fires.
 # A fake zellij resolves both panes (list-panes) and returns an empty screen.
 
@@ -41,6 +42,11 @@ case "$*" in
           "id": 2,
           "title": "healthyagent",
           "is_plugin": false
+        },
+        {
+          "id": 3,
+          "title": "quietagent",
+          "is_plugin": false
         }
       ]
     }
@@ -55,18 +61,26 @@ EOF
 chmod +x "$FAKE/zellij"
 export PATH="$FAKE:$PATH"
 
-# Transcripts: hung one is stale (30 s old mtime), healthy one is fresh.
+# Transcripts: hung + quiet are stale; healthy is fresh.
 mkdir -p "$CLAUDE_BUS_STATE/transcripts"
 HUNG_T="$CLAUDE_BUS_STATE/transcripts/hung.jsonl"
 HEAL_T="$CLAUDE_BUS_STATE/transcripts/heal.jsonl"
-printf '{}\n' > "$HUNG_T"; printf '{}\n' > "$HEAL_T"
+QUIET_T="$CLAUDE_BUS_STATE/transcripts/quiet.jsonl"
+printf '{}\n' > "$HUNG_T"; printf '{}\n' > "$HEAL_T"; printf '{}\n' > "$QUIET_T"
 touch -d '30 seconds ago' "$HUNG_T"   # stale
+touch -d '30 seconds ago' "$QUIET_T"  # stale
 
 OLD_TS="$(date -u -d '30 seconds ago' +%FT%T.%3NZ)"
+# quietagent's turn opened > 5 min ago so computeAxes ages it past the (hardcoded)
+# Working threshold into Stuck/Quiet; with NO tool in flight that resolves to
+# Quiet → the dropped-turn (nudge) row, distinct from hungagent's recent (30 s)
+# open turn which stays Working → wedged (relaunch).
+QUIET_TS="$(date -u -d '12 minutes ago' +%FT%T.%3NZ)"
 NOW_TS="$(date -u +%FT%T.%3NZ)"
 cat > "$CLAUDE_BUS_STATE/events.jsonl" <<EOF
 {"ts":"$OLD_TS","session":"t","agent":"hungagent","pane":"1","event":"UserPromptSubmit","payload":{"prompt":"do a thing","transcript_path":"$HUNG_T"}}
 {"ts":"$NOW_TS","session":"t","agent":"healthyagent","pane":"2","event":"UserPromptSubmit","payload":{"prompt":"working","transcript_path":"$HEAL_T"}}
+{"ts":"$QUIET_TS","session":"t","agent":"quietagent","pane":"3","event":"UserPromptSubmit","payload":{"prompt":"silent dropped turn","transcript_path":"$QUIET_T"}}
 EOF
 
 "$BUS" broker run >"$CLAUDE_BUS_STATE/broker.out" 2>&1 &
@@ -87,10 +101,17 @@ ck "$([ "${hung:-0}" -ge 1 ] && echo fired)" "fired" \
    "would-recover FIRED on the stuck agent (count=$hung)"
 ck "${heal:-0}" "0" \
    "would-recover SILENT on the healthy agent (count=$heal)"
-# The stuck agent should name the relaunch action (wedged) — the new capability.
+# R4 shape-routed seam (recovery_actor.cpp). hungagent's turn opened 30 s ago →
+# still Working → wedged row → RELAUNCH. quietagent's turn opened >5 min ago with
+# NO tool in flight → Quiet → dropped-turn row → NUDGE (a re-prompt resumes a
+# dropped/silent turn; relaunch would nuke recoverable context). The pane-not-
+# input-ready gate spares parked agents in both branches.
 relaunch="$(grep -ac 'agent=hungagent signature=wedged action=relaunch' "$AUDIT" 2>/dev/null || true)"
 ck "$([ "${relaunch:-0}" -ge 1 ] && echo yes)" "yes" \
-   "stuck agent's would-recover names action=relaunch (wedged row; count=$relaunch)"
+   "Working agent's would-recover names action=relaunch (wedged row; count=$relaunch)"
+nudge="$(grep -ac 'agent=quietagent signature=dropped-turn action=nudge' "$AUDIT" 2>/dev/null || true)"
+ck "$([ "${nudge:-0}" -ge 1 ] && echo yes)" "yes" \
+   "Quiet agent's would-recover names action=nudge (dropped-turn row; count=$nudge)"
 
 echo
 if [ "$fail" = 0 ]; then

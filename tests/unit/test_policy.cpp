@@ -123,6 +123,34 @@ TEST(recovery_actor_observe_flags_wedged_not_healthy) {
   CHECK(out[0].body.find("signature=wedged") != std::string::npos);
 }
 
+TEST(recovery_actor_quiet_routes_to_dropped_turn_nudge) {
+  std::filesystem::remove_all("/tmp/bus_test_policy_quiet");
+  setenv("CLAUDE_BUS_WEDGE_BUDGET_MS", "1000", 1);
+  const std::int64_t now = 1'000'000;
+  RecoveryActor actor{"/tmp/bus_test_policy_quiet", "observe"};
+
+  // A Quiet agent (stale, NOTHING in flight — a dropped/silent turn) with a
+  // not-input-ready pane → the dropped-turn row → NUDGE, not relaunch. The
+  // recovery-owner's routing of kvothe's turn-split seam.
+  AgentInfo dropped = mkInfo("PreToolUse", now - 1000);
+  policy::PolicyContext ctx;
+  ctx.now_wall_ms = now;
+  ctx.now_mono_ms = now;
+  ctx.pane = normalPane();
+  policy::AgentSnapshot q;
+  q.name = "quietagent";
+  q.info = &dropped;
+  q.axes.turn = TurnAxis::Quiet;
+  q.axes.process = ProcessAxis::Alive;
+  q.transcript_age_ms = 10'000;  // > wedge_budget → stale
+  ctx.agents.push_back(q);
+
+  auto out = actor.evaluate(ctx);
+  CHECK_EQ(static_cast<int>(out.size()), 1);
+  CHECK(out[0].body.find("signature=dropped-turn") != std::string::npos);
+  CHECK(out[0].body.find("action=nudge") != std::string::npos);
+}
+
 TEST(recovery_actor_soft_clears_idle) {
   std::filesystem::remove_all("/tmp/bus_test_policy_soft");
   setenv("CLAUDE_BUS_AUTO_CLEAR_MIN", "1", 1);      // idle_clear = 60 s

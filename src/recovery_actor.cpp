@@ -209,30 +209,29 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
                            now - info.turn_start_ms, transcript_age));
     }
 
-    // R4 wedged → relaunch: the agent LOOKS busy/stuck by events AND its
-    // transcript is stale (cheap, event-only pre-filter — idle agents at a
-    // ready prompt are excluded WITHOUT a fork) AND the pane is NOT at an
-    // input-ready prompt (the second, independent signal). Two signals must
-    // agree — the cardinal relaunch rule; never on transcript-staleness alone.
-    // Fork the pane only after the cheap signals match and only when the
-    // cooldown would let us log (so a confirmed-wedged agent forks ~once per
-    // cooldown, not every scan).
-    // Behavior-preserving across the reporting-truth turn split
-    // (docs/reporting-truth.md): the old TurnAxis::Stuck (raw last-event age
-    // > budget) now splits into Stuck (a tool call overdue — a real wedge)
-    // and Quiet (stale but nothing in flight). Both were "stale" to R4
-    // before, so keep both to preserve recovery coverage. NOTE (recovery
-    // owner): if a Quiet agent (dropped-turn / lost-Stop, typically parked
-    // at an INSERT prompt) should recover by NUDGE rather than relaunch,
-    // this is the seam to refine — the pane-not-input-ready check below
-    // already spares parked agents, so this only bites a genuinely-hung
-    // tool-less turn.
-    const bool looks_busy = ax.turn == TurnAxis::Working ||
-                            ax.turn == TurnAxis::Stuck ||
-                            ax.turn == TurnAxis::Quiet ||
-                            ax.process == ProcessAxis::Stuck;
-    if (transcript_stale && looks_busy) {
-      const std::string wkey = name + "\x1f" + std::string{"wedged"};
+    // R4 — stale + not-input-ready, ROUTED BY SHAPE (recovery owner's call on
+    // kvothe's reporting-truth turn-split seam). Cheap event-only pre-filter
+    // (idle agents at a ready prompt excluded WITHOUT a fork), then the pane
+    // is forked once and the second signal (pane NOT input-ready) must agree —
+    // the cardinal two-signals rule; never on transcript-staleness alone. The
+    // pane-not-input-ready gate spares parked agents in BOTH branches.
+    //   - Quiet (stale, NOTHING in flight — a dropped / silent turn, the
+    //     mid-stream-dropped-turn failure) → NUDGE: a re-prompt resumes it;
+    //     relaunch would needlessly nuke recoverable context. signature
+    //     "dropped-turn".
+    //   - Working / Stuck (a tool call OVERDUE) / process=Stuck (boot hang) —
+    //     a genuine wedge → RELAUNCH (the heavy 2-signal action). signature
+    //     "wedged".
+    // turn is single-valued and Quiet implies process=Alive, so the two
+    // branches are mutually exclusive.
+    const bool wedged = ax.turn == TurnAxis::Working ||
+                        ax.turn == TurnAxis::Stuck ||
+                        ax.process == ProcessAxis::Stuck;
+    const bool dropped_turn = ax.turn == TurnAxis::Quiet;
+    if (transcript_stale && (wedged || dropped_turn)) {
+      const std::string sig = dropped_turn ? "dropped-turn" : "wedged";
+      const std::string action = dropped_turn ? "nudge" : "relaunch";
+      const std::string wkey = name + "\x1f" + sig;
       if (now >= would_recover_next_log_ms_[wkey]) {
         const auto pane = ctx.pane(name);  // forks zellij — gated above
         const auto ax_pane =
@@ -240,10 +239,11 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
         const bool awaiting_input = wakeReadyForMail(ax_pane, &pane) ||
                                     ax_pane.turn == TurnAxis::NeedsInput;
         if (!awaiting_input) {
-          logWould(name, "wedged", "relaunch",
-                   std::format("transcript_stale_ms={},looks_busy=true,"
+          logWould(name, sig, action,
+                   std::format("transcript_stale_ms={},turn={},"
                                "pane_awaiting_input=false",
-                               transcript_age));
+                               transcript_age,
+                               dropped_turn ? "quiet" : "busy"));
         }
       }
     }

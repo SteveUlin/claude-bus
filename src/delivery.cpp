@@ -269,6 +269,14 @@ auto Loop::writeInflight(const InFlight& f) -> void {
 auto Loop::removeInflight(const std::string& msg_id) -> void {
   std::error_code ec;
   fs::remove(inflightPath(cfg_, msg_id), ec);
+  // Drop the materialized large-body payload, if any — the single terminal
+  // cleanup point: every real in-flight removal (onAck → forgetInflight,
+  // the drop RPC, SessionEnd release, scanRetries TTL/max-attempts) routes
+  // through here, so $STATE/payloads/<id>.body can't leak. No-op for inline
+  // bodies (no payload file). The read path (bus msg body) never deletes, so a
+  // delete only fires once the record is terminally done (acked / dropped /
+  // released), by which point the recipient has had its turn to read it.
+  fs::remove(payloadsDir(cfg_) + "/" + msg_id + ".body", ec);
 }
 
 auto Loop::forgetInflight(const std::string& msg_id)
@@ -566,6 +574,12 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   // tick per topic; the next tick can pick up the next.
   const auto now = nowMs();
   for (const auto& m : *r) {
+    // Already in-flight? Wait for ack — BEFORE the TTL/epoch checks below, so a
+    // TTL-elapsed (or stale-epoch) record that is ALSO in-flight can't have its
+    // cursor advanced past it here. Advancing past an in-flight record would
+    // double-dispatch it and leave the cursor unreconcilable with the in-flight
+    // set; the in-flight machinery (ack / retry / escalate) owns its lifecycle.
+    if (in_flight_.contains(m.id)) return;
     // TTL.
     if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) <
                               now) {
@@ -595,8 +609,6 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
       topic::writeCursor(cursor_p, m.next_offset);
       continue;
     }
-    // Already in-flight? Wait for ack.
-    if (in_flight_.contains(m.id)) return;
 
     // deliver_when=idle gate. "Idle" means: agent is at the prompt,
     // ready to receive input. Two paths qualify:
@@ -683,6 +695,9 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
 
   const auto now = nowMs();
   for (const auto& m : *r) {
+    // In-flight guard FIRST (see dispatchAgentInbox): never advance the cursor
+    // past a record that's still in-flight via the TTL/epoch branches below.
+    if (in_flight_.contains(m.id)) return;
     if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) <
                               now) {
       topic::writeCursor(cursor_p, m.next_offset);
@@ -704,7 +719,6 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
       topic::writeCursor(cursor_p, m.next_offset);
       continue;
     }
-    if (in_flight_.contains(m.id)) return;
 
     // tui-commands records default to deliver_when=idle (set by
     // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or

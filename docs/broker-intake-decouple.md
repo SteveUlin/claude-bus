@@ -220,9 +220,17 @@ processing and blow memory. Policy:
   mass-expire the queue. Not in the initial cut; depth-bound + reject is
   enough.
 
-Backpressure is observable: each reject appends an `audit` record
-(`protocol=backpressure`) so a sustained busy condition surfaces instead of
-silently shedding.
+Backpressure is observable — but **NOT** via an `audit` topic append. Writing a
+topic-log record is processing-owned state, which the intake thread must not
+touch (the no-shared-state invariant just above — that's the whole reason reject
+is safe from intake). So a reject **downgrades to a stderr log** (e.g.
+`broker: backpressure — queue full, rejecting`) rather than an `audit` record. A
+sustained busy condition surfaces in the broker's stderr / pane log, not the
+audit topic. (rpc-1-0: an earlier draft of this section claimed an audit append
+here, which would violate the invariant it sits under — corrected. If
+audit-topic visibility is later wanted, intake must hand the reject to the
+processing thread via the command queue to append; deferred — stderr is enough
+for the initial cut.)
 
 ## 5. Shutdown & signals
 
@@ -346,8 +354,9 @@ sandbox-first per the workspace rule; never run against the live broker.
   parks the processing thread; fire a burst of `ping`s; assert every `ping`
   replies under a tight bound while the tick is busy.
 - **Bounded queue:** flood beyond `kQueueMax`; assert excess RPCs get the
-  "busy, retry" error, no unbounded memory growth, and an audit record per
-  reject.
+  "busy, retry" error, no unbounded memory growth, and a **stderr backpressure
+  log** per reject (NOT an audit record — see §4: intake can't append to a topic
+  under the no-shared-state invariant).
 - **Atomicity regression:** existing claim/cursor/ack tests must pass
   unchanged — they encode the invariant this design promises to preserve.
 - **Shutdown handshake:** SIGTERM mid-tick → clean join, socket + pid unlinked,

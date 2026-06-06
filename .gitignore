@@ -58,6 +58,10 @@ core.*
 # stray logs
 *.log
 
+# review workflow (workflows/review.js) hardened-synthesis checkpoint, written
+# to cwd by a Write-agent each run — a regenerable artifact, never committed.
+/review-synthesis-checkpoint.json
+
 # Per-workspace symlink to the canonical hooks dir (settings/hooks-shared),
 # created by bin/agent-launch. Gitignored so jj never sees the symlink and
 # every workspace resolves $CLAUDE_PROJECT_DIR/settings/hooks/ to the shared

@@ -77,7 +77,21 @@ loop run on one thread. So there is exactly one writer, single-threaded:
 ever introduced, this fix must move to a write-to-tmp + atomic-rename or a file
 lock — flagged so the assumption is explicit.)
 
-### Test plan
+### Status: LANDED (approach approved by auri)
+
+Implemented as designed: loop-the-write (EINTR-retry + advance-on-partial) +
+`ftruncate`-back to the `fstat`'d `size_before` on a hard error. Both of auri's
+asks folded in: (1) an `ftruncate`-**failure** is surfaced as its own error (the
+rare double-fault never silently proceeds with a torn log); (2) the `parseFrom`
+over-long-final-record guard already exists (`rec_len < 8 || pos + rec_len >
+buf.size() → break`, covered by `parsefrom_refuses_truncated_tail`) — it catches
+a torn *tail* (a crash in the partial-write↔ftruncate window); the write-side
+fix prevents a torn record *followed by* more (the misframe case). Test:
+`append_rolls_back_torn_record_on_short_write` via an injectable write-hook
+(`setWriteHookForTesting`) — partial-then-fail, asserts rollback to `size_before`
++ `parseFrom` yields only the pre-existing records.
+
+### Test plan (as designed)
 
 - **Unit (fault-injected short write):** the hard part is forcing a short write.
   Approach: a tiny seam — append into a path on a constrained sink, or factor the

@@ -151,4 +151,10 @@ auto lastIdPath(const std::string& cursor_path) -> std::string;
 auto readLastId(const std::string& path) -> std::string;
 auto writeLastId(const std::string& path, const std::string& id) -> bool;
 
+// TEST SEAM ONLY. Override the raw write syscall inside append() so unit tests
+// can fault-inject a short / failed write and assert the torn-record rollback
+// (ftruncate back to the pre-write size). Pass nullptr to restore ::write. The
+// broker never calls this; production behaves exactly as a bare ::write.
+void setWriteHookForTesting(ssize_t (*fn)(int, const void*, std::size_t));
+
 }  // namespace bus::topic

@@ -26,6 +26,15 @@ namespace {
 
 constexpr std::size_t kVersionOffset = 4;
 
+// Test seam: a hook over the raw write syscall so tests can fault-inject a
+// short / failed write and exercise append()'s torn-record rollback. nullptr
+// (the default) routes to ::write. Set via setWriteHookForTesting. The broker
+// never sets it; production is byte-identical to a bare ::write.
+ssize_t (*g_writeHook)(int, const void*, std::size_t) = nullptr;
+auto rawWrite(int fd, const void* buf, std::size_t n) -> ssize_t {
+  return g_writeHook != nullptr ? g_writeHook(fd, buf, n) : ::write(fd, buf, n);
+}
+
 class Fd {
  public:
   Fd() = default;
@@ -300,9 +309,47 @@ auto TopicLog::append(std::string_view sender, std::string_view body,
   if (!fd.valid()) {
     return std::unexpected{errFromErrno(errno, "open topic log for append")};
   }
-  const auto n = ::write(fd.get(), record.data(), record.size());
-  if (n != static_cast<ssize_t>(record.size())) {
-    return std::unexpected{errFromErrno(errno, "append record")};
+  // All-or-nothing append (kernel-0-0). A short ::write under O_APPEND leaves a
+  // TORN record mid-log: its length prefix claims the full size but fewer bytes
+  // follow, so a subsequent append lands right after the partial bytes and
+  // parseFrom reads the claimed length into the next record — misframing the
+  // entire tail and collapsing cursor addressing + at-least-once (rule #1).
+  // Fix: (1) loop the write — retry EINTR, advance on partials; under O_APPEND
+  // each write atomically targets EOF, so the record completes contiguously
+  // across calls. (2) on a hard error with bytes already written, ftruncate
+  // back to the pre-write size so the log is left exactly as it was.
+  // SAFE because topic logs are SINGLE-WRITER: every TopicLog::append call site
+  // is broker-only (delivery.cpp / broker.cpp; CLI tools go through the enqueue
+  // RPC) and the broker is a single-threaded pselect loop, so no concurrent
+  // appender can slip a record in between the fstat and the ftruncate. If a
+  // second writer is ever introduced this must become write-tmp+rename or an
+  // flock around the append.
+  struct stat st_before{};
+  if (::fstat(fd.get(), &st_before) != 0) {
+    return std::unexpected{errFromErrno(errno, "fstat topic log for append")};
+  }
+  const auto size_before = static_cast<off_t>(st_before.st_size);
+
+  const auto* p = record.data();
+  std::size_t remaining = record.size();
+  while (remaining > 0) {
+    const auto n = rawWrite(fd.get(), p, remaining);
+    if (n < 0 && errno == EINTR) continue;  // interrupted — retry
+    if (n <= 0) break;                       // hard error / no progress — bail
+    p += n;
+    remaining -= static_cast<std::size_t>(n);
+  }
+  if (remaining > 0) {
+    const int saved = errno;
+    // Roll back the partial bytes so no torn record survives. If the rollback
+    // ITSELF fails (rare double-fault), surface THAT — never silently leave a
+    // torn log behind.
+    if (::ftruncate(fd.get(), size_before) != 0) {
+      return std::unexpected{errFromErrno(
+          errno, "append record: short write AND ftruncate rollback failed")};
+    }
+    return std::unexpected{
+        errFromErrno(saved, "append record (partial write rolled back)")};
   }
   return std::format("{:013}-{}-{:04x}", sent_ms, sender, rand_tag);
 }
@@ -424,6 +471,10 @@ auto writeLastId(const std::string& path, const std::string& id) -> bool {
   }
   fd.reset();
   return ::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+void setWriteHookForTesting(ssize_t (*fn)(int, const void*, std::size_t)) {
+  g_writeHook = fn;
 }
 
 }  // namespace bus::topic

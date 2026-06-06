@@ -1,6 +1,9 @@
 #include "harness.h"
 #include "topic_log.h"
 
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -71,6 +74,48 @@ TEST(parsefrom_refuses_truncated_tail) {
   buf.resize(buf.size() - 1);
   const auto msgs = topic::parseFrom(buf, topic::kFileHeaderBytes);
   CHECK_EQ(msgs.size(), std::size_t{2});  // third refused, first two kept
+
+  std::remove(path.c_str());
+}
+
+namespace {
+// Stateful short-write hook (kernel-0-0 test): the FIRST write writes a real
+// partial prefix (so the file genuinely grows — a torn record), then the next
+// write fails hard (ENOSPC), forcing append()'s ftruncate-back rollback.
+int g_hook_calls = 0;
+auto shortThenFailWrite(int fd, const void* buf, std::size_t n) -> ssize_t {
+  if (g_hook_calls++ == 0) {
+    const std::size_t partial = n > 4 ? 4 : 1;  // < n → a short write
+    return ::write(fd, buf, partial);
+  }
+  errno = ENOSPC;
+  return -1;  // hard error → append rolls back the partial
+}
+}  // namespace
+
+// A short ::write must leave NO torn record: append rolls the log back to its
+// pre-write size, so parseFrom still yields exactly the pre-existing records
+// (no misframed tail). kernel-0-0.
+TEST(append_rolls_back_torn_record_on_short_write) {
+  const auto path = tmpPath();
+  topic::TopicLog log{path};
+  topic::SendOpts opts;
+  (void)log.append("alice", "keepme", opts);  // a good pre-existing record
+  const auto size_before = static_cast<long>(readBytes(path).size());
+
+  g_hook_calls = 0;
+  topic::setWriteHookForTesting(shortThenFailWrite);
+  auto r = log.append("bob", "this record will tear mid-write", opts);
+  topic::setWriteHookForTesting(nullptr);  // restore ::write
+
+  CHECK(!r.has_value());  // append reported the failure
+  // Rolled back to exactly the pre-append size — the partial bytes are gone.
+  CHECK_EQ(static_cast<long>(readBytes(path).size()), size_before);
+  // The log still parses to just the pre-existing record — no torn tail.
+  const auto msgs = log.dump();
+  CHECK(msgs.has_value());
+  CHECK_EQ(msgs->size(), std::size_t{1});
+  if (msgs->size() == 1) CHECK_EQ((*msgs)[0].body, std::string{"keepme"});
 
   std::remove(path.c_str());
 }

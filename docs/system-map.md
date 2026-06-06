@@ -7,7 +7,7 @@
 
 `claude-bus` is a single C++23 binary (`bus`) plus a per-session **broker daemon** that coordinates many `claude` TUIs running in zellij panes. One human, many agents, one terminal. The broker is the durable, out-of-context system-of-record; everything else reads from or writes through it.
 
-## The seven areas
+## The eight areas
 
 | Area | What it is |
 |---|---|

@@ -22,7 +22,13 @@ add_library(bus_core STATIC
     src/event.cpp
     src/json_min.cpp
     src/recovery.cpp
-    src/topic_log.cpp
+    src/journal.cpp
+)
+# Envelope codec — messaging layer above the domain-agnostic Journal kernel.
+# bus_core must NOT depend on it; only the delivery binary and bus_readers
+# (which decode envelope fields for task_model etc.) link it.
+add_library(bus_envelope STATIC
+    src/envelope.cpp
 )
 target_include_directories(bus_core PUBLIC src)
 
@@ -42,7 +48,7 @@ add_library(bus_readers STATIC
 target_include_directories(bus_readers PUBLIC src)
 # readAgents / deriveTrig parse each line with json::parse (json_min), so the
 # json symbols must resolve after this archive on the link line.
-target_link_libraries(bus_readers PUBLIC bus_core)
+target_link_libraries(bus_readers PUBLIC bus_core bus_envelope)
 
 # Pane acquisition + actuators (paneState, sendToPaneSafe, the loop-thread TTL
 # cache). The loop/Daemon plane: single-thread-owned mutable caches that must
@@ -119,18 +125,24 @@ add_executable(bus
     src/sub/sub_verify.cpp
 )
 target_include_directories(bus PRIVATE src ${CMAKE_BINARY_DIR})
-target_link_libraries(bus PRIVATE bus_core bus_readers bus_pane bus_policy)
+target_link_libraries(bus PRIVATE bus_core bus_envelope bus_readers bus_pane bus_policy)
 
-# Unit tests for the pure logic (json::parse, topic::parseFrom,
+# Unit tests for the pure logic (json::parse, bus::Journal::parseForTest,
 # computeAxes, the TailReader split/offset dance). Minimal in-tree
 # harness, no third-party dependency. Binary lands in build/, not bin/.
 # Run with `ctest --test-dir build` or `./build/bus_tests`.
 enable_testing()
+# bus_tests links bus_core normally. Cross-journal ack now calls fatal()
+# (always-on crash) instead of assert() + return false, so no NDEBUG
+# re-compilation is needed. The cross_journal_ack_refused test verifies
+# the return value on the SAME-journal path; the bad-call crash is tested
+# separately via fork-based death tests (Phase 2).
 add_executable(bus_tests
     tests/unit/harness.cpp
     tests/unit/test_json.cpp
     tests/unit/test_event.cpp
-    tests/unit/test_topic_log.cpp
+    tests/unit/test_journal.cpp
+    tests/unit/test_envelope.cpp
     tests/unit/test_agent_status.cpp
     tests/unit/test_fold.cpp
     tests/unit/test_readiness.cpp
@@ -145,7 +157,7 @@ add_executable(bus_tests
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
-target_link_libraries(bus_tests PRIVATE bus_core bus_readers bus_pane bus_policy)
+target_link_libraries(bus_tests PRIVATE bus_core bus_envelope bus_readers bus_pane bus_policy)
 set_target_properties(bus_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_test(NAME unit COMMAND bus_tests)

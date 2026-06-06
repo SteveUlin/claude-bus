@@ -7,11 +7,22 @@
 // formattable (enums fall back to "<?>" — compare via axisName()/stateName()
 // for readable output).
 
+#include <cstddef>
 #include <format>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+// Convert a string literal / string_view to vector<std::byte>.
+// Convenience for tests that pass byte payloads to Journal::append.
+inline auto bytesOf(std::string_view s) -> std::vector<std::byte> {
+  std::vector<std::byte> v(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i)
+    v[i] = static_cast<std::byte>(s[i]);
+  return v;
+}
 
 namespace bus::test {
 

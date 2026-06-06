@@ -4,14 +4,14 @@
 #include "blackboard_actor.h"
 #include "dispatch.h"
 #include "dispatch_actor.h"
+#include "envelope.h"
 #include "event.h"
+#include "journal.h"
 #include "json_min.h"
 #include "pane.h"
 #include "recovery.h"
 #include "recovery_actor.h"
-#include "retention.h"
 #include "tail_reader.h"
-#include "topic_log.h"
 #include "tty_policy.h"
 
 #include <fcntl.h>
@@ -131,16 +131,17 @@ auto deliverInline(const BrokerConfig& cfg, std::string_view agent,
 }
 
 // Build the inline delivery payload for the recipient pane.
-auto formatInlineBody(const topic::Message& m) -> std::string {
+auto formatInlineBody([[maybe_unused]] const bus::Record& r,
+                      const bus::msg::Envelope& env) -> std::string {
   std::string out;
   out += "## bus msg mail from ";
-  out += m.sender;
+  out += env.sender;
   out += " [";
-  out += m.protocol;
+  out += env.protocol;
   out += "]";
-  if (!m.body.empty()) {
+  if (!env.body.empty()) {
     out += '\n';
-    out += m.body;
+    out += env.body;
   }
   return out;
 }
@@ -150,10 +151,11 @@ auto formatInlineBody(const topic::Message& m) -> std::string {
 // `bus msg body MSG_ID` (side-effect-free) instead of `bus msg fetch` so the
 // read doesn't self-ack and bypass the broker's retry/escalation
 // safety net.
-auto formatPointerBody(const topic::Message& m) -> std::string {
+auto formatPointerBody(const bus::Record& r,
+                       const bus::msg::Envelope& env) -> std::string {
   return std::format(
       "## bus msg mail from {} [{}] — large; read with: bus msg body {}",
-      m.sender, m.protocol, m.id);
+      env.sender, env.protocol, r.id);
 }
 
 }  // namespace
@@ -234,7 +236,8 @@ auto Loop::load() -> void {
     f.topic = v->getOrString("topic");
     f.agent = v->getOrString("agent");
     f.dispatched_at_ms = v->getOrInt("dispatched_at_ms");
-    f.cursor_after = v->getOrInt("cursor_after");
+    f.cursor_after = bus::Journal::cursorFromToken(
+        v->getOrString("cursor_after"));
     f.attempts = static_cast<std::int32_t>(v->getOrInt("attempts", 1));
     f.next_retry_at = v->getOrInt("next_retry_at", 0);
     if (!f.msg_id.empty()) {
@@ -255,7 +258,8 @@ auto Loop::writeInflight(const InFlight& f) -> void {
   obj.insert({"topic", json::Value::from(f.topic)});
   obj.insert({"agent", json::Value::from(f.agent)});
   obj.insert({"dispatched_at_ms", json::Value::from(f.dispatched_at_ms)});
-  obj.insert({"cursor_after", json::Value::from(f.cursor_after)});
+  obj.insert({"cursor_after", json::Value::from(
+                  bus::Journal::cursorToToken(f.cursor_after))});
   obj.insert({"attempts", json::Value::from(static_cast<std::int64_t>(
                               f.attempts))});
   obj.insert({"next_retry_at", json::Value::from(f.next_retry_at)});
@@ -304,9 +308,9 @@ auto Loop::forgetInflight(const std::string& msg_id)
 auto Loop::onAck(const std::string& msg_id, bool write_lastid) -> bool {
   auto it = in_flight_.find(msg_id);
   if (it == in_flight_.end()) return false;  // unknown / already acked
-  const auto cursor_p = topic::cursorPath(cfg_.state_dir, it->second.topic, "");
-  topic::advanceCursorMonotonic(cursor_p, it->second.cursor_after);
-  if (write_lastid) topic::writeLastId(topic::lastIdPath(cursor_p), msg_id);
+  const auto& f = it->second;
+  bus::Journal journal{cfg_.state_dir, f.topic};
+  journal.ack("", f.cursor_after, write_lastid ? msg_id : "");
   forgetInflight(msg_id);  // removes file + erases map + clears blocking-op
   return true;
 }
@@ -314,7 +318,7 @@ auto Loop::onAck(const std::string& msg_id, bool write_lastid) -> bool {
 auto Loop::noteDrainDelivery(const std::string& msg_id,
                              const std::string& topic,
                              const std::string& agent,
-                             std::int64_t cursor_after) -> void {
+                             Journal::Cursor cursor_after) -> void {
   InFlight f;
   f.msg_id = msg_id;
   f.topic = topic;
@@ -424,17 +428,16 @@ auto Loop::scanEvents() -> void {
         if (!registry_.contains("audit")) {
           auto _ = registry_.create(audit);
         }
-        topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-        topic::SendOpts a_opts;
-        a_opts.protocol = "agent-end";
-        stampEpoch(a_opts, current_epoch_);
+        bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+        bus::msg::Envelope a_env;
+        a_env.sender = "broker";
+        a_env.protocol = "agent-end";
+        stampEpoch(a_env, current_epoch_);
         const auto& reason = ev->reason;
-        auto _ = audit_log.append(
-            "broker",
-            std::format("agent-end agent={} reason={} released={}",
-                        agent, reason.empty() ? "(none)" : reason,
-                        to_release.size()),
-            a_opts);
+        a_env.body = std::format("agent-end agent={} reason={} released={}",
+                                 agent, reason.empty() ? "(none)" : reason,
+                                 to_release.size());
+        auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
       }
       continue;
     }
@@ -534,25 +537,18 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   {
     const std::string commands_topic = "commands-" + agent;
     if (registry_.contains(commands_topic)) {
-      const auto cmds_cursor_p =
-          topic::cursorPath(cfg_.state_dir, commands_topic, "");
-      const auto cmds_cursor = topic::readCursor(cmds_cursor_p);
-      const auto cmds_start =
-          cmds_cursor > 0
-              ? cmds_cursor
-              : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-      const std::string cmds_log_path =
-          cfg_.state_dir + "/topics/" + commands_topic + ".log";
-      topic::TopicLog cmds_log{cmds_log_path};
-      if (auto p = cmds_log.peek(cmds_start, 1); p && !p->empty()) {
-        const auto& m = (*p)[0];
-        if (m.body == "/clear" || m.body == "/compact" ||
-            m.body.starts_with("/clear ") ||
-            m.body.starts_with("/compact ")) {
+      bus::Journal cmds_log{cfg_.state_dir, commands_topic};
+      if (auto p = cmds_log.peek(cmds_log.consumerCursor(""), 1);
+          p && !p->empty()) {
+        const auto& rec = (*p)[0];
+        const auto cmds_env = bus::msg::decodeEnvelope(rec.payload);
+        if (cmds_env.body == "/clear" || cmds_env.body == "/compact" ||
+            cmds_env.body.starts_with("/clear ") ||
+            cmds_env.body.starts_with("/compact ")) {
           std::println(stderr,
                        "delivery: defer agent-inbox dispatch for {} "
                        "(blocking-op /{} pending on commands-{})",
-                       agent, (m.body.starts_with("/compact") ? "compact" : "clear"),
+                       agent, (cmds_env.body.starts_with("/compact") ? "compact" : "clear"),
                        agent);
           std::fflush(stderr);  // stderr is block-buffered when redirected
           return;
@@ -561,35 +557,29 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     }
   }
 
-  const auto cursor_p =
-      topic::cursorPath(cfg_.state_dir, cfg.name, "");
-  const auto cursor = topic::readCursor(cursor_p);
-  const auto start =
-      cursor > 0 ? cursor
-                 : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-
-  const std::string log_path =
-      cfg_.state_dir + "/topics/" + cfg.name + ".log";
-  topic::TopicLog log{log_path};
-  auto r = log.peek(start, 4);
+  bus::Journal log{cfg_.state_dir, cfg.name};
+  auto r = log.peek(log.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   // Pick the first record that isn't expired AND isn't already
   // in-flight AND passes the deliver_when gate. We dispatch ONE per
   // tick per topic; the next tick can pick up the next.
   const auto now = nowMs();
-  for (const auto& m : *r) {
+  for (const auto& rec : *r) {
     // Already in-flight? Wait for ack — BEFORE the TTL/epoch checks below, so a
     // TTL-elapsed (or stale-epoch) record that is ALSO in-flight can't have its
     // cursor advanced past it here. Advancing past an in-flight record would
     // double-dispatch it and leave the cursor unreconcilable with the in-flight
     // set; the in-flight machinery (ack / retry / escalate) owns its lifecycle.
-    if (in_flight_.contains(m.id)) return;
+    if (in_flight_.contains(rec.id)) return;
+    // Decode envelope once for this record — TTL/epoch/deliver_when/body all live
+    // in the payload; decoding once here is cheaper than multiple per-field calls.
+    const auto env = bus::msg::decodeEnvelope(rec.payload);
     // TTL.
-    if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) <
+    if (env.ttl_ms != 0 && rec.append_ms + static_cast<std::int64_t>(env.ttl_ms) <
                               now) {
-      // Expired — advance cursor past, no delivery.
-      topic::writeCursor(cursor_p, m.next_offset);
+      // Expired — advance cursor past, no delivery. Forward-only guard.
+      log.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
     // Epoch quarantine. A record stamped with a different epoch
@@ -599,19 +589,19 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     // — never deliver. This is the resilience hook that lets the
     // wipe-on-boot shrink to just session-volatile state without
     // re-delivering yesterday's mail as new.
-    if (const auto rec_epoch = recordEpoch(m);
+    if (const auto rec_epoch = recordEpoch(env);
         rec_epoch != current_epoch_) {
       InFlight fake;
-      fake.msg_id = m.id;
+      fake.msg_id = rec.id;
       fake.topic = cfg.name;
       fake.agent = agent;
-      fake.cursor_after = m.next_offset;
+      fake.cursor_after = bus::Journal::cursorAfter(rec);
       fake.dispatched_at_ms = now;
       escalate(fake,
                std::format("stale-epoch (record={}, current={})",
                            rec_epoch, current_epoch_),
-               m.body);
-      topic::writeCursor(cursor_p, m.next_offset);
+               env.body);
+      log.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
 
@@ -621,7 +611,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     //   2. State::Starting + pane in INSERT — broker has no event
     //      history for this agent (fresh boot, post-wipe) but the
     //      pane is visibly at the prompt; trust the TTY.
-    if (m.deliver_when == 1) {
+    if (env.deliver_when == 1) {
       const std::string events_log = cfg_.state_dir + "/events.jsonl";
       std::set<std::string> filter{agent};
       auto agents = readAgents(events_log, filter);
@@ -637,20 +627,20 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
 
     // Build payload — inline for small, pointer for large.
     std::string payload;
-    if (m.body.size() <= kInlineMaxBytes) {
-      payload = formatInlineBody(m);
+    if (env.body.size() <= kInlineMaxBytes) {
+      payload = formatInlineBody(rec, env);
     } else {
       // Materialize payload file.
       std::error_code ec;
       fs::create_directories(payloadsDir(cfg_), ec);
-      const auto path = payloadsDir(cfg_) + "/" + m.id + ".body";
+      const auto path = payloadsDir(cfg_) + "/" + rec.id + ".body";
       const std::string tmp = path + ".tmp";
       {
         std::ofstream out{tmp};
-        out << m.body;
+        out << env.body;
       }
       ::rename(tmp.c_str(), path.c_str());
-      payload = formatPointerBody(m);
+      payload = formatPointerBody(rec, env);
     }
 
     if (!deliverInline(cfg_, agent, payload)) {
@@ -661,14 +651,14 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
 
     // Track in-flight (cursor advances only on ack).
     InFlight f;
-    f.msg_id = m.id;
+    f.msg_id = rec.id;
     f.topic = cfg.name;
     f.agent = agent;
     f.dispatched_at_ms = now;
-    f.cursor_after = m.next_offset;
+    f.cursor_after = bus::Journal::cursorAfter(rec);
     f.attempts = 1;
     f.next_retry_at = now + ackTimeoutMs();
-    in_flight_.insert_or_assign(m.id, f);
+    in_flight_.insert_or_assign(rec.id, f);
     writeInflight(f);
     return;  // one dispatch per tick per topic
   }
@@ -685,50 +675,42 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
   if (hasPresenceFile(agent)) return;
   if (blocking_ops_.contains(agent)) return;
 
-  const auto cursor_p =
-      topic::cursorPath(cfg_.state_dir, cfg.name, "");
-  const auto cursor = topic::readCursor(cursor_p);
-  const auto start =
-      cursor > 0 ? cursor
-                 : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-
-  const std::string log_path =
-      cfg_.state_dir + "/topics/" + cfg.name + ".log";
-  topic::TopicLog log{log_path};
-  auto r = log.peek(start, 4);
+  bus::Journal log{cfg_.state_dir, cfg.name};
+  auto r = log.peek(log.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   const auto now = nowMs();
-  for (const auto& m : *r) {
+  for (const auto& rec : *r) {
     // In-flight guard FIRST (see dispatchAgentInbox): never advance the cursor
     // past a record that's still in-flight via the TTL/epoch branches below.
-    if (in_flight_.contains(m.id)) return;
-    if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) <
+    if (in_flight_.contains(rec.id)) return;
+    const auto env = bus::msg::decodeEnvelope(rec.payload);
+    if (env.ttl_ms != 0 && rec.append_ms + static_cast<std::int64_t>(env.ttl_ms) <
                               now) {
-      topic::writeCursor(cursor_p, m.next_offset);
+      log.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
     // Epoch quarantine — see dispatchAgentInbox for the rationale.
-    if (const auto rec_epoch = recordEpoch(m);
+    if (const auto rec_epoch = recordEpoch(env);
         rec_epoch != current_epoch_) {
       InFlight fake;
-      fake.msg_id = m.id;
+      fake.msg_id = rec.id;
       fake.topic = cfg.name;
       fake.agent = agent;
-      fake.cursor_after = m.next_offset;
+      fake.cursor_after = bus::Journal::cursorAfter(rec);
       fake.dispatched_at_ms = now;
       escalate(fake,
                std::format("stale-epoch (record={}, current={})",
                            rec_epoch, current_epoch_),
-               m.body);
-      topic::writeCursor(cursor_p, m.next_offset);
+               env.body);
+      log.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
 
     // tui-commands records default to deliver_when=idle (set by
     // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or
     // Starting+INSERT for post-wipe boots with no event history.
-    if (m.deliver_when == 1) {
+    if (env.deliver_when == 1) {
       const std::string events_log = cfg_.state_dir + "/events.jsonl";
       std::set<std::string> filter{agent};
       auto agents = readAgents(events_log, filter);
@@ -745,29 +727,29 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     // Run the dispatch state machine. Synchronous — can take up to
     // ~5s on retries. Only this topic stalls; other topics still
     // dispatch on subsequent ticks.
-    if (!dispatch::dispatchTui(cfg_, agent, m.body)) {
+    if (!dispatch::dispatchTui(cfg_, agent, env.body)) {
       return;  // dispatch failed (pane gone or stuck); retry next tick
     }
 
     // Track in-flight (cursor advances on Stop event for blocking
     // ops; on UserPromptSubmit for non-blocking slashes).
     InFlight f;
-    f.msg_id = m.id;
+    f.msg_id = rec.id;
     f.topic = cfg.name;
     f.agent = agent;
     f.dispatched_at_ms = now;
-    f.cursor_after = m.next_offset;
+    f.cursor_after = bus::Journal::cursorAfter(rec);
     f.attempts = 1;
     f.next_retry_at = now + ackTimeoutMs();
-    in_flight_.insert_or_assign(m.id, f);
+    in_flight_.insert_or_assign(rec.id, f);
     writeInflight(f);
 
     // /clear and /compact are blocking-ops: defer all subsequent
     // delivery to this agent until Stop fires. Other slashes are
     // non-blocking — the next UserPromptSubmit acks them.
-    if (m.body == "/clear" || m.body == "/compact" ||
-        m.body.starts_with("/clear ") || m.body.starts_with("/compact ")) {
-      setBlockingOp(agent, m.id);
+    if (env.body == "/clear" || env.body == "/compact" ||
+        env.body.starts_with("/clear ") || env.body.starts_with("/compact ")) {
+      setBlockingOp(agent, rec.id);
     }
     return;  // one dispatch per tick per topic
   }
@@ -782,31 +764,33 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   if (!registry_.contains("audit")) {
     auto _ = registry_.create(audit);
   }
-  topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-  topic::SendOpts opts;
-  opts.protocol = "audit";
+  bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+  bus::msg::Envelope env;
+  env.sender = "broker";
+  env.protocol = "audit";
   // Stamp the broker's own emissions with the current epoch — without
   // this, the very next dispatch tick sees the unstamped audit/ops
   // record as stale, quarantines it, writes another unstamped record,
   // and the broker dispatches itself into an infinite escalation loop.
-  stampEpoch(opts, current_epoch_);
-  const auto entry = std::format(
+  stampEpoch(env, current_epoch_);
+  env.body = std::format(
       "delivery exhausted msg_id={} topic={} agent={} reason={} body={}",
       f.msg_id, f.topic, f.agent, reason, body);
-  auto _ = audit_log.append("broker", entry, opts);
+  auto _ = audit_log.append(bus::msg::encodeEnvelope(env));
 
   // Mail inbox-ops (auto-creates the topic). The ops inbox carries
   // infrastructure notifications — delivery failures, retry exhaustion,
   // audit escalation — separate from inbox-comms which surfaces real
   // messages directed at the human.
   auto _ig = registry_.getOrAutoCreate("inbox-ops");
-  topic::TopicLog ops_log{cfg_.state_dir + "/topics/inbox-ops.log"};
-  topic::SendOpts mopts;
-  mopts.protocol = "delivery-failure";
-  stampEpoch(mopts, current_epoch_);
-  const auto mail = std::format(
+  bus::Journal ops_log{cfg_.state_dir + "/topics/inbox-ops.log"};
+  bus::msg::Envelope menv;
+  menv.sender = "broker";
+  menv.protocol = "delivery-failure";
+  stampEpoch(menv, current_epoch_);
+  menv.body = std::format(
       "delivery to {} exhausted ({}): {}", f.agent, reason, body);
-  auto _ig2 = ops_log.append("broker", mail, mopts);
+  auto _ig2 = ops_log.append(bus::msg::encodeEnvelope(menv));
 }
 
 auto Loop::scanRetries() -> void {
@@ -830,14 +814,8 @@ auto Loop::scanRetries() -> void {
     // Read the original record off the topic log so we can re-send
     // it. The record sits at offset cursor_after - record_len, but
     // re-walking from cursor is simpler: peek from the topic cursor.
-    const auto cursor_p =
-        topic::cursorPath(cfg_.state_dir, f.topic, "");
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start =
-        cursor > 0 ? cursor
-                   : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-    topic::TopicLog log{cfg_.state_dir + "/topics/" + f.topic + ".log"};
-    auto r = log.peek(start, 1);
+    bus::Journal log{cfg_.state_dir, f.topic};
+    auto r = log.peek(log.consumerCursor(""), 1);
     if (!r || r->empty() || r->front().id != id) {
       // Record disappeared or cursor moved past; drop the stale
       // in-flight without escalation (this shouldn't happen).
@@ -845,12 +823,13 @@ auto Loop::scanRetries() -> void {
       in_flight_.erase(id);
       continue;
     }
-    const auto& m = r->front();
+    const auto& rec = r->front();
+    const auto rec_env = bus::msg::decodeEnvelope(rec.payload);
 
     if (f.attempts >= kMaxAttempts) {
       // Exhausted — escalate + advance cursor + clear in-flight.
-      escalate(f, "no ack after max attempts", m.body);
-      topic::writeCursor(cursor_p, m.next_offset);
+      escalate(f, "no ack after max attempts", rec_env.body);
+      log.ack("", bus::Journal::cursorAfter(rec));
       if (blocking_ops_.contains(f.agent) &&
           blocking_ops_.at(f.agent) == id) {
         clearBlockingOp(f.agent);
@@ -878,7 +857,7 @@ auto Loop::scanRetries() -> void {
     // dedup is tracked as a separate follow-up.
     const auto* tcfg = registry_.get(f.topic);
     if (tcfg != nullptr && tcfg->kind == std::string{kKindTuiCommands}) {
-      dispatch::dispatchTui(cfg_, f.agent, m.body);
+      dispatch::dispatchTui(cfg_, f.agent, rec_env.body);
     }
     f.attempts += 1;  // deadline tick (agent-inbox) / re-dispatch count (tui)
     f.next_retry_at = now + ackTimeoutMs();
@@ -948,11 +927,13 @@ auto Loop::maybeEscalateStuck() -> void {
     audit.name = "audit";
     audit.kind = std::string{kKindAppendLog};
     if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-    topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-    topic::SendOpts a_opts;
-    a_opts.protocol = std::string{protocol};
-    stampEpoch(a_opts, current_epoch_);
-    auto _ = audit_log.append("broker", body, a_opts);
+    bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+    bus::msg::Envelope a_env;
+    a_env.sender = "broker";
+    a_env.protocol = std::string{protocol};
+    stampEpoch(a_env, current_epoch_);
+    a_env.body = body;
+    auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
   };
 
   const std::string events_log = cfg_.state_dir + "/events.jsonl";
@@ -1081,17 +1062,8 @@ auto Loop::maybeAutoClear() -> void {
 
     // Inbox depth — peek 1 record from cursor.
     {
-      const auto cursor_p = topic::cursorPath(cfg_.state_dir,
-                                              "inbox-" + name, "");
-      const auto cursor = topic::readCursor(cursor_p);
-      const auto start = cursor > 0
-                             ? cursor
-                             : static_cast<std::int64_t>(
-                                   topic::kFileHeaderBytes);
-      const std::string log_path =
-          cfg_.state_dir + "/topics/inbox-" + name + ".log";
-      topic::TopicLog inbox{log_path};
-      if (auto r = inbox.peek(start, 1); r && !r->empty()) {
+      bus::Journal inbox{cfg_.state_dir, "inbox-" + name};
+      if (auto r = inbox.peek(inbox.consumerCursor(""), 1); r && !r->empty()) {
         continue;  // mail pending, defer the clear
       }
     }
@@ -1111,12 +1083,14 @@ auto Loop::maybeAutoClear() -> void {
     if (auto cr = registry_.getOrAutoCreate(commands_topic); !cr) continue;
     const std::string log_path =
         cfg_.state_dir + "/topics/" + commands_topic + ".log";
-    topic::TopicLog cmd_log{log_path};
-    topic::SendOpts opts;
-    opts.protocol = "auto-clear";
-    opts.deliver_when = 1;  // idle
-    stampEpoch(opts, current_epoch_);
-    auto _ig = cmd_log.append("broker", "/clear", opts);
+    bus::Journal cmd_log{log_path};
+    bus::msg::Envelope cmd_env;
+    cmd_env.sender = "broker";
+    cmd_env.protocol = "auto-clear";
+    cmd_env.deliver_when = 1;  // idle
+    cmd_env.body = "/clear";
+    stampEpoch(cmd_env, current_epoch_);
+    auto _ig = cmd_log.append(bus::msg::encodeEnvelope(cmd_env));
 
     // Cool down for 5 minutes so we don't re-enqueue while the clear
     // is still resolving (SessionStart from /clear will overwrite the
@@ -1134,16 +1108,16 @@ auto Loop::maybeAutoClear() -> void {
       if (!registry_.contains("audit")) {
         auto _ = registry_.create(audit);
       }
-      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-      topic::SendOpts a_opts;
-      a_opts.protocol = "auto-clear";
-      stampEpoch(a_opts, current_epoch_);
+      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+      bus::msg::Envelope a_env;
+      a_env.sender = "broker";
+      a_env.protocol = "auto-clear";
+      stampEpoch(a_env, current_epoch_);
       const auto idle_min = (now - info.last.ts_ms) / 60'000;
-      auto _ = audit_log.append(
-          "broker",
-          std::format("auto-clear agent={} idle_min={} threshold_min={}",
-                      name, idle_min, threshold_min),
-          a_opts);
+      a_env.body = std::format(
+          "auto-clear agent={} idle_min={} threshold_min={}",
+          name, idle_min, threshold_min);
+      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
     }
   }
 }
@@ -1151,13 +1125,8 @@ auto Loop::maybeAutoClear() -> void {
 // True iff a record sits past agent's inbox cursor. A pure read fed into the
 // PolicyContext snapshot (was an inline lambda in maybeAutoRecover).
 auto Loop::inboxPending(const std::string& agent) const -> bool {
-  const auto cursor_p = topic::cursorPath(cfg_.state_dir, "inbox-" + agent, "");
-  const auto cursor = topic::readCursor(cursor_p);
-  const auto start = cursor > 0 ? cursor
-                                : static_cast<std::int64_t>(
-                                      topic::kFileHeaderBytes);
-  topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + agent + ".log"};
-  auto r = inbox.peek(start, 1);
+  bus::Journal inbox{cfg_.state_dir, "inbox-" + agent};
+  auto r = inbox.peek(inbox.consumerCursor(""), 1);
   return r && !r->empty();
 }
 
@@ -1189,7 +1158,7 @@ auto Loop::updateContinuity() -> void {
       // across a broker restart, which is correct: a past suspend instant stays
       // a valid event-age floor, and max(systemBootMs(),…) supersedes it after a
       // reboot.
-      topic::writeCursor(cfg_.state_dir + "/continuity.ms", now);
+      bus::writeU64File(cfg_.state_dir + "/continuity.ms", now);
       std::println(stderr,
                    "continuity: clock jump (d_wall={}ms d_mono={}ms) — "
                    "continuity_since_ms={}",
@@ -1242,16 +1211,12 @@ auto Loop::runPolicy() -> void {
   // assignment.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != std::string{kKindWorkQueue}) continue;
-    const auto cursor_p = topic::cursorPath(cfg_.state_dir, tcfg.name, "");
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start = cursor > 0 ? cursor
-                                  : static_cast<std::int64_t>(
-                                        topic::kFileHeaderBytes);
-    topic::TopicLog log{cfg_.state_dir + "/topics/" + tcfg.name + ".log"};
-    auto r = log.peek(start, 16);  // bounded head window → batch-assign
+    bus::Journal log{cfg_.state_dir, tcfg.name};
+    auto r = log.peek(log.consumerCursor(""), 16);  // bounded head window → batch-assign
     if (!r) continue;
-    for (const auto& m : *r) {
-      ctx.queue_head.push_back({tcfg.name, m.id, m.body});
+    for (const auto& rec : *r) {
+      const auto wq_env = bus::msg::decodeEnvelope(rec.payload);
+      ctx.queue_head.push_back({tcfg.name, rec.id, wq_env.body});
     }
   }
 
@@ -1260,21 +1225,15 @@ auto Loop::runPolicy() -> void {
   // persists, so a restart resumes past already-notified posts.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != std::string{kKindBlackboard}) continue;
-    const auto cursor_p =
-        topic::cursorPath(cfg_.state_dir, tcfg.name, "_dispatch");
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start = cursor > 0 ? cursor
-                                  : static_cast<std::int64_t>(
-                                        topic::kFileHeaderBytes);
-    topic::TopicLog log{cfg_.state_dir + "/topics/" + tcfg.name + ".log"};
-    auto r = log.peek(start, 16);  // bounded window of new posts
+    bus::Journal log{cfg_.state_dir, tcfg.name};
+    auto r = log.peek(log.consumerCursor("_dispatch"), 16);  // bounded window of new posts
     if (!r || r->empty()) continue;
-    std::int64_t advance = start;
-    for (const auto& m : *r) {
-      ctx.board_updates.push_back({tcfg.name, m.sender, m.body});
-      advance = m.next_offset;
+    for (const auto& rec : *r) {
+      const auto bb_env = bus::msg::decodeEnvelope(rec.payload);
+      ctx.board_updates.push_back({tcfg.name, bb_env.sender, bb_env.body});
     }
-    topic::writeCursor(cursor_p, advance);
+    // Advance past all records we just folded — forward-only.
+    log.ack("_dispatch", bus::Journal::cursorAfter(r->back()));
   }
 
   for (const auto& a : engine_.evaluate(ctx)) executePolicyAction(a);
@@ -1299,12 +1258,14 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
       } else if (auto cr = registry_.getOrAutoCreate(a.topic); !cr) {
         return;
       }
-      topic::TopicLog log{cfg_.state_dir + "/topics/" + a.topic + ".log"};
-      topic::SendOpts opts;
-      opts.protocol = a.protocol;
-      opts.deliver_when = a.deliver_when;
-      stampEpoch(opts, current_epoch_);
-      auto appended = log.append("broker", a.body, opts);
+      bus::Journal log{cfg_.state_dir + "/topics/" + a.topic + ".log"};
+      bus::msg::Envelope env;
+      env.sender = "broker";
+      env.protocol = a.protocol;
+      env.deliver_when = a.deliver_when;
+      stampEpoch(env, current_epoch_);
+      env.body = a.body;
+      auto appended = log.append(bus::msg::encodeEnvelope(env));
       // M2 work-queue claim: after the task is durably in the recipient inbox,
       // consume the source queue head (advance its "" cursor past the head),
       // reusing the fetch primitive's semantics. Append-then-consume = if the
@@ -1329,15 +1290,10 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
 // (kernel plane) performs it on a DispatchActor's consume_from intent, so the
 // actor never advances a cursor. No-op if the queue is empty.
 auto Loop::consumeQueueHead(const std::string& topic) -> void {
-  const auto cursor_p = topic::cursorPath(cfg_.state_dir, topic, "");
-  const auto cursor = topic::readCursor(cursor_p);
-  const auto start = cursor > 0 ? cursor
-                                : static_cast<std::int64_t>(
-                                      topic::kFileHeaderBytes);
-  topic::TopicLog log{cfg_.state_dir + "/topics/" + topic + ".log"};
-  auto r = log.peek(start, 1);
+  bus::Journal log{cfg_.state_dir, topic};
+  auto r = log.peek(log.consumerCursor(""), 1);
   if (!r || r->empty()) return;
-  topic::writeCursor(cursor_p, r->front().next_offset);
+  log.ack("", bus::Journal::cursorAfter(r->front()));
 }
 
 // Doorbell — wake an idle off-TTY agent that has queued mail.
@@ -1400,15 +1356,8 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // Mail queued past the inbox cursor?
     bool has_mail = false;
     {
-      const auto cursor_p =
-          topic::cursorPath(cfg_.state_dir, "inbox-" + name, "");
-      const auto cursor = topic::readCursor(cursor_p);
-      const auto start =
-          cursor > 0 ? cursor
-                     : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-      topic::TopicLog inbox{cfg_.state_dir + "/topics/inbox-" + name +
-                            ".log"};
-      auto r = inbox.peek(start, 1);
+      bus::Journal inbox{cfg_.state_dir, "inbox-" + name};
+      auto r = inbox.peek(inbox.consumerCursor(""), 1);
       has_mail = r && !r->empty();
     }
     if (!has_mail) {  // drained / nothing queued → healthy
@@ -1435,16 +1384,16 @@ auto Loop::maybeWakeIdleOffTty() -> void {
       audit.name = "audit";
       audit.kind = std::string{kKindAppendLog};
       if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-      topic::SendOpts a_opts;
-      a_opts.protocol = "doorbell-strand";
-      stampEpoch(a_opts, current_epoch_);
-      auto _ = audit_log.append(
-          "broker",
-          std::format("doorbell-strand agent={} queued_ms={} — off-TTY "
-                      "mail undelivered past threshold",
-                      name, queued_ms),
-          a_opts);
+      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+      bus::msg::Envelope a_env;
+      a_env.sender = "broker";
+      a_env.protocol = "doorbell-strand";
+      stampEpoch(a_env, current_epoch_);
+      a_env.body = std::format(
+          "doorbell-strand agent={} queued_ms={} — off-TTY "
+          "mail undelivered past threshold",
+          name, queued_ms);
+      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
     }
 
     // --- wake gates ---
@@ -1495,15 +1444,14 @@ auto Loop::maybeWakeIdleOffTty() -> void {
       audit.name = "audit";
       audit.kind = std::string{kKindAppendLog};
       if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-      topic::SendOpts a_opts;
-      a_opts.protocol = "doorbell";
-      stampEpoch(a_opts, current_epoch_);
-      auto _ = audit_log.append(
-          "broker",
-          std::format("doorbell wake agent={} (off-TTY, idle, mail queued)",
-                      name),
-          a_opts);
+      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+      bus::msg::Envelope a_env;
+      a_env.sender = "broker";
+      a_env.protocol = "doorbell";
+      stampEpoch(a_env, current_epoch_);
+      a_env.body = std::format("doorbell wake agent={} (off-TTY, idle, mail queued)",
+                               name);
+      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
     }
   }
 }
@@ -1622,42 +1570,12 @@ auto Loop::maybeScanTokens() -> void {
 // --- Log retention (D1 + D2) --------------------------------------------
 
 // Smallest consumer cursor across every $STATE/cursors/<topic>/*.cursor.
-// Returns 0 when no cursor exists (the "nobody has read anything" floor
-// that, under the delivery-guarantee clamp, prevents any trim). Defensive
-// against the C1 cursor-namespace split: if a topic carries both a
-// `_default` and a named-consumer cursor, the laggard wins.
+// Delegates to Journal::minConsumerOffset so the kernel owns the scan.
 auto Loop::minConsumerCursor(std::string_view topic) const -> std::int64_t {
-  const std::string dir =
-      cfg_.state_dir + "/cursors/" + std::string{topic};
-  std::error_code ec;
-  if (!fs::exists(dir, ec)) return 0;
-  std::int64_t min_cursor = -1;
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
-    if (!entry.is_regular_file()) continue;
-    if (entry.path().extension() != ".cursor") continue;
-    const auto c = topic::readCursor(entry.path().string());
-    if (min_cursor < 0 || c < min_cursor) min_cursor = c;
-  }
-  return min_cursor < 0 ? 0 : min_cursor;
+  bus::Journal log{cfg_.state_dir, std::string{topic}};
+  return log.minConsumerOffset();
 }
 
-auto Loop::rebaseTopicCursors(std::string_view topic,
-                              std::int64_t dropped_bytes,
-                              std::int64_t header_bytes) -> void {
-  const std::string dir =
-      cfg_.state_dir + "/cursors/" + std::string{topic};
-  std::error_code ec;
-  if (!fs::exists(dir, ec)) return;
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
-    if (!entry.is_regular_file()) continue;
-    if (entry.path().extension() != ".cursor") continue;
-    const auto path = entry.path().string();
-    const auto c = topic::readCursor(path);
-    const auto rebased =
-        retention::rebaseCursor(c, dropped_bytes, header_bytes);
-    if (rebased != c) topic::writeCursor(path, rebased);
-  }
-}
 
 // events.jsonl: when it exceeds CLAUDE_BUS_EVENTS_MAX_BYTES, rewrite it
 // keeping only the most recent ~half, aligned to a line boundary. The
@@ -1712,23 +1630,9 @@ auto Loop::maybeTrimLogs() -> void {
       env != nullptr && *env != '\0') {
     topic_max_bytes = std::atoll(env);
   }
-  const auto header = static_cast<std::int64_t>(topic::kFileHeaderBytes);
-
   for (const auto& tc : registry_.list()) {
     const std::int64_t retention_ms = tc.retention_ms;
     if (retention_ms <= 0 && topic_max_bytes <= 0) continue;  // dead config
-
-    const std::string path =
-        cfg_.state_dir + "/topics/" + tc.name + ".log";
-    topic::TopicLog log{path};
-    auto recs = log.dump();
-    if (!recs || recs->empty()) continue;
-
-    std::vector<retention::RecordMeta> meta;
-    meta.reserve(recs->size());
-    for (const auto& m : *recs) {
-      meta.push_back({m.offset, m.next_offset, m.sent_ms});
-    }
 
     // Delivery-guaranteed kinds clamp to the consumer floor so undelivered
     // / in-flight mail is never dropped; fire-and-forget kinds expire
@@ -1745,23 +1649,20 @@ auto Loop::maybeTrimLogs() -> void {
     const bool guaranteed = !reserved_sink &&
                             (tc.kind == std::string{kKindAgentInbox} ||
                              tc.kind == std::string{kKindTuiCommands});
-    const auto min_cursor = guaranteed ? minConsumerCursor(tc.name) : 0;
 
-    const auto plan =
-        retention::planTrim(meta, now, retention_ms, topic_max_bytes, header,
-                            min_cursor, guaranteed);
-    if (plan.dropped_bytes <= 0) continue;
-
-    // The Log owns the byte rewrite and REPORTS the exact shift it made.
-    const auto dropped = log.trimHead(plan.cut_offset);
+    // Construct with state_root+name so trimByPolicy can rebase persisted
+    // consumer cursors and read minConsumerOffset (the kernel owns both).
+    bus::Journal log{cfg_.state_dir, tc.name};
+    const auto dropped =
+        log.trimByPolicy(retention_ms, topic_max_bytes, now, guaranteed);
     if (dropped <= 0) continue;  // no-op / refused — nothing shifted
 
-    // Every absolute offset shifted down by `dropped` — rebase cursors and
-    // in-flight trackers for this topic against the Log's reported shift.
-    rebaseTopicCursors(tc.name, dropped, header);
+    // Rebase in-flight Cursor values for this topic. Persisted cursors
+    // were already rebased by trimHead above; in-flight ones live in
+    // memory (and their on-disk .json trackers), so we fix them here.
     for (auto& [id, f] : in_flight_) {
       if (f.topic != tc.name) continue;
-      f.cursor_after = retention::rebaseCursor(f.cursor_after, dropped, header);
+      f.cursor_after = log.rebaseCursor(f.cursor_after, dropped);
       writeInflight(f);
     }
 
@@ -1772,15 +1673,15 @@ auto Loop::maybeTrimLogs() -> void {
       audit.name = "audit";
       audit.kind = std::string{kKindAppendLog};
       if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      topic::TopicLog audit_log{cfg_.state_dir + "/topics/audit.log"};
-      topic::SendOpts a_opts;
-      a_opts.protocol = "retention-trim";
-      stampEpoch(a_opts, current_epoch_);
-      auto _ = audit_log.append(
-          "broker",
-          std::format("retention-trim topic={} dropped_bytes={} cut_offset={}",
-                      tc.name, plan.dropped_bytes, plan.cut_offset),
-          a_opts);
+      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+      bus::msg::Envelope a_env;
+      a_env.sender = "broker";
+      a_env.protocol = "retention-trim";
+      stampEpoch(a_env, current_epoch_);
+      a_env.body = std::format(
+          "retention-trim topic={} dropped_bytes={}",
+          tc.name, dropped);
+      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
     }
   }
 

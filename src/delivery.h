@@ -26,9 +26,10 @@
 //   - pubsub / blackboard / work-queue (4f)
 
 #include "broker.h"
+#include "envelope.h"
+#include "journal.h"
 #include "json_min.h"
 #include "policy.h"
-#include "topic_log.h"
 #include "topic_registry.h"
 
 #include <cstdint>
@@ -39,26 +40,20 @@
 
 namespace bus::delivery {
 
-// Broker epoch helpers. The wire format's `correlation` field is
-// declared for RPC pairing but never set today; we repurpose its
-// first 8 bytes (little-endian u64) for the broker's boot-epoch.
-// Records carrying an epoch that doesn't match the running broker's
-// are quarantined on dispatch — see dispatchAgentInbox /
-// dispatchTuiCommands.
-inline auto stampEpoch(topic::SendOpts& opts, std::uint64_t epoch)
-    -> void {
-  for (int i = 0; i < 8; ++i) {
-    opts.correlation[i] =
-        static_cast<std::uint8_t>((epoch >> (i * 8)) & 0xFF);
-  }
+// Broker epoch helpers. The epoch lives in the Envelope (payload layer).
+// stampEpoch sets env.epoch before encoding; recordEpoch decodes to read it.
+inline auto stampEpoch(bus::msg::Envelope& env, std::uint64_t epoch) -> void {
+  env.epoch = epoch;
 }
 
-inline auto recordEpoch(const topic::Message& m) -> std::uint64_t {
-  std::uint64_t v = 0;
-  for (int i = 0; i < 8; ++i) {
-    v |= static_cast<std::uint64_t>(m.correlation[i]) << (i * 8);
-  }
-  return v;
+// Decode epoch from a Record's opaque payload.
+inline auto recordEpoch(const bus::Record& r) -> std::uint64_t {
+  return bus::msg::decodeEnvelope(r.payload).epoch;
+}
+
+// For callers that already decoded the envelope.
+inline auto recordEpoch(const bus::msg::Envelope& env) -> std::uint64_t {
+  return env.epoch;
 }
 
 constexpr std::size_t kInlineMaxBytes = 1024;
@@ -68,7 +63,9 @@ struct InFlight {
   std::string topic;
   std::string agent;
   std::int64_t dispatched_at_ms{};
-  std::int64_t cursor_after{};  // topic-log offset to advance to on ack
+  // Opaque cursor position to advance to on ack. Persisted via
+  // Journal::cursorToToken/cursorFromToken — never do arithmetic on it.
+  Journal::Cursor cursor_after;
   std::int32_t attempts{1};      // re-dispatch count; 1 = first send
   std::int64_t next_retry_at{};  // dispatched_at_ms + kAckTimeoutMs
 };
@@ -119,7 +116,7 @@ class Loop {
   // from the broker's `drain` RPC handler. Idempotent per msg_id.
   auto noteDrainDelivery(const std::string& msg_id, const std::string& topic,
                          const std::string& agent,
-                         std::int64_t cursor_after) -> void;
+                         Journal::Cursor cursor_after) -> void;
 
   // Soonest pending escalation deadline (absolute ms-since-epoch; 0 =
   // none). The rpc server arms a one-shot timerfd to this after each tick
@@ -259,8 +256,6 @@ class Loop {
   // pruneDeadAgents from the trim sweep.
   auto forgetAgent(std::string_view name) -> void;
   auto pruneDeadAgents() -> void;
-  auto rebaseTopicCursors(std::string_view topic, std::int64_t dropped_bytes,
-                          std::int64_t header_bytes) -> void;
   auto minConsumerCursor(std::string_view topic) const -> std::int64_t;
 
   auto writeInflight(const InFlight& f) -> void;

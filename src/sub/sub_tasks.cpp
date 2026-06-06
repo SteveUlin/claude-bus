@@ -22,7 +22,7 @@
 // open/cancel are thin sugar over the broker enqueue RPC — they write task
 // records to the `tasks` append-log topic (the broker is the only writer to
 // topic logs). No broker code changes; the reader reads the log file
-// directly via TopicLog::dump().
+// directly via Journal::dump().
 
 #include "../agent_status.h"
 #include "../broker.h"

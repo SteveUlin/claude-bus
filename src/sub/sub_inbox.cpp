@@ -11,7 +11,8 @@
 #include "../bus.h"
 #include "../signals.h"
 #include "../sub.h"
-#include "../topic_log.h"
+#include "../envelope.h"
+#include "../journal.h"
 
 #include <fcntl.h>
 #include <sys/inotify.h>
@@ -59,13 +60,14 @@ auto printHeader(std::string_view name, std::size_t loaded) -> void {
                name, kReset, kDim, loaded, loaded == 1 ? "" : "s", kReset);
 }
 
-auto printMessage(const topic::Message& m) -> void {
+auto printRecord(const bus::Record& rec) -> void {
+  const auto env = bus::msg::decodeEnvelope(rec.payload);
   std::println("");
-  std::println("{}🕒 {}{} {}✉️  from {}{}{}", kDim, formatTs(m.sent_ms), kReset,
-               kBold, kCyan, m.sender, kReset);
-  if (m.body.empty()) return;
+  std::println("{}🕒 {}{} {}✉️  from {}{}{}", kDim, formatTs(rec.append_ms),
+               kReset, kBold, kCyan, env.sender, kReset);
+  if (env.body.empty()) return;
   std::string indented = "  ";
-  for (char c : m.body) {
+  for (char c : env.body) {
     indented += c;
     if (c == '\n') indented += "  ";
   }
@@ -89,17 +91,17 @@ auto subInbox(std::span<const char* const> args) -> int {
   const auto log_path =
       cfg.state_dir + "/topics/" + topic_name + ".log";
 
-  topic::TopicLog log{log_path};
+  bus::Journal log{log_path};
   auto initial = log.dump();
   if (!initial) {
     std::println(stderr, "inbox: dump failed: {}", initial.error().message);
     return 1;
   }
   printHeader(topic_name, initial->size());
-  for (const auto& m : *initial) printMessage(m);
+  for (const auto& rec : *initial) printRecord(rec);
 
   std::unordered_set<std::string> seen;
-  for (const auto& m : *initial) seen.insert(m.id);
+  for (const auto& rec : *initial) seen.insert(rec.id);
 
   const auto dir = cfg.state_dir + "/topics";
   std::error_code ec;
@@ -150,8 +152,8 @@ auto subInbox(std::span<const char* const> args) -> int {
 
     auto fresh = log.dump();
     if (!fresh) continue;
-    for (const auto& m : *fresh) {
-      if (seen.insert(m.id).second) printMessage(m);
+    for (const auto& rec : *fresh) {
+      if (seen.insert(rec.id).second) printRecord(rec);
     }
   }
 

@@ -3,9 +3,10 @@
 #include "task_model.h"
 
 #include "agent_status.h"  // nowMs
+#include "envelope.h"
+#include "journal.h"
 #include "json_min.h"
 #include "state_paths.h"
-#include "topic_log.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -52,7 +53,7 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
   const std::int64_t now = nowMs();
 
   // ── Spine: the `tasks` append-log topic (open / cancelled records) ──
-  // Read-in-full via TopicLog::dump() — no cursor, no broker round-trip.
+  // Read-in-full via Journal::dump() — no cursor, no broker round-trip.
   // Keyed by id; last open-record wins on a re-open. `mint_ts` is the
   // sort key for not-yet-done tasks (done tasks sort by completion ts).
   std::map<std::string, Task> by_id;
@@ -61,10 +62,11 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
 
   const std::string topic_path =
       stateRoot() + "/topics/" + std::string{kTasksTopic} + ".log";
-  topic::TopicLog spine{topic_path};
+  bus::Journal spine{topic_path};
   if (auto dumped = spine.dump()) {
-    for (const auto& msg : *dumped) {
-      const auto v = json::parse(msg.body);
+    for (const auto& rec : *dumped) {
+      const auto task_env = bus::msg::decodeEnvelope(rec.payload);
+      const auto v = json::parse(task_env.body);
       if (!v) continue;
       const std::string id = v->getOrString("id");
       if (id.empty()) continue;

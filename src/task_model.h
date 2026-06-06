@@ -28,7 +28,7 @@ namespace bus {
 // The open-task spine (task-model B): an append-log topic that holds the
 // task records minted at dispatch. The producer (`bus tasks open/close`)
 // writes via the broker enqueue RPC; the reader projects over it via
-// TopicLog::dump() (read-in-full, no cursor). Shared by both sides.
+// Journal::dump() (read-in-full, no cursor). Shared by both sides.
 inline constexpr std::string_view kTasksTopic = "tasks";
 
 // Owner-liveness overlay, joined from $STATE/triggers/<agent>.json. `valid`

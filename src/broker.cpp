@@ -7,7 +7,8 @@
 #include "pane.h"  // paneState() — was transitive via agent_status.h.
 #include "rpc.h"
 #include "state_paths.h"
-#include "topic_log.h"
+#include "envelope.h"
+#include "journal.h"
 #include "topic_registry.h"
 #include "tty_policy.h"
 
@@ -52,7 +53,7 @@ auto readFileTrimmed(const std::string& path) -> std::string {
   return s;
 }
 
-// (C2/D3 lastid helpers moved to topic:: in topic_log — shared with the
+// (C2/D3 lastid helpers moved to bus:: in journal — shared with the
 // scanEvents bus-ack handler that stamps the marker at ack-time.)
 
 // Append one structured line to broker.log. Format:
@@ -334,6 +335,35 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   }
   std::filesystem::remove(cfg.state_dir + "/broker.sock", ec);
 
+  // Wire-format migration. Topic logs are preserved across boots, but a v5
+  // binary cannot parse a v4 log. If ANY surviving log carries a stale
+  // version header (bytes 4..8 != kFormatVersion), wipe the record store
+  // (topics/ + cursors/) so it's rebuilt from scratch — in-flight/ was
+  // already cleared above. Triggers only on an actual mismatch, so a clean
+  // v5 store is untouched.
+  {
+    const std::string topics_dir = cfg.state_dir + "/topics";
+    bool stale = false;
+    if (std::filesystem::is_directory(topics_dir, ec)) {
+      for (const auto& e :
+           std::filesystem::directory_iterator{topics_dir, ec}) {
+        if (e.path().extension() != ".log") continue;
+        if (bus::Journal::isStaleVersion(e.path().string())) {
+          stale = true;
+          break;
+        }
+      }
+    }
+    if (stale) {
+      std::filesystem::remove_all(topics_dir, ec);
+      std::filesystem::remove_all(cfg.state_dir + "/cursors", ec);
+      std::filesystem::remove_all(cfg.state_dir + "/in-flight", ec);
+      logEvent(cfg.state_dir, "MIGRATE",
+               std::format("wire format -> v{} migration: wiped topic logs",
+                           bus::kJournalFormatVersion));
+    }
+  }
+
   // Bump the broker epoch. The previous run's epoch (or 0 on a
   // fresh state dir) is the floor; we increment + persist + carry
   // the new value into the Loop so it can quarantine records still
@@ -427,18 +457,18 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // -- enqueue / peek / fetch -------------------------------------
   //
   // Topic logs live on disk under $STATE/topics/<name>.log; we open a
-  // TopicLog lazily on first access and keep a cache so subsequent
+  // Journal lazily on first access and keep a cache so subsequent
   // calls don't re-stat the registry path.
   const std::string topics_dir = cfg.state_dir + "/topics";
-  std::map<std::string, topic::TopicLog> logs;
+  std::map<std::string, bus::Journal> logs;
 
-  auto getOrOpenLog = [&](std::string_view name) -> topic::TopicLog& {
+  auto getOrOpenLog = [&](std::string_view name) -> bus::Journal& {
     auto it = logs.find(std::string{name});
     if (it != logs.end()) return it->second;
     const std::string path =
         topics_dir + "/" + std::string{name} + ".log";
     auto [ins, _] =
-        logs.emplace(std::string{name}, topic::TopicLog{path});
+        logs.emplace(std::string{name}, bus::Journal{path});
     return ins->second;
   };
 
@@ -451,18 +481,20 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto sender = req.getOrString("sender", "unknown");
     const auto body = req.getOrString("body");
 
-    topic::SendOpts opts;
-    opts.ttl_ms = static_cast<std::uint32_t>(req.getOrInt("ttl_ms", 0));
+    bus::msg::Envelope env;
+    env.sender = sender;
+    env.body = body;
+    env.ttl_ms = static_cast<std::uint32_t>(req.getOrInt("ttl_ms", 0));
     const auto dw = req.getOrString("deliver_when", "immediate");
-    opts.deliver_when = (dw == "idle") ? 1 : 0;
-    opts.protocol = req.getOrString("protocol", "text");
+    env.deliver_when = (dw == "idle") ? 1 : 0;
+    env.protocol = req.getOrString("protocol", "text");
     // Stamp the broker epoch so dispatch can quarantine records that
     // outlive a broker restart. Same epoch on the pubsub cascade
     // below so subscribers all see consistent provenance.
-    delivery::stampEpoch(opts, current_epoch);
+    delivery::stampEpoch(env, current_epoch);
 
     auto& log = getOrOpenLog(name);
-    auto r = log.append(sender, body, opts);
+    auto r = log.append(bus::msg::encodeEnvelope(env));
     if (!r) return json::errorResponse(r.error().message);
 
     const auto* tcfg = registry.get(name);
@@ -481,7 +513,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
           const auto inbox = std::string{"inbox-"} + sub.asString();
           if (auto cr = registry.getOrAutoCreate(inbox); !cr) continue;
           auto& sublog = getOrOpenLog(inbox);
-          auto _ig = sublog.append(sender, body, opts);
+          auto _ig = sublog.append(bus::msg::encodeEnvelope(env));
         }
       }
     }
@@ -494,8 +526,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       auto all = log.dump();
       if (all && !all->empty()) {
         const auto& latest = all->back();
-        const auto cursor_p = topic::cursorPath(cfg.state_dir, name, "");
-        topic::writeCursor(cursor_p, latest.offset);
+        bus::Journal bb_log{cfg.state_dir, name};
+        bb_log.ack("", latest.position);
       }
     }
 
@@ -504,23 +536,27 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     return json::okResponse(std::move(m));
   });
 
-  auto messageToJson = [](const topic::Message& m) {
+  auto recordToJson = [](const bus::Record& rec) {
+    const auto env = bus::msg::decodeEnvelope(rec.payload);
     std::map<std::string, json::Value> o;
-    o.insert({"id", json::Value::from(m.id)});
-    o.insert({"sent_ms", json::Value::from(m.sent_ms)});
-    o.insert({"sender", json::Value::from(m.sender)});
+    o.insert({"id", json::Value::from(rec.id)});
+    o.insert({"sent_ms", json::Value::from(rec.append_ms)});
+    o.insert({"sender", json::Value::from(env.sender)});
     o.insert({"ttl_ms",
-              json::Value::from(static_cast<std::int64_t>(m.ttl_ms))});
+              json::Value::from(static_cast<std::int64_t>(env.ttl_ms))});
     o.insert({"deliver_when",
-              json::Value::from(static_cast<std::int64_t>(m.deliver_when))});
-    o.insert({"protocol", json::Value::from(m.protocol)});
-    o.insert({"body", json::Value::from(m.body)});
-    o.insert({"offset", json::Value::from(m.offset)});
-    o.insert({"next_offset", json::Value::from(m.next_offset)});
+              json::Value::from(static_cast<std::int64_t>(env.deliver_when))});
+    o.insert({"protocol", json::Value::from(env.protocol)});
+    o.insert({"body", json::Value::from(env.body)});
+    o.insert({"cursor",
+              json::Value::from(bus::Journal::cursorToToken(rec.position))});
+    o.insert({"cursor_after",
+              json::Value::from(
+                  bus::Journal::cursorToToken(bus::Journal::cursorAfter(rec)))});
     return json::Value::fromObject(std::move(o));
   };
 
-  server.on("peek", [&, messageToJson](const json::Value& req) {
+  server.on("peek", [&, recordToJson](const json::Value& req) {
     const auto name = req.getOrString("topic");
     if (name.empty()) return json::errorResponse("missing topic");
     if (!registry.contains(name)) {
@@ -537,22 +573,22 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         single_recipient ? std::string{} : req.getOrString("consumer");
     const auto limit = req.getOrInt("limit", 0);
 
-    const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start =
-        cursor > 0 ? cursor : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+    bus::Journal cursor_log{cfg.state_dir, name};
+    const auto from = cursor_log.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
-    auto r = log.peek(start,
+    auto r = log.peek(from,
                       limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX);
     if (!r) return json::errorResponse(r.error().message);
     std::vector<json::Value> arr;
     const auto now = nowMs();
-    for (const auto& m : *r) {
-      if (m.ttl_ms != 0 && m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now) {
+    for (const auto& rec : *r) {
+      const auto env = bus::msg::decodeEnvelope(rec.payload);
+      if (env.ttl_ms != 0 &&
+          rec.append_ms + static_cast<std::int64_t>(env.ttl_ms) < now) {
         continue;
       }
-      arr.push_back(messageToJson(m));
+      arr.push_back(recordToJson(rec));
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"messages", json::Value::fromArray(std::move(arr))});
@@ -584,7 +620,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // agent red on staleness alone. systemBootMs covers reboot; the broker's
     // loop-plane jump detector ($STATE/continuity.ms) covers suspend.
     const auto continuity_since_ms =
-        topic::readCursor(cfg.state_dir + "/continuity.ms");
+        bus::readU64File(cfg.state_dir + "/continuity.ms");
     const auto continuity_floor = std::max(systemBootMs(), continuity_since_ms);
     std::map<std::string, json::Value> out;
     for (const auto& [name, info] : agents) {
@@ -596,15 +632,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       std::size_t unread = 0;
       {
         const auto topic = std::string{"inbox-"} + name;
-        const auto inbox_path =
-            cfg.state_dir + "/topics/" + topic + ".log";
-        const auto cursor_p = topic::cursorPath(cfg.state_dir, topic, "");
-        const auto cursor = topic::readCursor(cursor_p);
-        const auto start =
-            cursor > 0 ? cursor
-                       : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-        topic::TopicLog inbox_log{inbox_path};
-        auto r = inbox_log.peek(start);
+        bus::Journal inbox_log{cfg.state_dir, topic};
+        auto r = inbox_log.peek(inbox_log.consumerCursor(""));
         if (r) unread = r->size();
       }
 
@@ -671,20 +700,20 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
   // Resolve a msg_id to its body across all topics. Pure read — no
   // cursor advancement, no ack, no in-flight changes. Spilled bodies
-  // are loaded transparently by TopicLog::peek, so the returned body
+  // are loaded transparently by Journal::peek, so the returned body
   // is the full content regardless of inline-vs-pointer storage.
-  server.on("body", [&, messageToJson](const json::Value& req) {
+  server.on("body", [&, recordToJson](const json::Value& req) {
     const auto msg_id = req.getOrString("msg_id");
     if (msg_id.empty()) return json::errorResponse("missing msg_id");
     for (const auto& tcfg : registry.list()) {
       auto& log = getOrOpenLog(tcfg.name);
       auto all = log.dump();
       if (!all) continue;
-      for (const auto& m : *all) {
-        if (m.id != msg_id) continue;
+      for (const auto& rec : *all) {
+        if (rec.id != msg_id) continue;
         std::map<std::string, json::Value> resp;
         resp.insert({"topic", json::Value::from(tcfg.name)});
-        resp.insert({"message", messageToJson(m)});
+        resp.insert({"message", recordToJson(rec)});
         return json::okResponse(std::move(resp));
       }
     }
@@ -711,7 +740,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // Other topic kinds (work-queue, pubsub, blackboard, append-log,
   // tui-commands) bypass the check — work-queue is multi-consumer by
   // design, the others don't go through dispatch + ack at all.
-  server.on("fetch", [&, messageToJson, &dl_ref = dl](const json::Value& req) {
+  server.on("fetch", [&, recordToJson, &dl_ref = dl](const json::Value& req) {
     const auto name = req.getOrString("topic");
     if (name.empty()) return json::errorResponse("missing topic");
     if (!registry.contains(name)) {
@@ -733,27 +762,25 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto consumer =
         single_recipient ? std::string{} : req.getOrString("consumer");
 
-    const auto cursor_p = topic::cursorPath(cfg.state_dir, name, consumer);
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start =
-        cursor > 0 ? cursor : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+    bus::Journal cursor_log{cfg.state_dir, name};
+    const auto from = cursor_log.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
-    auto r = log.peek(start, 1);
+    auto r = log.peek(from, 1);
     if (!r) return json::errorResponse(r.error().message);
     if (r->empty()) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value::null_()});
       return json::okResponse(std::move(resp));
     }
-    const auto& m = r->front();
+    const auto& rec = r->front();
 
     // Hybrid-delivery race-prevention: skip records the push path is
     // mid-dispatch on. The /loop fallback will see them on the next
     // tick once push either acks (advancing the cursor past) or fails
     // (releasing the in-flight, leaving the record at the head for
     // re-dispatch).
-    if (is_agent_inbox && dl_ref.inFlight().contains(m.id)) {
+    if (is_agent_inbox && dl_ref.inFlight().contains(rec.id)) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value::null_()});
       return json::okResponse(std::move(resp));
@@ -762,12 +789,17 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // blackboard: fetch is a non-destructive read — repeated calls
     // return the same value. For all other kinds, advance the cursor.
     if (!is_blackboard) {
-      if (!topic::writeCursor(cursor_p, m.next_offset)) {
+      bus::Journal fetch_log{cfg.state_dir, name};
+      // ack is forward-only. Since we peeked from the current cursor
+      // start, rec.cursor_after is always > current cursor — the only
+      // false return is a cursor-file I/O failure.
+      if (fetch_log.consumerCursor(consumer) < bus::Journal::cursorAfter(rec) &&
+          !fetch_log.ack(consumer, bus::Journal::cursorAfter(rec))) {
         return json::errorResponse("cursor write failed");
       }
     }
     std::map<std::string, json::Value> resp;
-    resp.insert({"message", messageToJson(m)});
+    resp.insert({"message", recordToJson(rec)});
     return json::okResponse(std::move(resp));
   });
 
@@ -792,7 +824,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   //     hazard that the push path carries.
   // Returns {deferred: bool, messages: [...]}. Capped per call; the rest
   // drain on the agent's next turn.
-  server.on("drain", [&, messageToJson, &dl_ref = dl](const json::Value& req) {
+  server.on("drain", [&, recordToJson, &dl_ref = dl](const json::Value& req) {
     const auto agent = req.getOrString("agent");
     if (agent.empty()) return json::errorResponse("missing agent");
     const auto topic_name = std::string{"inbox-"} + agent;
@@ -821,20 +853,17 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       return json::okResponse(std::move(resp));
     }
 
-    const auto cursor_p = topic::cursorPath(cfg.state_dir, topic_name, "");
-    const auto cursor = topic::readCursor(cursor_p);
-    const auto start =
-        cursor > 0 ? cursor
-                   : static_cast<std::int64_t>(topic::kFileHeaderBytes);
+    bus::Journal drain_cursor_log{cfg.state_dir, topic_name};
+    const auto from = drain_cursor_log.consumerCursor("");
     auto& log = getOrOpenLog(topic_name);
     constexpr std::size_t kDrainCap = 16;
-    auto r = log.peek(start, kDrainCap);
+    auto r = log.peek(from, kDrainCap);
     if (!r) return json::errorResponse(r.error().message);
 
     // C2 idempotency read — skip a record already acked (its bus-ack
     // advanced the cursor and stamped this marker). Guards the boundary
     // when a re-presented record momentarily sits at/before the cursor.
-    const auto last_id = topic::readLastId(topic::lastIdPath(cursor_p));
+    const auto last_id = drain_cursor_log.lastAckedId("");
 
     // D3: a DELIVERED record does NOT advance the cursor here — it is
     // registered in-flight and acked later by {event:bus-ack,msg_id} the
@@ -847,25 +876,45 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // only at ack) keeps dedup correct across that re-delivery.
     const auto now = nowMs();
     std::vector<json::Value> out;
-    std::int64_t advance_to = -1;
+    // advance_cursor holds the Cursor to ack to for leading drops (TTL /
+    // stale-epoch / already-acked). Default-constructed = no advance needed.
+    bus::Journal::Cursor advance_cursor;
+    bool has_advance = false;
     bool delivered_any = false;
-    for (const auto& m : *r) {
+    for (const auto& rec : *r) {
+      const auto drain_env = bus::msg::decodeEnvelope(rec.payload);
       const bool ttl_expired =
-          m.ttl_ms != 0 &&
-          m.sent_ms + static_cast<std::int64_t>(m.ttl_ms) < now;
-      const bool stale_epoch = delivery::recordEpoch(m) != current_epoch;
-      const bool already_acked = !last_id.empty() && m.id == last_id;
-      if (ttl_expired || stale_epoch || already_acked) {
-        if (!delivered_any) advance_to = m.next_offset;  // leading drop only
+          drain_env.ttl_ms != 0 &&
+          rec.append_ms + static_cast<std::int64_t>(drain_env.ttl_ms) < now;
+      const bool stale_epoch =
+          delivery::recordEpoch(drain_env) != current_epoch;
+      const bool already_acked = !last_id.empty() && rec.id == last_id;
+      // In-flight guard: if push already delivered this record and is waiting
+      // for a bus-ack, a second drain before that ack arrives would re-inject
+      // the same message (the lastid dedup only fires AFTER ack). Skip it —
+      // the ack path advances the cursor and stamps lastid, so the next drain
+      // will not see it.
+      const bool already_inflight = dl_ref.inFlight().contains(rec.id);
+      if (ttl_expired || stale_epoch || already_acked || already_inflight) {
+        if (!delivered_any && !already_inflight) {  // leading drop only
+          advance_cursor = bus::Journal::cursorAfter(rec);
+          has_advance = true;
+        }
         continue;
       }
-      out.push_back(messageToJson(m));
-      dl_ref.noteDrainDelivery(m.id, topic_name, agent, m.next_offset);
+      out.push_back(recordToJson(rec));
+      dl_ref.noteDrainDelivery(rec.id, topic_name, agent,
+                               bus::Journal::cursorAfter(rec));
       delivered_any = true;
     }
-    if (advance_to >= 0) {
-      if (!topic::writeCursor(cursor_p, advance_to)) {
-        return json::errorResponse("cursor write failed");
+    if (has_advance) {
+      if (!drain_cursor_log.ack("", advance_cursor)) {
+        // ack() false = already past OR I/O failure. The invariant is
+        // forward-only so false on already-past is harmless; a genuine
+        // I/O failure is indicated only if cursor didn't advance.
+        if (drain_cursor_log.consumerCursor("") < advance_cursor) {
+          return json::errorResponse("cursor write failed");
+        }
       }
     }
     resp.insert({"deferred", json::Value::from(false)});
@@ -889,11 +938,14 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // sit on multiple topics (pubsub cascade), so prefer the topic
     // recorded in the in-flight entry when one exists.
     std::string found_topic;
-    std::int64_t next_offset = -1;
+    // cursor_after_token is the opaque persistence form of the
+    // post-record cursor — passed through the response as an opaque string.
+    std::string cursor_after_token;
     if (const auto inflight_snap = dl_ref.forgetInflight(msg_id);
         inflight_snap.has_value()) {
       found_topic = inflight_snap->topic;
-      next_offset = inflight_snap->cursor_after;
+      cursor_after_token =
+          bus::Journal::cursorToToken(inflight_snap->cursor_after);
     } else {
       for (const auto& tcfg : registry.list()) {
         auto& log = getOrOpenLog(tcfg.name);
@@ -902,14 +954,15 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         for (const auto& m : *all) {
           if (m.id != msg_id) continue;
           found_topic = tcfg.name;
-          next_offset = m.next_offset;
+          cursor_after_token =
+              bus::Journal::cursorToToken(bus::Journal::cursorAfter(m));
           break;
         }
         if (!found_topic.empty()) break;
       }
     }
 
-    if (found_topic.empty() || next_offset < 0) {
+    if (found_topic.empty() || cursor_after_token.empty()) {
       return json::errorResponse(std::string{"no such msg_id: "} +
                                  msg_id);
     }
@@ -917,13 +970,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // Advance the topic's default cursor past the dropped record so
     // it never gets dispatched again. Only move forward — never
     // backward — so a drop on an already-consumed id is a no-op.
-    const auto cursor_p =
-        topic::cursorPath(cfg.state_dir, found_topic, "");
-    const auto cur = topic::readCursor(cursor_p);
-    if (next_offset > cur) {
-      if (!topic::writeCursor(cursor_p, next_offset)) {
-        return json::errorResponse("cursor write failed");
-      }
+    {
+      const auto cursor_after =
+          bus::Journal::cursorFromToken(cursor_after_token);
+      bus::Journal drop_log{cfg.state_dir, found_topic};
+      drop_log.ack("", cursor_after);  // forward-only, no-op if already past
     }
 
     // Audit the drop. Auto-create the audit topic on first use so a
@@ -936,23 +987,24 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         auto _ig = registry.create(audit);
       }
       auto& audit_log = getOrOpenLog("audit");
-      topic::SendOpts opts;
-      opts.protocol = "drop";
-      delivery::stampEpoch(opts, current_epoch);
-      const auto entry = std::format(
-          "drop msg_id={} topic={} next_offset={} caller={}",
-          msg_id, found_topic, next_offset,
+      bus::msg::Envelope env;
+      env.sender = "broker";
+      env.protocol = "drop";
+      delivery::stampEpoch(env, current_epoch);
+      env.body = std::format(
+          "drop msg_id={} topic={} cursor_after={} caller={}",
+          msg_id, found_topic, cursor_after_token,
           req.getOrString("caller", "unknown"));
-      auto _ig2 = audit_log.append("broker", entry, opts);
+      auto _ig2 = audit_log.append(bus::msg::encodeEnvelope(env));
     }
 
     logEvent(cfg.state_dir, "DROP",
              std::format("msg_id={} topic={} cursor_after={}",
-                         msg_id, found_topic, next_offset));
+                         msg_id, found_topic, cursor_after_token));
 
     std::map<std::string, json::Value> resp;
     resp.insert({"topic", json::Value::from(found_topic)});
-    resp.insert({"cursor_after", json::Value::from(next_offset)});
+    resp.insert({"cursor_after", json::Value::from(cursor_after_token)});
     return json::okResponse(std::move(resp));
   });
 
@@ -972,7 +1024,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       o.insert({"agent", json::Value::from(f.agent)});
       o.insert(
           {"dispatched_at_ms", json::Value::from(f.dispatched_at_ms)});
-      o.insert({"cursor_after", json::Value::from(f.cursor_after)});
+      o.insert({"cursor_after", json::Value::from(
+                    bus::Journal::cursorToToken(f.cursor_after))});
       arr.push_back(json::Value::fromObject(std::move(o)));
     }
     std::map<std::string, json::Value> resp;
@@ -1054,14 +1107,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         skip(tc.name, "in-flight");
         continue;
       }
-      const auto log_path = cfg.state_dir + "/topics/" + tc.name + ".log";
-      const auto cursor_p = topic::cursorPath(cfg.state_dir, tc.name, "");
-      const auto cursor = topic::readCursor(cursor_p);
-      const auto start =
-          cursor > 0 ? cursor
-                     : static_cast<std::int64_t>(topic::kFileHeaderBytes);
-      topic::TopicLog log{log_path};
-      auto pend = log.peek(start);
+      bus::Journal log{cfg.state_dir, tc.name};
+      auto pend = log.peek(log.consumerCursor(""));
       if (pend && !pend->empty()) {
         skip(tc.name,
              std::format("undrained ({} unread)", pend->size()));
@@ -1075,7 +1122,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       }
       std::error_code ec;
       fs::remove_all(cfg.state_dir + "/cursors/" + tc.name, ec);
-      fs::remove(log_path, ec);
+      fs::remove(log.path(), ec);
       logs.erase(tc.name);  // drop any cached open handle
       reaped.push_back(json::Value::from(tc.name));
 
@@ -1086,14 +1133,13 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         auto _ig = registry.create(audit);
       }
       auto& audit_log = getOrOpenLog("audit");
-      topic::SendOpts opts;
-      opts.protocol = "gc-reap";
-      delivery::stampEpoch(opts, current_epoch);
-      auto _ig2 = audit_log.append(
-          "broker",
-          std::format("gc-reap topic={} agent={} mode={}", tc.name, agent,
-                      only_agent.empty() ? "sweep" : "targeted"),
-          opts);
+      bus::msg::Envelope gc_env;
+      gc_env.sender = "broker";
+      gc_env.protocol = "gc-reap";
+      delivery::stampEpoch(gc_env, current_epoch);
+      gc_env.body = std::format("gc-reap topic={} agent={} mode={}", tc.name,
+                                agent, only_agent.empty() ? "sweep" : "targeted");
+      auto _ig2 = audit_log.append(bus::msg::encodeEnvelope(gc_env));
       logEvent(cfg.state_dir, "GC-REAP",
                std::format("topic={} agent={}", tc.name, agent));
     }

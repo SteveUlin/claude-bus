@@ -312,7 +312,7 @@ auto subDrop(std::span<const char* const> args) -> int {
   }
   std::println("dropped {} from {} (cursor → {})", msg_id,
                resp->getOrString("topic"),
-               resp->getOrInt("cursor_after"));
+               resp->getOrString("cursor_after"));
   return 0;
 }
 

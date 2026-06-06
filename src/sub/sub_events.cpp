@@ -8,7 +8,7 @@
 #include "../bus.h"
 #include "../broker.h"
 #include "../event.h"
-#include "../topic_log.h"
+#include "../journal.h"
 #include "../signals.h"
 #include "../sub.h"
 

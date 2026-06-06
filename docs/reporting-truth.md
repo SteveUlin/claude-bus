@@ -178,13 +178,25 @@ and wire (a)'s suspend half when elodin's signal exists.
 
 ## Build order
 
-1. **(b)** structure-aware turn split + `QUIET` — the core fix, biggest
-   honesty win, zero new inputs.
-2. **(c)** `NEEDS_NUDGE` off `wakeReadyForMail` — model-side, zero new
-   inputs.
-3. **(a)** `systemBootMs()` clamp (reboot half, model-side) → then wire
-   `broker_continuity_ms` (suspend half) when elodin's signal lands.
+1. **(b) DONE** (main `3d894c7b`) — structure-aware turn split + `QUIET`.
+2. **(c) DONE** (main `3d894c7b`) — `NEEDS_NUDGE` off `wakeReadyForMail`.
+3. **(a) model-side primitive DONE** — `systemBootMs()` (reboot half) +
+   `computeAxes`/`computeState` `continuity_since_ms` param (default 0 =
+   no-op) that clamps staleness to `max(event_ts, continuity_since_ms)`.
+   **Broker wiring PENDING (elodin):** the call sites (broker `state` RPC +
+   delivery/recovery) pass `max(systemBootMs(), continuity_since_ms)`, where
+   `continuity_since_ms` is the loop-plane Δwall−Δmono resume instant. Until
+   then the clamp is dormant; the reboot half goes live the moment a caller
+   passes `systemBootMs()`.
 
-Each step is independently shippable and independently verifiable
-(unit tests over `computeAxes` with synthetic `AgentInfo` fixtures —
-`bus_core` already has the harness).
+The consumer contract (stable, build against this):
+
+```
+// agent_status.h
+auto computeAxes(... , const PaneState* pane = nullptr,
+                 std::int64_t continuity_since_ms = 0) -> AgentAxes;
+auto systemBootMs() -> std::int64_t;   // /proc/stat btime → ms, 0 if absent
+```
+
+Each step is independently shippable and verifiable (unit tests over
+`computeAxes` with synthetic `AgentInfo` fixtures).

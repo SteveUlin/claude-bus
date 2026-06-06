@@ -174,9 +174,18 @@ struct AgentAxes {
   TuiAxis tui{TuiAxis::Unknown};
 };
 
+// continuity_since_ms (reporting-truth part a, docs/reporting-truth.md): the
+// earliest wall-clock instant event ages can be trusted against. Staleness is
+// measured from max(last_event_ts, continuity_since_ms), so an event that
+// predates a reboot / suspend does NOT count its pre-discontinuity age — the
+// fleet stops flipping to STUCK on resume just because the wall clock leapt
+// while the machine slept. 0 (default) = no clamp = today's behavior. Callers
+// pass max(systemBootMs(), broker_continuity_ms): systemBootMs covers reboot,
+// the broker's loop-plane Δwall−Δmono detector covers suspend (elodin).
 auto computeAxes(const AgentInfo& a, std::size_t unread,
                  std::int64_t now_ms, bool pane_exists,
-                 const PaneState* pane = nullptr) -> AgentAxes;
+                 const PaneState* pane = nullptr,
+                 std::int64_t continuity_since_ms = 0) -> AgentAxes;
 
 // Stable string names for the axis enums. Used by the broker's state
 // RPC to put axes on the wire and by viewers to parse them back.
@@ -209,7 +218,16 @@ auto stateGlyph(State s) -> std::string_view;
 // no longer depends on it.
 auto computeState(const AgentInfo& a, std::size_t unread,
                   std::int64_t now_ms, bool pane_exists,
-                  const PaneState* pane = nullptr) -> State;
+                  const PaneState* pane = nullptr,
+                  std::int64_t continuity_since_ms = 0) -> State;
+
+// Wall-clock ms of the last system boot, from /proc/stat's `btime` (epoch
+// seconds). The reboot half of the continuity floor (see computeAxes'
+// continuity_since_ms): an event before this predates the current boot, so
+// its age can't be trusted as staleness. Returns 0 if unavailable (then the
+// clamp is a no-op). Catches power-cycles; suspend/resume — where btime is
+// unchanged — is the broker's loop-plane Δwall−Δmono signal (elodin).
+auto systemBootMs() -> std::int64_t;
 
 // Is an idle off-TTY agent wakeable for queued mail (the doorbell's
 // readiness predicate)? True when it's sitting at an input-ready prompt:

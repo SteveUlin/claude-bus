@@ -272,10 +272,20 @@ auto foldTurnState(AgentInfo& info) -> void {
 
 auto computeAxes(const AgentInfo& a, std::size_t unread,
                  std::int64_t now_ms, bool pane_exists,
-                 const PaneState* pane) -> AgentAxes {
+                 const PaneState* pane,
+                 std::int64_t continuity_since_ms) -> AgentAxes {
   AgentAxes ax;
   const auto& ev = a.last.event;
-  const auto age_s = a.last.ts_ms > 0 ? (now_ms - a.last.ts_ms) / 1000 : 0;
+  // Continuity clamp (part a): measure staleness from the LATER of the event
+  // time and the continuity floor, so an event that predates a reboot/suspend
+  // doesn't count the slept-through wall-clock gap. Default floor 0 → no-op
+  // (max(ts, 0) == ts). Feeds BOTH the process axis (boot-stuck > 30 s) and
+  // the turn axis (stale > budget), so a resume can't flip either to red on
+  // age alone. See docs/reporting-truth.md.
+  const auto effective_ts = a.last.ts_ms > continuity_since_ms
+                                ? a.last.ts_ms
+                                : continuity_since_ms;
+  const auto age_s = a.last.ts_ms > 0 ? (now_ms - effective_ts) / 1000 : 0;
 
   // ---- Process axis ----
   if (ev.empty()) {
@@ -371,10 +381,12 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
 
 auto computeState(const AgentInfo& a, std::size_t unread,
                   std::int64_t now_ms, bool pane_exists,
-                  const PaneState* pane) -> State {
+                  const PaneState* pane,
+                  std::int64_t continuity_since_ms) -> State {
   // Compatibility shim — derive the single-state view from the
   // orthogonal axes. New callers should prefer computeAxes.
-  const auto ax = computeAxes(a, unread, now_ms, pane_exists, pane);
+  const auto ax =
+      computeAxes(a, unread, now_ms, pane_exists, pane, continuity_since_ms);
   switch (ax.process) {
     case ProcessAxis::New:
       return State::New;
@@ -523,6 +535,26 @@ auto nowMs() -> std::int64_t {
   using namespace std::chrono;
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch())
       .count();
+}
+
+auto systemBootMs() -> std::int64_t {
+  // /proc/stat carries a "btime <epoch-seconds>" line = the instant the
+  // system booted. Cache it: it's constant for the life of the boot, and the
+  // file scan shouldn't run per render-tick per-agent. 0 = unavailable (the
+  // continuity clamp then no-ops).
+  static const std::int64_t boot_ms = [] -> std::int64_t {
+    std::ifstream in{"/proc/stat"};
+    if (!in) return 0;
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.starts_with("btime ")) {
+        const auto secs = std::atoll(line.c_str() + 6);
+        return secs > 0 ? secs * 1000 : 0;
+      }
+    }
+    return 0;
+  }();
+  return boot_ms;
 }
 
 auto formatAge(std::int64_t age_s) -> std::string {

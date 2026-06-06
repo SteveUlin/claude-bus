@@ -188,6 +188,45 @@ TEST(wedged_with_mail_stays_stuck) {
            std::string_view{"STUCK"});
 }
 
+// ─── Continuity clamp: reboot/suspend age inflation (a) ───
+// docs/reporting-truth.md: measure staleness from max(event_ts, continuity)
+// so an event predating a reboot/suspend doesn't count the slept-through
+// wall-clock gap — the fleet stops flipping STUCK on resume.
+
+TEST(continuity_clamp_suppresses_pre_reboot_staleness) {
+  const auto a = mk("PostToolUse", "", "Bash", ago(6 * 60));
+  // No clamp (floor 0): genuinely stale → Quiet.
+  CHECK_EQ(axisName(computeAxes(a, 0, kNow, true, nullptr, 0).turn),
+           std::string_view{"quiet"});
+  // Continuity boundary 60 s ago (a resume): the event predates it, so its
+  // inflated age is not trusted → not stale → Working, not Quiet/Stuck.
+  CHECK_EQ(axisName(computeAxes(a, 0, kNow, true, nullptr, ago(60)).turn),
+           std::string_view{"working"});
+}
+
+TEST(continuity_clamp_ignores_events_after_boundary) {
+  // An event AFTER the continuity boundary keeps its real (stale) age — the
+  // clamp only discounts ages that span the discontinuity.
+  const auto a = mk("PostToolUse", "", "Bash", ago(6 * 60));
+  CHECK_EQ(axisName(computeAxes(a, 0, kNow, true, nullptr, ago(10 * 60)).turn),
+           std::string_view{"quiet"});
+}
+
+TEST(continuity_clamp_rescues_boot_stuck) {
+  // A pre-reboot SessionStart(startup) reads boot-stuck on raw age; the clamp
+  // says the age spans the sleep → Starting, not stuck.
+  const auto a = mk("SessionStart", "startup", "", ago(40));
+  CHECK_EQ(axisName(computeAxes(a, 0, kNow, true, nullptr, 0).process),
+           std::string_view{"stuck"});
+  CHECK_EQ(axisName(computeAxes(a, 0, kNow, true, nullptr, ago(5)).process),
+           std::string_view{"starting"});
+}
+
+TEST(system_boot_ms_is_plausible) {
+  // Smoke: on Linux /proc/stat carries btime, so expect a real epoch-ms value.
+  CHECK(systemBootMs() > 0);
+}
+
 // ─── Orchestrating: mid-turn but receptive (Workflow lease) ───
 // Lease window is 90 s (internal). ago(30) is fresh; ago(120) has decayed.
 

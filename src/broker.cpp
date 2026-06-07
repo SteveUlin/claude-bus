@@ -2,6 +2,7 @@
 
 #include "agent_status.h"
 #include "build_info.h"
+#include "cursor_store.h"
 #include "delivery.h"
 #include "json_min.h"
 #include "pane.h"  // paneState() — was transitive via agent_status.h.
@@ -525,8 +526,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       auto all = log.dump();
       if (all && !all->empty()) {
         const auto& latest = all->back();
-        bus::Journal bb_log{cfg.state_dir, name};
-        bb_log.ack("", latest.position);
+        bus::CursorStore bb_cursors{cfg.state_dir, name};
+        bb_cursors.ack("", latest.position);
       }
     }
 
@@ -572,8 +573,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         single_recipient ? std::string{} : req.getOrString("consumer");
     const auto limit = req.getOrInt("limit", 0);
 
-    bus::Journal cursor_log{cfg.state_dir, name};
-    const auto from = cursor_log.consumerCursor(consumer);
+    bus::CursorStore peek_cursors{cfg.state_dir, name};
+    const auto from = peek_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
     auto r = log.peek(from,
@@ -631,8 +632,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       std::size_t unread = 0;
       {
         const auto topic = std::string{"inbox-"} + name;
-        bus::Journal inbox_log{cfg.state_dir, topic};
-        auto r = inbox_log.peek(inbox_log.consumerCursor(""));
+        bus::Journal inbox_log{topicLogPath(cfg.state_dir, topic)};
+        bus::CursorStore inbox_cursors{cfg.state_dir, topic};
+        auto r = inbox_log.peek(inbox_cursors.consumerCursor(""));
         if (r) unread = r->size();
       }
 
@@ -761,8 +763,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto consumer =
         single_recipient ? std::string{} : req.getOrString("consumer");
 
-    bus::Journal cursor_log{cfg.state_dir, name};
-    const auto from = cursor_log.consumerCursor(consumer);
+    bus::CursorStore fetch_cursors{cfg.state_dir, name};
+    const auto from = fetch_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
     auto r = log.peek(from, 1);
@@ -788,12 +790,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // blackboard: fetch is a non-destructive read — repeated calls
     // return the same value. For all other kinds, advance the cursor.
     if (!is_blackboard) {
-      bus::Journal fetch_log{cfg.state_dir, name};
       // ack is forward-only. Since we peeked from the current cursor
       // start, rec.cursor_after is always > current cursor — the only
       // false return is a cursor-file I/O failure.
-      if (fetch_log.consumerCursor(consumer) < bus::Journal::cursorAfter(rec) &&
-          !fetch_log.ack(consumer, bus::Journal::cursorAfter(rec))) {
+      if (fetch_cursors.consumerCursor(consumer) < bus::Journal::cursorAfter(rec) &&
+          !fetch_cursors.ack(consumer, bus::Journal::cursorAfter(rec))) {
         return json::errorResponse("cursor write failed");
       }
     }
@@ -852,8 +853,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       return json::okResponse(std::move(resp));
     }
 
-    bus::Journal drain_cursor_log{cfg.state_dir, topic_name};
-    const auto from = drain_cursor_log.consumerCursor("");
+    bus::CursorStore drain_cursors{cfg.state_dir, topic_name};
+    const auto from = drain_cursors.consumerCursor("");
     auto& log = getOrOpenLog(topic_name);
     constexpr std::size_t kDrainCap = 16;
     auto r = log.peek(from, kDrainCap);
@@ -862,7 +863,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // C2 idempotency read — skip a record already acked (its bus-ack
     // advanced the cursor and stamped this marker). Guards the boundary
     // when a re-presented record momentarily sits at/before the cursor.
-    const auto last_id = drain_cursor_log.lastAckedId("");
+    const auto last_id = drain_cursors.lastAckedId("");
 
     // D3: a DELIVERED record does NOT advance the cursor here — it is
     // registered in-flight and acked later by {event:bus-ack,msg_id} the
@@ -907,11 +908,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       delivered_any = true;
     }
     if (has_advance) {
-      if (!drain_cursor_log.ack("", advance_cursor)) {
+      if (!drain_cursors.ack("", advance_cursor)) {
         // ack() false = already past OR I/O failure. The invariant is
         // forward-only so false on already-past is harmless; a genuine
         // I/O failure is indicated only if cursor didn't advance.
-        if (drain_cursor_log.consumerCursor("") < advance_cursor) {
+        if (drain_cursors.consumerCursor("") < advance_cursor) {
           return json::errorResponse("cursor write failed");
         }
       }
@@ -972,8 +973,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     {
       const auto cursor_after =
           bus::Journal::cursorFromToken(cursor_after_token);
-      bus::Journal drop_log{cfg.state_dir, found_topic};
-      drop_log.ack("", cursor_after);  // forward-only, no-op if already past
+      bus::CursorStore drop_cursors{cfg.state_dir, found_topic};
+      drop_cursors.ack("", cursor_after);  // forward-only, no-op if already past
     }
 
     // Audit the drop. Auto-create the audit topic on first use so a
@@ -1106,8 +1107,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         skip(tc.name, "in-flight");
         continue;
       }
-      bus::Journal log{cfg.state_dir, tc.name};
-      auto pend = log.peek(log.consumerCursor(""));
+      bus::Journal log{topicLogPath(cfg.state_dir, tc.name)};
+      bus::CursorStore gc_cursors{cfg.state_dir, tc.name};
+      auto pend = log.peek(gc_cursors.consumerCursor(""));
       if (pend && !pend->empty()) {
         skip(tc.name,
              std::format("undrained ({} unread)", pend->size()));

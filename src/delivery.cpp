@@ -2,6 +2,7 @@
 
 #include "agent_status.h"
 #include "blackboard_actor.h"
+#include "cursor_store.h"
 #include "dispatch.h"
 #include "dispatch_actor.h"
 #include "envelope.h"
@@ -11,6 +12,7 @@
 #include "pane.h"
 #include "recovery.h"
 #include "recovery_actor.h"
+#include "state_paths.h"
 #include "tail_reader.h"
 #include "tty_policy.h"
 
@@ -309,8 +311,8 @@ auto Loop::onAck(const std::string& msg_id, bool write_lastid) -> bool {
   auto it = in_flight_.find(msg_id);
   if (it == in_flight_.end()) return false;  // unknown / already acked
   const auto& f = it->second;
-  bus::Journal journal{cfg_.state_dir, f.topic};
-  journal.ack("", f.cursor_after, write_lastid ? msg_id : "");
+  bus::CursorStore cursors{cfg_.state_dir, f.topic};
+  cursors.ack("", f.cursor_after, write_lastid ? msg_id : "");
   forgetInflight(msg_id);  // removes file + erases map + clears blocking-op
   return true;
 }
@@ -537,8 +539,9 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   {
     const std::string commands_topic = "commands-" + agent;
     if (registry_.contains(commands_topic)) {
-      bus::Journal cmds_log{cfg_.state_dir, commands_topic};
-      if (auto p = cmds_log.peek(cmds_log.consumerCursor(""), 1);
+      bus::Journal cmds_log{topicLogPath(cfg_.state_dir, commands_topic)};
+      bus::CursorStore cmds_cursors{cfg_.state_dir, commands_topic};
+      if (auto p = cmds_log.peek(cmds_cursors.consumerCursor(""), 1);
           p && !p->empty()) {
         const auto& rec = (*p)[0];
         const auto cmds_env = bus::msg::decodeEnvelope(rec.payload);
@@ -557,8 +560,9 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     }
   }
 
-  bus::Journal log{cfg_.state_dir, cfg.name};
-  auto r = log.peek(log.consumerCursor(""), 4);
+  bus::Journal log{topicLogPath(cfg_.state_dir, cfg.name)};
+  bus::CursorStore cursors{cfg_.state_dir, cfg.name};
+  auto r = log.peek(cursors.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   // Pick the first record that isn't expired AND isn't already
@@ -579,7 +583,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     if (env.ttl_ms != 0 && rec.append_ms + static_cast<std::int64_t>(env.ttl_ms) <
                               now) {
       // Expired — advance cursor past, no delivery. Forward-only guard.
-      log.ack("", bus::Journal::cursorAfter(rec));
+      cursors.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
     // Epoch quarantine. A record stamped with a different epoch
@@ -601,7 +605,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
                std::format("stale-epoch (record={}, current={})",
                            rec_epoch, current_epoch_),
                env.body);
-      log.ack("", bus::Journal::cursorAfter(rec));
+      cursors.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
 
@@ -675,8 +679,9 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
   if (hasPresenceFile(agent)) return;
   if (blocking_ops_.contains(agent)) return;
 
-  bus::Journal log{cfg_.state_dir, cfg.name};
-  auto r = log.peek(log.consumerCursor(""), 4);
+  bus::Journal log{topicLogPath(cfg_.state_dir, cfg.name)};
+  bus::CursorStore cursors{cfg_.state_dir, cfg.name};
+  auto r = log.peek(cursors.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   const auto now = nowMs();
@@ -687,7 +692,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     const auto env = bus::msg::decodeEnvelope(rec.payload);
     if (env.ttl_ms != 0 && rec.append_ms + static_cast<std::int64_t>(env.ttl_ms) <
                               now) {
-      log.ack("", bus::Journal::cursorAfter(rec));
+      cursors.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
     // Epoch quarantine — see dispatchAgentInbox for the rationale.
@@ -703,7 +708,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
                std::format("stale-epoch (record={}, current={})",
                            rec_epoch, current_epoch_),
                env.body);
-      log.ack("", bus::Journal::cursorAfter(rec));
+      cursors.ack("", bus::Journal::cursorAfter(rec));
       continue;
     }
 
@@ -814,8 +819,9 @@ auto Loop::scanRetries() -> void {
     // Read the original record off the topic log so we can re-send
     // it. The record sits at offset cursor_after - record_len, but
     // re-walking from cursor is simpler: peek from the topic cursor.
-    bus::Journal log{cfg_.state_dir, f.topic};
-    auto r = log.peek(log.consumerCursor(""), 1);
+    bus::Journal log{topicLogPath(cfg_.state_dir, f.topic)};
+    bus::CursorStore log_cursors{cfg_.state_dir, f.topic};
+    auto r = log.peek(log_cursors.consumerCursor(""), 1);
     if (!r || r->empty() || r->front().id != id) {
       // Record disappeared or cursor moved past; drop the stale
       // in-flight without escalation (this shouldn't happen).
@@ -829,7 +835,7 @@ auto Loop::scanRetries() -> void {
     if (f.attempts >= kMaxAttempts) {
       // Exhausted — escalate + advance cursor + clear in-flight.
       escalate(f, "no ack after max attempts", rec_env.body);
-      log.ack("", bus::Journal::cursorAfter(rec));
+      log_cursors.ack("", bus::Journal::cursorAfter(rec));
       if (blocking_ops_.contains(f.agent) &&
           blocking_ops_.at(f.agent) == id) {
         clearBlockingOp(f.agent);
@@ -1062,8 +1068,9 @@ auto Loop::maybeAutoClear() -> void {
 
     // Inbox depth — peek 1 record from cursor.
     {
-      bus::Journal inbox{cfg_.state_dir, "inbox-" + name};
-      if (auto r = inbox.peek(inbox.consumerCursor(""), 1); r && !r->empty()) {
+      bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + name)};
+      bus::CursorStore inbox_cursors{cfg_.state_dir, "inbox-" + name};
+      if (auto r = inbox.peek(inbox_cursors.consumerCursor(""), 1); r && !r->empty()) {
         continue;  // mail pending, defer the clear
       }
     }
@@ -1125,8 +1132,9 @@ auto Loop::maybeAutoClear() -> void {
 // True iff a record sits past agent's inbox cursor. A pure read fed into the
 // PolicyContext snapshot (was an inline lambda in maybeAutoRecover).
 auto Loop::inboxPending(const std::string& agent) const -> bool {
-  bus::Journal inbox{cfg_.state_dir, "inbox-" + agent};
-  auto r = inbox.peek(inbox.consumerCursor(""), 1);
+  bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + agent)};
+  bus::CursorStore inbox_cursors{cfg_.state_dir, "inbox-" + agent};
+  auto r = inbox.peek(inbox_cursors.consumerCursor(""), 1);
   return r && !r->empty();
 }
 
@@ -1211,8 +1219,9 @@ auto Loop::runPolicy() -> void {
   // assignment.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != std::string{kKindWorkQueue}) continue;
-    bus::Journal log{cfg_.state_dir, tcfg.name};
-    auto r = log.peek(log.consumerCursor(""), 16);  // bounded head window → batch-assign
+    bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
+    bus::CursorStore wq_cursors{cfg_.state_dir, tcfg.name};
+    auto r = log.peek(wq_cursors.consumerCursor(""), 16);  // bounded head window → batch-assign
     if (!r) continue;
     for (const auto& rec : *r) {
       const auto wq_env = bus::msg::decodeEnvelope(rec.payload);
@@ -1225,15 +1234,16 @@ auto Loop::runPolicy() -> void {
   // persists, so a restart resumes past already-notified posts.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != std::string{kKindBlackboard}) continue;
-    bus::Journal log{cfg_.state_dir, tcfg.name};
-    auto r = log.peek(log.consumerCursor("_dispatch"), 16);  // bounded window of new posts
+    bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
+    bus::CursorStore bb_cursors{cfg_.state_dir, tcfg.name};
+    auto r = log.peek(bb_cursors.consumerCursor("_dispatch"), 16);  // bounded window of new posts
     if (!r || r->empty()) continue;
     for (const auto& rec : *r) {
       const auto bb_env = bus::msg::decodeEnvelope(rec.payload);
       ctx.board_updates.push_back({tcfg.name, bb_env.sender, bb_env.body});
     }
     // Advance past all records we just folded — forward-only.
-    log.ack("_dispatch", bus::Journal::cursorAfter(r->back()));
+    bb_cursors.ack("_dispatch", bus::Journal::cursorAfter(r->back()));
   }
 
   for (const auto& a : engine_.evaluate(ctx)) executePolicyAction(a);
@@ -1290,10 +1300,11 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
 // (kernel plane) performs it on a DispatchActor's consume_from intent, so the
 // actor never advances a cursor. No-op if the queue is empty.
 auto Loop::consumeQueueHead(const std::string& topic) -> void {
-  bus::Journal log{cfg_.state_dir, topic};
-  auto r = log.peek(log.consumerCursor(""), 1);
+  bus::Journal log{topicLogPath(cfg_.state_dir, topic)};
+  bus::CursorStore cq_cursors{cfg_.state_dir, topic};
+  auto r = log.peek(cq_cursors.consumerCursor(""), 1);
   if (!r || r->empty()) return;
-  log.ack("", bus::Journal::cursorAfter(r->front()));
+  cq_cursors.ack("", bus::Journal::cursorAfter(r->front()));
 }
 
 // Doorbell — wake an idle off-TTY agent that has queued mail.
@@ -1356,8 +1367,9 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // Mail queued past the inbox cursor?
     bool has_mail = false;
     {
-      bus::Journal inbox{cfg_.state_dir, "inbox-" + name};
-      auto r = inbox.peek(inbox.consumerCursor(""), 1);
+      bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + name)};
+      bus::CursorStore inbox_wake_cursors{cfg_.state_dir, "inbox-" + name};
+      auto r = inbox.peek(inbox_wake_cursors.consumerCursor(""), 1);
       has_mail = r && !r->empty();
     }
     if (!has_mail) {  // drained / nothing queued → healthy

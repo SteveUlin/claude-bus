@@ -25,6 +25,14 @@
 
 namespace bus {
 
+// Canonical path for a named topic log under a given state root.
+// Used by both Journal (byte ops) and CursorStore (cursor ops) to
+// derive the log path from (state_root, name) consistently.
+inline auto topicLogPath(std::string_view state_root,
+                         std::string_view name) -> std::string {
+  return std::string{state_root} + "/topics/" + std::string{name} + ".log";
+}
+
 inline auto stateRoot() -> std::string {
   if (const char* s = std::getenv("CLAUDE_BUS_STATE"); s != nullptr && *s) {
     return s;

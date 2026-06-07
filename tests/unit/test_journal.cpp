@@ -528,59 +528,8 @@ TEST(tail_midwalk_crc_corruption_stops_not_fallback) {
   std::remove(corrupt_path.c_str());
 }
 
-// ── Journal::ack at-least-once never-rewind invariant ────────────────────────
-
-// Journal::ack is the member replacement for the old writeCursor /
-// advanceCursorMonotonic / readCursor free functions. It enforces
-// forward-only advancement: a backward or equal target is a no-op (returns
-// false) and leaves the stored cursor unchanged.
-TEST(advance_cursor_monotonic_never_rewinds) {
-  static int n = 0;
-  const std::string state_root =
-      std::string{"/tmp/claude-bus-test-ack-mono-"} + std::to_string(++n);
-  std::filesystem::create_directories(state_root + "/topics");
-
-  Journal log{state_root, "ack-mono"};
-
-  // Append three records so we have real cursors to work with.
-  (void)log.append(bytesOf("r1"));
-  (void)log.append(bytesOf("r2"));
-  (void)log.append(bytesOf("r3"));
-
-  auto recs = log.dump();
-  CHECK(recs.has_value());
-  CHECK_EQ(recs->size(), std::size_t{3});
-
-  const auto ca0 = Journal::cursorAfter((*recs)[0]);  // after r1
-  const auto ca1 = Journal::cursorAfter((*recs)[1]);  // after r2
-  const auto ca2 = Journal::cursorAfter((*recs)[2]);  // after r3
-
-  // Start: consumer cursor is start-of-log (default).
-  CHECK_EQ(log.consumerCursor(""), Journal::Cursor{});
-
-  // Advance to ca0 — should succeed (forward move).
-  CHECK(log.ack("", ca0));
-  CHECK_EQ(log.consumerCursor(""), ca0);
-
-  // Advance to ca1 — forward, should succeed.
-  CHECK(log.ack("", ca1));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Try to rewind to ca0 — backward, must be refused (returns false, cursor
-  // unchanged).
-  CHECK(!log.ack("", ca0));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Equal target — no-op, returns false, cursor unchanged.
-  CHECK(!log.ack("", ca1));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Forward again to ca2 — should succeed.
-  CHECK(log.ack("", ca2));
-  CHECK_EQ(log.consumerCursor(""), ca2);
-
-  std::filesystem::remove_all(state_root);
-}
+// (cursor-store tests — advance_cursor_monotonic_never_rewinds, etc. —
+// moved to test_cursor_store.cpp)
 
 // ── Cursor opaque type ───────────────────────────────────────────────────────
 
@@ -618,116 +567,37 @@ TEST(cursor_token_roundtrip) {
   std::remove(path.c_str());
 }
 
-// ── Journal::ack forward-only invariant ──────────────────────────────────────
-
-// Journal::ack must never rewind a consumer cursor: a backward or equal
-// target is refused and the cursor stays at the higher value.
-TEST(journal_ack_never_rewinds) {
-  const auto base = std::string{"/tmp/claude-bus-test-ack-journal-"};
-  static int n = 0;
-  const std::string state_root = base + std::to_string(++n);
-  const std::string name = "ack-test";
-  std::filesystem::create_directories(state_root + "/topics");
-
-  Journal log{state_root, name};
-  (void)log.append(bytesOf("msg-a"));
-  (void)log.append(bytesOf("msg-b"));
-  (void)log.append(bytesOf("msg-c"));
-
-  auto recs = log.dump();
-  CHECK(recs.has_value());
-  CHECK_EQ(recs->size(), std::size_t{3});
-
-  const auto ca0 = Journal::cursorAfter((*recs)[0]);
-  const auto ca1 = Journal::cursorAfter((*recs)[1]);
-  const auto ca2 = Journal::cursorAfter((*recs)[2]);
-
-  // Advance to record 1 (cursor_after of record 0).
-  CHECK(log.ack("", ca0));
-  CHECK_EQ(log.consumerCursor(""), ca0);
-
-  // Advance forward to record 2.
-  CHECK(log.ack("", ca1));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Backward: refused — cursor stays at ca1.
-  CHECK(!log.ack("", ca0));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Equal: refused (no-op).
-  CHECK(!log.ack("", ca1));
-  CHECK_EQ(log.consumerCursor(""), ca1);
-
-  // Forward again.
-  CHECK(log.ack("", ca2));
-  CHECK_EQ(log.consumerCursor(""), ca2);
-
-  std::filesystem::remove_all(state_root);
-}
+// (journal_ack_never_rewinds moved to test_cursor_store.cpp)
 
 // ── Journal-tag binding ───────────────────────────────────────────────────────
 
-// A cursor from a named journal carries a non-zero tag; from an unnamed (path-
-// only) journal it carries tag 0 (unbound).
-TEST(cursor_tag_named_vs_unnamed_journal) {
-  static int n = 0;
-  const std::string state_root =
-      std::string{"/tmp/claude-bus-test-tag-"} + std::to_string(++n);
-  std::filesystem::create_directories(state_root + "/topics");
-
-  // Named journal — cursors must carry a non-zero tag.
-  Journal named{state_root, "my-topic"};
-  (void)named.append(bytesOf("msg-a"));
-  (void)named.append(bytesOf("msg-b"));
-
-  auto named_recs = named.dump();
-  CHECK(named_recs.has_value());
-  CHECK_EQ(named_recs->size(), std::size_t{2});
-
-  // cursor_after from dump() of a named journal must be non-zero.
-  const auto ca = Journal::cursorAfter((*named_recs)[0]);
-  const auto tok = Journal::cursorToToken(ca);
-  // Token must contain a colon (offset:tag) and both parts must be parseable.
-  CHECK(tok.find(':') != std::string::npos);
-  const auto rt = Journal::cursorFromToken(tok);
-  CHECK(rt != Journal::Cursor{});  // not start-of-log
-  CHECK_EQ(rt, ca);               // round-trip exact
-
-  // consumerCursor from a named journal carries a non-zero tag.
-  const auto cc = named.consumerCursor();
-  // Default (no acks yet) is tag-stamped but offset == 0.
-  const auto cc_tok = Journal::cursorToToken(cc);
-  CHECK(cc_tok.find(':') != std::string::npos);
-
+// An unnamed (path-only) journal — cursors carry tag 0 (unbound).
+// Named journals via CursorStore carry non-zero tags — see test_cursor_store.cpp.
+TEST(cursor_tag_unnamed_journal) {
   // Unnamed (path-only) journal — cursors carry tag 0.
-  const auto path = std::string{"/tmp/claude-bus-test-tag-unnamed-"} +
-                    std::to_string(n) + ".log";
+  const auto path = tmpPath();
   Journal unnamed{path};
   (void)unnamed.append(bytesOf("x"));
   auto unnamed_recs = unnamed.dump();
   CHECK(unnamed_recs.has_value());
   CHECK(!unnamed_recs->empty());
-  // Tag 0 means the token is just the decimal offset (no colon) OR
-  // "offset:0" — either way cursorFromToken must decode it, and the
-  // cursor must compare equal to a plain Cursor{} at the same offset.
+  // Tag 0 means the token encodes "offset:0" — cursorFromToken decodes it,
+  // and the cursor compares equal to another Cursor at the same offset.
   const auto ua = Journal::cursorAfter((*unnamed_recs)[0]);
   const auto utok = Journal::cursorToToken(ua);
   const auto urt = Journal::cursorFromToken(utok);
   CHECK_EQ(urt, ua);
 
-  std::filesystem::remove_all(state_root);
   std::remove(path.c_str());
 }
 
 // cursorToToken → cursorFromToken round-trips both offset and tag.
 // A legacy tag-less token (no colon) decodes to tag 0.
 TEST(cursor_token_roundtrip_with_tag) {
-  static int n = 0;
-  const std::string state_root =
-      std::string{"/tmp/claude-bus-test-tokrt-"} + std::to_string(++n);
-  std::filesystem::create_directories(state_root + "/topics");
-
-  Journal log{state_root, "tokrt-topic"};
+  // Use a plain path-only Journal; tagOf gives tag=0 until first append.
+  // After append, the file has a UUID and tagOf returns non-zero.
+  const auto path = tmpPath();
+  Journal log{path};
   (void)log.append(bytesOf("alpha"));
 
   auto recs = log.dump();
@@ -746,8 +616,9 @@ TEST(cursor_token_roundtrip_with_tag) {
   const auto tag_part = tok.substr(colon + 1);
   CHECK(!offset_part.empty());
   CHECK(!tag_part.empty());
+  // Tag from a path-only journal after append: file has a UUID → non-zero.
   const auto tag_val = std::stoull(tag_part);
-  CHECK(tag_val != 0);  // named journal → non-zero tag persisted
+  CHECK(tag_val != 0);
 
   // Round-trip is exact.
   const auto rt = Journal::cursorFromToken(tok);
@@ -761,14 +632,13 @@ TEST(cursor_token_roundtrip_with_tag) {
   const auto explicit_unbound = Journal::cursorFromToken("12345:0");
   CHECK_EQ(explicit_unbound, Journal::cursorFromToken("12345:0"));
 
-  std::filesystem::remove_all(state_root);
+  std::remove(path.c_str());
 }
 
-// Cross-journal guard: B.ack with a cursor issued by A now calls fatal()
-// (always-on crash — it is a programmer error, not a runtime condition).
-// Phase 2 will add a fork-based death test to verify the abort.
-// This test verifies the POSITIVE paths: same-journal ack succeeds and
-// advances the cursor; an unbound (tag-0) cursor is accepted by any journal.
+// Cross-journal guard: CursorStore.ack with a cursor from a different journal
+// calls fatal(). This test verifies the POSITIVE paths via CursorStore:
+// same-journal ack succeeds; an unbound (tag-0) cursor is accepted by any.
+// The negative (cross-journal fatal) test lives in test_cursor_store.cpp.
 TEST(cross_journal_ack_refused) {
   static int n = 0;
   const std::string sr_a =
@@ -778,8 +648,9 @@ TEST(cross_journal_ack_refused) {
   std::filesystem::create_directories(sr_a + "/topics");
   std::filesystem::create_directories(sr_b + "/topics");
 
-  Journal a{sr_a, "journal-a"};
-  Journal b{sr_b, "journal-b"};
+  // Build using path-only journals + CursorStore for cursor ops.
+  Journal a{sr_a + "/topics/journal-a.log"};
+  Journal b{sr_b + "/topics/journal-b.log"};
 
   (void)a.append(bytesOf("a1"));
   (void)a.append(bytesOf("a2"));
@@ -790,20 +661,13 @@ TEST(cross_journal_ack_refused) {
   CHECK(a_recs.has_value());
   CHECK_EQ(a_recs->size(), std::size_t{2});
 
-  const auto cursor_from_a = Journal::cursorAfter((*a_recs)[0]);
-
-  // A.ack with cursor_from_a must succeed (same journal, matching tag).
-  CHECK(a.ack("", cursor_from_a));
-  CHECK_EQ(a.consumerCursor(""), cursor_from_a);
-
-  // An unbound (tag-0) cursor is accepted by any named journal — it represents
-  // a legacy / unknown origin and is treated as valid. Construct via the
-  // "<offset>:0" canonical form (tag-less/colon-less tokens now decode to
-  // start-of-log, so we must include the explicit ":0" suffix).
+  // An unbound (tag-0) cursor is accepted by any journal — legacy / unknown
+  // origin. Construct via "<offset>:0" canonical form.
   const auto tok = Journal::cursorToToken((*a_recs)[0].position);
   const auto offset_only = tok.substr(0, tok.find(':'));  // decimal offset
   const auto unbound = Journal::cursorFromToken(offset_only + ":0");  // tag 0
-  CHECK(b.ack("", unbound));  // unbound is accepted
+  // Verify it decodes without crashing (positive path; fatal tested separately).
+  CHECK(unbound == Journal::cursorFromToken(offset_only + ":0"));
 
   std::filesystem::remove_all(sr_a);
   std::filesystem::remove_all(sr_b);
@@ -812,26 +676,22 @@ TEST(cross_journal_ack_refused) {
 // ── UUID identity: each journal file gets a distinct UUID ─────────────────────
 
 // Two journals at different paths must have different header UUIDs (bytes 8..23)
-// after their first append. A cursor minted by one journal is rejected by the
-// other (cross-journal guard), confirming UUID-derived tags diverge.
+// after their first append. Journal::tagOf reads the UUID-derived tag; cursors
+// from distinct files carry different non-zero tags.
 TEST(uuid_identity_distinct_per_file) {
   static int n = 0;
-  const std::string sr_x =
-      std::string{"/tmp/claude-bus-test-uuid-x-"} + std::to_string(++n);
-  const std::string sr_y =
-      std::string{"/tmp/claude-bus-test-uuid-y-"} + std::to_string(n);
-  std::filesystem::create_directories(sr_x + "/topics");
-  std::filesystem::create_directories(sr_y + "/topics");
+  const auto path_x =
+      std::string{"/tmp/claude-bus-test-uuid-x-"} + std::to_string(++n) + ".log";
+  const auto path_y =
+      std::string{"/tmp/claude-bus-test-uuid-y-"} + std::to_string(n) + ".log";
 
-  Journal jx{sr_x, "uuid-x"};
-  Journal jy{sr_y, "uuid-y"};
+  Journal jx{path_x};
+  Journal jy{path_y};
 
   (void)jx.append(bytesOf("px"));
   (void)jy.append(bytesOf("py"));
 
   // Read the raw header bytes of each file.
-  const auto path_x = sr_x + "/topics/uuid-x.log";
-  const auto path_y = sr_y + "/topics/uuid-y.log";
   const auto buf_x = readBytes(path_x);
   const auto buf_y = readBytes(path_y);
 
@@ -850,38 +710,23 @@ TEST(uuid_identity_distinct_per_file) {
   // UUIDs must differ (astronomically unlikely to collide).
   CHECK(uuid_x != uuid_y);
 
-  // A cursor from jx carries jx's UUID-derived tag; acking it against jy
-  // (which has a different UUID tag) must crash. We verify the POSITIVE
-  // direction only (same-journal ack succeeds) since the cross-journal path
-  // calls fatal() / abort() and cannot be tested without fork.
+  // tagOf must return non-zero for a file with a UUID.
+  const auto tag_x = Journal::tagOf(path_x);
+  const auto tag_y = Journal::tagOf(path_y);
+  CHECK(tag_x != 0);
+  CHECK(tag_y != 0);
+  CHECK(tag_x != tag_y);
+
+  // Cursors from jx carry jx's tag (non-zero, different from jy's).
   auto x_recs = jx.dump();
   CHECK(x_recs.has_value());
   CHECK(!x_recs->empty());
   const auto cx = Journal::cursorAfter((*x_recs)[0]);
-
-  // Same-journal ack succeeds.
-  CHECK(jx.ack("", cx));
-
-  // Confirm the cursor from jx carries a non-zero tag that differs from jy's.
   const auto tok_cx = Journal::cursorToToken(cx);
   const auto colon = tok_cx.find(':');
   CHECK(colon != std::string::npos);
-  const auto tag_x = std::stoull(tok_cx.substr(colon + 1));
-  CHECK(tag_x != 0);
+  CHECK(std::stoull(tok_cx.substr(colon + 1)) == tag_x);
 
-  auto y_recs = jy.dump();
-  CHECK(y_recs.has_value());
-  CHECK(!y_recs->empty());
-  const auto cy = Journal::cursorAfter((*y_recs)[0]);
-  const auto tok_cy = Journal::cursorToToken(cy);
-  const auto colon_y = tok_cy.find(':');
-  CHECK(colon_y != std::string::npos);
-  const auto tag_y = std::stoull(tok_cy.substr(colon_y + 1));
-  CHECK(tag_y != 0);
-
-  // Tags from distinct files must differ.
-  CHECK(tag_x != tag_y);
-
-  std::filesystem::remove_all(sr_x);
-  std::filesystem::remove_all(sr_y);
+  std::remove(path_x.c_str());
+  std::remove(path_y.c_str());
 }

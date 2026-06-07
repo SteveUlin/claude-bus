@@ -12,6 +12,10 @@
 
 namespace bus {
 
+// Forward declaration so CursorStore can be a friend of Journal::Cursor
+// without pulling in cursor_store.h (which includes journal.h).
+class CursorStore;
+
 constexpr std::uint32_t kJournalFormatVersion = 7;
 constexpr std::size_t kJournalHeaderBytes = 64;
 constexpr std::size_t kJournalMaxRecordBytes = 1 << 20;  // 1 MiB
@@ -73,9 +77,8 @@ struct Record;
 //
 // TODO: no lazy creation (lazy actions are for higher level apis if needed)
 //
-// state_root and name are needed for the cursor-store API (consumerCursor,
-// ack, lastAckedId). They may be left empty when only the raw I/O methods
-// (append, peek, dump, tail) are used.
+// Journal is path-only: it owns byte ops (append, peek, dump, tail) only.
+// Per-consumer cursor persistence lives in CursorStore (cursor_store.h).
 //
 // Thought: a journal should support multiple cursors
 class Journal {
@@ -125,16 +128,17 @@ class Journal {
     std::int64_t offset_{0};
     std::uint64_t journal_tag_{0};
     // Cursor's constructors are private so a position value can't be forged
-    // from a raw integer outside this unit. Journal is the sole factory —
-    // it mints tagged Cursors in ParseFromBuffer, consumerCursor, and
-    // cursorAfter. Every other caller holds them opaquely.
+    // from a raw integer outside this unit. Journal is the primary factory —
+    // it mints tagged Cursors in ParseFromBuffer and cursorAfter.
+    // CursorStore is a second sanctioned factory: it mints Cursors in
+    // consumerCursor (stamping the journal's tag) and reads offset_/journal_tag_
+    // in ack (for persistence + the cross-journal guard). Cursors remain
+    // un-forgeable by arbitrary code.
     friend class Journal;
+    friend class CursorStore;
   };
 
   explicit Journal(std::string path);
-
-  // Construct with state_root + name for the full cursor-store API.
-  Journal(std::string state_root, std::string name);
 
   // Append one record. Returns the record's id.
   auto append(std::span<const std::byte> payload,
@@ -168,31 +172,15 @@ class Journal {
   // Path to the journal file.
   auto path() const -> const std::string& { return path_; }
 
-  /// Why is this here, can this be a higher level abstraction if needed
-  ///
-  // ── Cursor-store API (requires state_root + name) ──────────────────────
+  // ── Journal identity tag ───────────────────────────────────────────────
   //
-  // Read the persisted cursor for `consumer` ("" = default). Returns the
-  // start-of-log Cursor when no cursor file exists yet.
+  // Read the UUID at kUuidOffset from the file at `path` and derive the
+  // FNV-1a tag. Returns 0 when the file doesn't exist or is too short
+  // (unbound). This is the public, uncached static used by CursorStore
+  // to stamp/verify cursors without holding a Journal instance.
   //
-  // BAD CALL: calling on a journal built without state_root+name crashes.
-  auto consumerCursor(std::string_view consumer = "") const -> Cursor;
-
-  // Advance the consumer cursor to `target` — forward-only; a backward or
-  // equal target is a no-op (at-least-once invariant). Also stamps the
-  // last-acked id when `id` is non-empty. Returns true iff it actually wrote.
-  //
-  // BAD CALL: calling on a journal without state_root+name crashes.
-  // BAD CALL: target's tag is non-zero and != this journal's tag crashes
-  //           (cross-journal cursor — always a programmer error).
-  auto ack(std::string_view consumer, Cursor target,
-           std::string_view id = "") -> bool;
-
-  // Read the last-acked record id for `consumer` (the dedup floor).
-  // Empty string when none has been stamped.
-  //
-  // BAD CALL: calling on a journal without state_root+name crashes.
-  auto lastAckedId(std::string_view consumer = "") const -> std::string;
+  // The instance tag() delegates to this and caches the first non-zero result.
+  static auto tagOf(const std::string& path) -> std::uint64_t;
 
   // ── Opaque persistence tokens (forwarded to Cursor) ───────────────────
   //
@@ -233,16 +221,11 @@ class Journal {
 
  private:
   std::string path_;
-  std::string state_root_;  // empty when constructed without cursor-store args
-  std::string name_;        // empty when constructed without cursor-store args
 
-  // UUID-derived tag: read once from the file header, cached on first non-zero
+  // UUID-derived tag: delegates to tagOf(path_) and caches the first non-zero
   // result. Returns 0 when the file doesn't exist yet or is too short.
   mutable std::uint64_t cached_tag_{0};
   auto tag() const -> std::uint64_t;
-
-  auto cursorFilePath(std::string_view consumer) const -> std::string;
-  auto lastIdFilePath(std::string_view consumer) const -> std::string;
 
   // Extract the raw byte offset from a Cursor. Private — the kernel owns all
   // offset arithmetic so callers hold Cursors opaquely. Used by the read path

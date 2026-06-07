@@ -25,18 +25,6 @@ namespace fs = std::filesystem;
 
 namespace bus {
 
-// ── Fatal error (programmer error; always crashes) ────────────────────────
-
-[[noreturn]] static auto fatal(std::string_view msg) -> void {
-  std::string s = "bus::Journal fatal: ";
-  s += msg;
-  s += '\n';
-  // Intentionally ignore the return value: we are about to abort() and a
-  // write failure just means stderr is closed — nothing useful to do.
-  [[maybe_unused]] auto _ = ::write(STDERR_FILENO, s.data(), s.size());
-  std::abort();
-}
-
 namespace {
 
 constexpr std::size_t kVersionOffset = 4;
@@ -238,16 +226,6 @@ auto readAll(const std::string& path) -> Result<std::vector<std::byte>> {
   return buf;
 }
 
-// Cursor path for a (journal, consumer) pair, rooted at $STATE/cursors/.
-// Consumer "" maps to "_default".
-auto cursorPathImpl(std::string_view state_root, std::string_view name,
-                    std::string_view consumer) -> std::string {
-  std::string c{consumer};
-  if (c.empty()) c = "_default";
-  return std::string{state_root} + "/cursors/" + std::string{name} + "/" +
-         c + ".cursor";
-}
-
 auto readCursorImpl(const std::string& path) -> std::int64_t {
   Fd fd{::open(path.c_str(), O_RDONLY)};
   if (!fd.valid()) return 0;
@@ -268,53 +246,6 @@ auto writeCursorImpl(const std::string& path, std::int64_t offset) -> bool {
   const auto v = static_cast<std::uint64_t>(offset);
   for (int i = 0; i < 8; ++i) buf[i] = std::byte((v >> (i * 8)) & 0xFF);
   if (::write(fd.get(), buf.data(), buf.size()) != 8) return false;
-  fd.reset();
-  return ::rename(tmp.c_str(), path.c_str()) == 0;
-}
-
-auto advanceCursorMonotonicImpl(const std::string& path,
-                                std::int64_t target) -> bool {
-  if (readCursorImpl(path) >= target) return false;
-  return writeCursorImpl(path, target);
-}
-
-auto lastIdPathImpl(const std::string& cursor_path) -> std::string {
-  constexpr std::string_view kSuffix = ".cursor";
-  if (cursor_path.size() >= kSuffix.size() &&
-      cursor_path.compare(cursor_path.size() - kSuffix.size(),
-                          kSuffix.size(), kSuffix) == 0) {
-    return cursor_path.substr(0, cursor_path.size() - kSuffix.size()) +
-           ".lastid";
-  }
-  return cursor_path + ".lastid";
-}
-
-auto readLastIdImpl(const std::string& path) -> std::string {
-  Fd fd{::open(path.c_str(), O_RDONLY)};
-  if (!fd.valid()) return {};
-  std::array<char, 256> buf{};
-  const auto n = ::read(fd.get(), buf.data(), buf.size());
-  if (n <= 0) return {};
-  std::string id(buf.data(), static_cast<std::size_t>(n));
-  while (!id.empty() && (id.back() == '\n' || id.back() == '\r' ||
-                         id.back() == ' ')) {
-    id.pop_back();
-  }
-  return id;
-}
-
-auto writeLastIdImpl(const std::string& path, const std::string& id) -> bool {
-  std::error_code ec;
-  fs::create_directories(fs::path{path}.parent_path(), ec);
-  if (ec) return false;
-  const std::string tmp = path + ".tmp";
-  Fd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)};
-  if (!fd.valid()) return false;
-  const std::string line = id + "\n";
-  if (::write(fd.get(), line.data(), line.size()) !=
-      static_cast<ssize_t>(line.size())) {
-    return false;
-  }
   fd.reset();
   return ::rename(tmp.c_str(), path.c_str()) == 0;
 }
@@ -463,17 +394,11 @@ auto writeU64File(const std::string& path, std::int64_t v) -> bool {
 
 Journal::Journal(std::string path) : path_{std::move(path)} {}
 
-Journal::Journal(std::string state_root, std::string name)
-    : path_{state_root + "/topics/" + name + ".log"},
-      state_root_{std::move(state_root)},
-      name_{std::move(name)} {}
-
-// Read the UUID from the file header and derive the tag via FNV-1a.
+// Read the UUID from the file header at `path` and derive the FNV-1a tag.
 // Returns 0 when the file doesn't exist or is too short (unbound).
-// Caches the first non-zero result so subsequent calls skip the I/O.
-auto Journal::tag() const -> std::uint64_t {
-  if (cached_tag_ != 0) return cached_tag_;
-  Fd fd{::open(path_.c_str(), O_RDONLY)};
+// This is the uncached static used by CursorStore and by the instance tag().
+auto Journal::tagOf(const std::string& path) -> std::uint64_t {
+  Fd fd{::open(path.c_str(), O_RDONLY)};
   if (!fd.valid()) return 0;
   std::array<std::byte, kUuidOffset + kUuidBytes> hdr{};
   if (::pread(fd.get(), hdr.data(), hdr.size(), 0) !=
@@ -487,8 +412,15 @@ auto Journal::tag() const -> std::uint64_t {
     if (b != std::byte{0}) { allzero = false; break; }
   }
   if (allzero) return 0;
-  const auto t = journalTagFromUuid(uuid);
-  cached_tag_ = t;  // only cache non-zero (journalTagFromUuid remaps 0→1)
+  return journalTagFromUuid(uuid);
+}
+
+// Instance tag: delegates to tagOf(path_) and caches the first non-zero result
+// so subsequent calls skip the I/O.
+auto Journal::tag() const -> std::uint64_t {
+  if (cached_tag_ != 0) return cached_tag_;
+  const auto t = tagOf(path_);
+  if (t != 0) cached_tag_ = t;
   return t;
 }
 
@@ -706,57 +638,6 @@ auto Journal::tail(std::size_t n, std::int64_t* truncated_at) const
   std::reverse(out.begin(), out.end());
   if (truncated_at) *truncated_at = corruption_offset;
   return out;
-}
-
-// ── Journal cursor-store methods ──────────────────────────────────────────
-
-auto Journal::cursorFilePath(std::string_view consumer) const -> std::string {
-  return cursorPathImpl(state_root_, name_, consumer);
-}
-
-auto Journal::lastIdFilePath(std::string_view consumer) const -> std::string {
-  return lastIdPathImpl(cursorFilePath(consumer));
-}
-
-auto Journal::consumerCursor(std::string_view consumer) const -> Cursor {
-  if (state_root_.empty()) {
-    fatal("consumerCursor: journal has no state_root+name; "
-          "construct with Journal(state_root, name)");
-  }
-  const auto offset = readCursorImpl(cursorFilePath(consumer));
-  return Cursor{offset, tag()};
-}
-
-auto Journal::ack(std::string_view consumer, Cursor target,
-                  std::string_view id) -> bool {
-  if (state_root_.empty()) {
-    fatal("ack: journal has no state_root+name; "
-          "construct with Journal(state_root, name)");
-  }
-  // Cross-journal guard: a non-zero tag on target that differs from this
-  // journal's tag is always a programmer error — it means the caller is
-  // acking the wrong journal. Crash immediately; silent corruption would
-  // be far harder to diagnose.
-  // tag() == 0 means the file doesn't exist yet (unbound); skip the check
-  // so an un-created journal never crashes on a tagged cursor.
-  const auto my_tag = tag();
-  if (my_tag != 0 && target.journal_tag_ != 0 &&
-      target.journal_tag_ != my_tag) {
-    fatal("ack: cross-journal cursor — cursor was issued by a different "
-          "journal; check that cursor origin matches the journal being acked");
-  }
-  const auto path = cursorFilePath(consumer);
-  if (!advanceCursorMonotonicImpl(path, target.offset_)) return false;
-  if (!id.empty()) writeLastIdImpl(lastIdPathImpl(path), std::string{id});
-  return true;
-}
-
-auto Journal::lastAckedId(std::string_view consumer) const -> std::string {
-  if (state_root_.empty()) {
-    fatal("lastAckedId: journal has no state_root+name; "
-          "construct with Journal(state_root, name)");
-  }
-  return readLastIdImpl(lastIdFilePath(consumer));
 }
 
 // ── Opaque persistence tokens (forwarded from Cursor) ─────────────────────

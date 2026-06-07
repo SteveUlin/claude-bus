@@ -64,9 +64,9 @@ struct Record;
 // On read, the CRC is verified before fields are parsed: a mismatch means
 // a corrupt/torn record buried mid-log, so parsing stops there (truncate
 // at first bad == logical EOF), preserving the refuse-torn-tail invariant.
-//
-// We should bail and give the callers the functions to decide on a recovery
-// scheme
+// The read methods report where they stopped via the `truncated_at` out-param,
+// so a caller distinguishes a clean end-of-log from a corruption-truncated read
+// and picks its own recovery.
 
 // Open / lazily-create a journal at the given path. Reads on a fresh
 // path return empty result sets.

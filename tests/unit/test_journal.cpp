@@ -404,6 +404,72 @@ TEST(parsefrom_handbuilt_v6_buffer) {
   CHECK_EQ(Journal::parseForTest(corrupt, kJournalHeaderBytes).size(), std::size_t{0});
 }
 
+// ── truncated_at out-parameter ───────────────────────────────────────────────
+
+namespace {
+
+// Append the record bytes from a single-record MakeV6Buffer onto an existing
+// multi-record buffer (strips the 64-byte file header from the source).
+auto AppendRecord(std::vector<std::byte>& dst,
+                  const std::vector<std::byte>& src) -> void {
+  dst.insert(dst.end(), src.begin() + kJournalHeaderBytes, src.end());
+}
+
+}  // namespace
+
+// parseForTest reports the byte offset of the bad record when CRC is corrupt.
+TEST(truncated_at_reports_corruption_offset) {
+  // Build: header + rec0("alpha") + rec1("beta") + rec2("gamma", but CRC flipped)
+  auto buf = MakeV6Buffer("alpha");
+  AppendRecord(buf, MakeV6Buffer("beta"));
+  const std::size_t rec2_offset = buf.size();  // start of the third record
+  AppendRecord(buf, MakeV6Buffer("gamma"));
+
+  // Flip one byte inside rec2's CRC-covered region (offset 10 past rec2 start =
+  // inside the append_ms field, which is covered by the CRC).
+  buf[rec2_offset + 10] =
+      std::byte(std::to_integer<std::uint8_t>(buf[rec2_offset + 10]) ^ 0xFF);
+
+  std::int64_t trunc = 0;  // not -1 — must be written by the parser
+  const auto recs =
+      Journal::parseForTest(buf, kJournalHeaderBytes, SIZE_MAX, &trunc);
+
+  CHECK_EQ(recs.size(), std::size_t{2});
+  CHECK_EQ(recs[0].payload, bytesOf("alpha"));
+  CHECK_EQ(recs[1].payload, bytesOf("beta"));
+  // truncated_at must point exactly at the start of the bad third record.
+  CHECK_EQ(trunc, static_cast<std::int64_t>(rec2_offset));
+}
+
+// A clean log yields truncated_at == -1.
+TEST(truncated_at_clean_log_is_minus_one) {
+  auto buf = MakeV6Buffer("x");
+  AppendRecord(buf, MakeV6Buffer("y"));
+  AppendRecord(buf, MakeV6Buffer("z"));
+
+  std::int64_t trunc = 0;  // must be overwritten to -1
+  const auto recs =
+      Journal::parseForTest(buf, kJournalHeaderBytes, SIZE_MAX, &trunc);
+
+  CHECK_EQ(recs.size(), std::size_t{3});
+  CHECK_EQ(trunc, std::int64_t{-1});
+}
+
+// A limit-bounded read of a healthy log must yield truncated_at == -1 — the
+// limit stop is not a corruption signal.
+TEST(truncated_at_limit_stop_is_minus_one) {
+  auto buf = MakeV6Buffer("one");
+  AppendRecord(buf, MakeV6Buffer("two"));
+  AppendRecord(buf, MakeV6Buffer("three"));
+
+  std::int64_t trunc = 0;  // must be overwritten to -1
+  const auto recs =
+      Journal::parseForTest(buf, kJournalHeaderBytes, /*limit=*/2, &trunc);
+
+  CHECK_EQ(recs.size(), std::size_t{2});
+  CHECK_EQ(trunc, std::int64_t{-1});
+}
+
 // ── mid-walk CRC corruption in tail() ────────────────────────────────────────
 
 // tail() must NOT fall back to the forward scan when corruption is discovered

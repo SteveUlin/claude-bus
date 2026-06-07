@@ -141,18 +141,27 @@ class Journal {
 
   // Read all records at or past `from`, optionally capped at `limit`.
   // Cursor not modified. Pass Cursor{} to start from the beginning.
-  auto peek(Cursor from, std::size_t limit = SIZE_MAX) const
+  // *truncated_at is set to the byte offset of the first bad/incomplete record
+  // on parse failure, or -1 on a clean end-of-log or limit-bounded stop.
+  auto peek(Cursor from, std::size_t limit = SIZE_MAX,
+            std::int64_t* truncated_at = nullptr) const
       -> bus::Result<std::vector<Record>>;
 
   // Read all records currently in the log.
-  auto dump() const -> bus::Result<std::vector<Record>>;
+  // *truncated_at is set to the byte offset of the first bad/incomplete record
+  // on parse failure, or -1 on a clean end-of-log or limit-bounded stop.
+  auto dump(std::int64_t* truncated_at = nullptr) const
+      -> bus::Result<std::vector<Record>>;
 
   // Return the most recent n records in CHRONOLOGICAL order
   // (oldest-of-the-window first), fetched by walking UP from EOF.
   // On a torn tail, falls back to forward dump + take-last-n.
   // On any mid-walk corruption, stops (records older than the gap
   // are dropped, consistent with forward's truncate-at-first-bad).
-  auto tail(std::size_t n) const -> bus::Result<std::vector<Record>>;
+  // *truncated_at is set to the byte offset of the first bad/incomplete record
+  // on parse failure, or -1 on a clean end-of-log or limit-bounded stop.
+  auto tail(std::size_t n, std::int64_t* truncated_at = nullptr) const
+      -> bus::Result<std::vector<Record>>;
 
   // Path to the journal file.
   auto path() const -> const std::string& { return path_; }
@@ -207,9 +216,13 @@ class Journal {
   // surface so the parser implementation can change without affecting
   // production callers, who always go through peek / dump / tail.
   // start_offset is clamped to kJournalHeaderBytes.
+  // *truncated_at is set to the byte offset of the first bad/incomplete record
+  // on parse failure, or -1 on a clean end-of-log or limit-bounded stop.
   static auto parseForTest(std::span<const std::byte> buf,
                            std::int64_t start_offset,
-                           std::size_t limit = SIZE_MAX) -> std::vector<Record>;
+                           std::size_t limit = SIZE_MAX,
+                           std::int64_t* truncated_at = nullptr)
+      -> std::vector<Record>;
 
   // True iff the journal file at `path` carries a version header that
   // differs from kJournalFormatVersion. Lenient: a file that can't be
@@ -232,10 +245,14 @@ class Journal {
   // Wire parser shared by peek, dump, tail, and parseForTest. Kept private
   // so the on-disk layout is owned entirely by Journal — no caller can bypass
   // the CRC/torn-record logic or produce a Record with an unvalidated offset.
+  // *truncated_at receives the byte offset of the first bad record on failure,
+  // or -1 on clean end-of-log / limit-bounded stop. Ignored when nullptr.
   static auto ParseFromBuffer(std::span<const std::byte> buf,
                               std::int64_t start_offset,
                               std::size_t limit,
-                              std::uint64_t tag) -> std::vector<Record>;
+                              std::uint64_t tag,
+                              std::int64_t* truncated_at = nullptr)
+      -> std::vector<Record>;
 };
 
 struct Record {

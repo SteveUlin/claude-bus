@@ -336,15 +336,22 @@ auto Journal::Cursor::fromToken(std::string_view token) -> Cursor {
 auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
                               std::int64_t start_offset,
                               std::size_t limit,
-                              std::uint64_t tag) -> std::vector<Record> {
+                              std::uint64_t tag,
+                              std::int64_t* truncated_at) -> std::vector<Record> {
   std::vector<Record> out;
-  if (buf.size() < kJournalHeaderBytes) return out;
+  if (buf.size() < kJournalHeaderBytes) {
+    if (truncated_at) *truncated_at = -1;
+    return out;
+  }
   std::size_t pos =
       start_offset > static_cast<std::int64_t>(kJournalHeaderBytes)
           ? static_cast<std::size_t>(start_offset)
           : kJournalHeaderBytes;
   // v6 minimum record: kRecordOverhead = 30 (empty payload).
   constexpr std::uint64_t kMinRecordLen = kRecordOverhead;
+
+  std::int64_t failure_offset = -1;  // set on any parse-failure break
+
   // Need crc(4) + record_len(8) before we can attempt a record.
   while (pos + 12 <= buf.size() && out.size() < limit) {
     const std::uint32_t crc = getU32({buf.data() + pos, 4});
@@ -352,14 +359,17 @@ auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
     // Guard against overflow in pos + rec_len: if rec_len exceeds the
     // runaway-protection cap it can't be a real record.
     if (rec_len < kMinRecordLen || rec_len > kJournalMaxRecordBytes ||
-        pos + rec_len > buf.size())
+        pos + rec_len > buf.size()) {
+      failure_offset = static_cast<std::int64_t>(pos);
       break;
+    }
 
     // Verify the CRC: covers [record_len .. trailer] (everything after the
     // crc field). A mismatch is a corrupt/torn record — stop here (truncate
     // at first bad == logical EOF).
     if (Crc32c({buf.data() + pos + 4,
                 static_cast<std::size_t>(rec_len - 4)}) != crc) {
+      failure_offset = static_cast<std::int64_t>(pos);
       break;
     }
 
@@ -376,7 +386,10 @@ auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
     p += plen;
     // Validate trailer == front record_len (torn-frame check; also inside CRC).
     const std::uint64_t trailer = getU64({buf.data() + p, 8});
-    if (trailer != rec_len) break;
+    if (trailer != rec_len) {
+      failure_offset = static_cast<std::int64_t>(pos);
+      break;
+    }
 
     // position = cursor at start of this record (offset of crc32c field).
     const Journal::Cursor pos_cursor{
@@ -389,6 +402,8 @@ auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
     });
     pos += rec_len;
   }
+
+  if (truncated_at) *truncated_at = failure_offset;
   return out;
 }
 
@@ -399,9 +414,10 @@ auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
 // Journal — the tag mismatch check only fires on non-zero tags.
 auto Journal::parseForTest(std::span<const std::byte> buf,
                            std::int64_t start_offset,
-                           std::size_t limit) -> std::vector<Record> {
+                           std::size_t limit,
+                           std::int64_t* truncated_at) -> std::vector<Record> {
   // Tag 0 = unbound (no named journal in test contexts).
-  return ParseFromBuffer(buf, start_offset, limit, /*tag=*/0);
+  return ParseFromBuffer(buf, start_offset, limit, /*tag=*/0, truncated_at);
 }
 
 // ── Journal::isStaleVersion ────────────────────────────────────────────────
@@ -534,25 +550,34 @@ auto Journal::append(std::span<const std::byte> payload, Durability durability)
   return std::format("{:013}-{:04x}", append_ms, seq);
 }
 
-auto Journal::peek(Cursor from, std::size_t limit) const
+auto Journal::peek(Cursor from, std::size_t limit,
+                   std::int64_t* truncated_at) const
     -> Result<std::vector<Record>> {
   auto buf = readAll(path_);
   if (!buf) return std::unexpected{buf.error()};
   const auto tag = name_.empty() ? 0 : journalTag(name_);
-  return ParseFromBuffer(*buf, toOffset(from), limit, tag);
+  return ParseFromBuffer(*buf, toOffset(from), limit, tag, truncated_at);
 }
 
-auto Journal::dump() const -> bus::Result<std::vector<Record>> {
-  return peek(Cursor{});
+auto Journal::dump(std::int64_t* truncated_at) const
+    -> bus::Result<std::vector<Record>> {
+  return peek(Cursor{}, SIZE_MAX, truncated_at);
 }
 
-auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
-  if (n == 0) return std::vector<Record>{};
+auto Journal::tail(std::size_t n, std::int64_t* truncated_at) const
+    -> bus::Result<std::vector<Record>> {
+  if (n == 0) {
+    if (truncated_at) *truncated_at = -1;
+    return std::vector<Record>{};
+  }
 
   auto buf_r = readAll(path_);
   if (!buf_r) return std::unexpected{buf_r.error()};
   const auto& buf = *buf_r;
-  if (buf.size() < kJournalHeaderBytes) return std::vector<Record>{};
+  if (buf.size() < kJournalHeaderBytes) {
+    if (truncated_at) *truncated_at = -1;
+    return std::vector<Record>{};
+  }
 
   const auto tag = name_.empty() ? 0 : journalTag(name_);
 
@@ -565,6 +590,7 @@ auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
 
   std::size_t pos = buf.size();  // walk up from EOF
   bool torn_tail_fallback = false;
+  std::int64_t corruption_offset = -1;  // set on mid-walk corruption
 
   while (out.size() < n) {
     // Need at least a trailer (8 bytes) past the header.
@@ -606,7 +632,9 @@ auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
         torn_tail_fallback = true;
         break;
       }
-      break;  // mid-walk corruption
+      // Mid-walk corruption: record at rec_start is bad.
+      corruption_offset = static_cast<std::int64_t>(rec_start);
+      break;
     }
 
     // Parse the fields.
@@ -629,7 +657,7 @@ auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
 
   if (torn_tail_fallback) {
     // The last record is torn — fall back to a full forward scan + take last n.
-    auto all_r = dump();
+    auto all_r = dump(truncated_at);
     if (!all_r) return std::unexpected{all_r.error()};
     auto& all = *all_r;
     if (all.size() <= n) return all;
@@ -639,6 +667,7 @@ auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
 
   // Reverse to chronological (oldest-of-window first).
   std::reverse(out.begin(), out.end());
+  if (truncated_at) *truncated_at = corruption_offset;
   return out;
 }
 

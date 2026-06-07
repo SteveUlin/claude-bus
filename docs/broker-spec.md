@@ -44,13 +44,16 @@ Together these give at-least-once delivery, dedup, and restart-safety
 simultaneously. One single-threaded processing reactor decides when a head
 record may move.
 
-**Where the epoch lives.** There is no dedicated epoch field yet. The boot-epoch
-is stamped into the **low 8 bytes (little-endian u64) of each record's 16-byte
-`correlation` field** — a field nominally documented as "RPC pairing." See
-`stampEpoch()` / `recordEpoch()` in `src/delivery.h` and the wire layout in
-`src/topic_log.h`. (The run-2 redesign proposes promoting this to a first-class
-`epoch` field; until that lands, the overload is the reality and is documented
-here so nobody mistakes a stamped record for an RPC-paired one.)
+**Where the epoch lives.** The boot-epoch is a first-class **`epoch` (u64 LE)
+field of the messaging `Envelope`** (`src/envelope.h`), packed into each
+Journal record's opaque payload. The storage kernel (`bus::Journal`) is
+**epoch-agnostic** — it stores and re-addresses opaque bytes and never decodes
+the payload, so the messaging layer owns this field alone. `stampEpoch()` /
+`recordEpoch()` in `src/delivery.h` set it before encode / read it after decode;
+the broker's per-boot counter persists to `$STATE/broker.epoch` and is stamped
+onto every record at enqueue. (Earlier the epoch was overloaded onto a 16-byte
+`correlation` field in the old `topic_log` wire format; the wire-v6 /
+`bus::Journal` refactor replaced that with the dedicated field above.)
 
 ## Delivery model — off-TTY is the default
 
@@ -161,8 +164,9 @@ an agent while `$STATE/presence/<agent>` is fresh. The cursor advances in FIFO
 order with no per-record bypass.
 
 All ack-driven cursor advances flow through **one** path — `Loop::onAck` →
-`topic::advanceCursorMonotonic` — which writes the cursor **only forward**, so an
-out-of-order or duplicate ack can never rewind it past already-delivered records.
+`Journal::ack` — which advances the cursor **forward-only** (a backward or equal
+target is a no-op), so an out-of-order or duplicate ack can never rewind it past
+already-delivered records.
 The guard covers all three ack arms (blocking-op, bus-ack, positional
 `UserPromptSubmit`); the blocking-op + positional arms were upgraded from
 unconditional writes to monotonic in the `scanEvents`→`onAck` consolidation

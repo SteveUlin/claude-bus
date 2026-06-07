@@ -32,13 +32,19 @@ Loop along the seams three independent analyses all found.
 
 | Component | Owns | Interface (sketch) | dependsOn |
 |---|---|---|---|
-| **Log** | durable bytes + cursor + epoch; **retention/trim math** | append; peek/dump; cursor read/advance; trimHead | — |
+| **Log** | durable opaque bytes + per-consumer cursor (ack-advances-only); **retention/trim math** | append; peek/dump/tail; consumerCursor/ack; trimHead/trimByPolicy | — |
 | **Router** | in-flight + gate stack + **ack-deadline** (retry == the deadline) | `tick()`→≤1 gated record/inbox via Transport; `onAck(msgId)`→cursor advance + in-flight clear; `drain(agent)`; `drop(msgId)`; `nextDeadlineMs()` | Log, Transport, Readers |
 | **Transport** | last-mile actuator | `deliver(record)`→{Delivered\|Deferred} | — |
 | **Readers** | pure derivations only — no authority, no caches (pane caches stay in the loop plane; `PaneState` is injected) | snapshot for Router gates + viewers | Log |
 | **Policy** | autonomous-actor decisions + own cooldowns | reads a Readers snapshot, enqueues actions **through Router** | Router, Readers |
 | **Daemon** | OS resources + wiring loop; **no message state** | `run()`; `serve(req)`; `arm(nextDeadline)` | Router, Readers |
 
+- **The Log seam LANDED as `bus::Journal`** (wire v6, `src/journal.{h,cpp}`):
+  a durable append-only log of **opaque** records + an **opaque, forge-proof
+  `Cursor`** that advances only via `ack`. It is **epoch-agnostic** — the epoch
+  is a field of the messaging `Envelope` (`src/envelope.h`), not the kernel — so
+  the storage layer never decodes a payload. (The old `topic_log` /
+  `advanceCursorMonotonic` / correlation-field-epoch surface is gone.)
 - **Router advances a cursor ONLY on ack and emits to a Transport sink — it
   never types into a pane itself.** That single rule is the whole at-least-once
   invariant made structural.

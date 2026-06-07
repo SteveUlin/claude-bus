@@ -31,7 +31,6 @@ auto TopicConfig::toJson() const -> json::Value {
   std::map<std::string, json::Value> m;
   m.insert({"name", json::Value::from(name)});
   m.insert({"kind", json::Value::from(kind)});
-  m.insert({"retention_ms", json::Value::from(retention_ms)});
   if (!kind_config.isNull()) {
     m.insert({"kind_config", kind_config});
   }
@@ -46,7 +45,6 @@ auto TopicConfig::fromJson(const json::Value& v)
   if (cfg.name.empty()) return std::unexpected{Error{"missing topic name"}};
   cfg.kind = v.getOrString("kind");
   if (cfg.kind.empty()) return std::unexpected{Error{"missing topic kind"}};
-  cfg.retention_ms = v.getOrInt("retention_ms", 0);
   if (const auto* kc = v.get("kind_config"); kc != nullptr) {
     cfg.kind_config = *kc;
     if (cfg.kind == kKindAgentInbox) {

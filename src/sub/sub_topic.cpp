@@ -7,7 +7,6 @@
 #include "../sub.h"
 
 #include <cstdio>
-#include <cstdlib>
 #include <map>
 #include <print>
 #include <span>
@@ -27,7 +26,6 @@ auto printTopic(const json::Value& v) -> void {
   }
   std::println("name:             {}", v.getOrString("name"));
   std::println("kind:             {}", v.getOrString("kind"));
-  std::println("retention_ms:     {}", v.getOrInt("retention_ms"));
   if (const auto* kc = v.get("kind_config"); kc != nullptr && !kc->isNull()) {
     std::println("kind_config:      {}", json::serialize(*kc));
   }
@@ -96,16 +94,13 @@ auto subTopic(std::span<const char* const> args) -> int {
   }
 
   if (verb == "create") {
-    // bus topic create NAME --kind KIND [--retention-ms N]
+    // bus topic create NAME --kind KIND
     if (args.size() < 2) {
-      std::println(stderr,
-                   "usage: bus topic create NAME [--kind KIND] "
-                   "[--retention-ms MS]");
+      std::println(stderr, "usage: bus topic create NAME [--kind KIND]");
       return 2;
     }
     std::string name{args[1]};
     std::string kind = "work-queue";  // sensible default
-    std::int64_t retention = 0;
     std::string subscribers;  // comma-separated for pubsub kind
 
     for (std::size_t i = 2; i < args.size(); ++i) {
@@ -113,9 +108,6 @@ auto subTopic(std::span<const char* const> args) -> int {
       if (a == "--kind") {
         if (++i >= args.size()) return 2;
         kind = args[i];
-      } else if (a == "--retention-ms") {
-        if (++i >= args.size()) return 2;
-        retention = std::atoll(args[i]);
       } else if (a == "--subscribers") {
         if (++i >= args.size()) return 2;
         subscribers = args[i];
@@ -129,7 +121,6 @@ auto subTopic(std::span<const char* const> args) -> int {
     m.insert({"op", json::Value::from("topic_create")});
     m.insert({"name", json::Value::from(name)});
     m.insert({"kind", json::Value::from(kind)});
-    m.insert({"retention_ms", json::Value::from(retention)});
 
     // Parse subscribers (pubsub kind) into kind_config.
     if (!subscribers.empty()) {

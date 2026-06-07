@@ -424,7 +424,6 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     TopicConfig tc;
     tc.name = req.getOrString("name");
     tc.kind = req.getOrString("kind");
-    tc.retention_ms = req.getOrInt("retention_ms", 0);
     if (const auto* kc = req.get("kind_config"); kc != nullptr) {
       tc.kind_config = *kc;
     }

@@ -149,7 +149,6 @@ add_executable(bus_tests
     tests/unit/test_doorbell_readiness.cpp
     tests/unit/test_tail_reader.cpp
     tests/unit/test_pane_cache.cpp
-    tests/unit/test_retention.cpp
     tests/unit/test_topic_registry.cpp
     tests/unit/test_task_graph.cpp
     tests/unit/test_recovery.cpp

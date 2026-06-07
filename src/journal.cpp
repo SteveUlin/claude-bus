@@ -1,7 +1,6 @@
 #include "journal.h"
 
 #include "crc32c.h"
-#include "retention.h"
 
 #include <cassert>
 #include <fcntl.h>
@@ -643,84 +642,6 @@ auto Journal::tail(std::size_t n) const -> bus::Result<std::vector<Record>> {
   return out;
 }
 
-auto Journal::trimHead(Cursor cut) -> std::int64_t {
-  const auto cut_offset = toOffset(cut);
-  const auto header = static_cast<std::int64_t>(kJournalHeaderBytes);
-  auto buf = readAll(path_);
-  if (!buf) return 0;
-  const auto size = static_cast<std::int64_t>(buf->size());
-  if (cut_offset <= header || cut_offset >= size) return 0;
-
-  const std::string tmp = path_ + ".trim.tmp";
-  Fd fd{::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)};
-  if (!fd.valid()) return 0;
-  const auto* base = reinterpret_cast<const char*>(buf->data());
-  if (::write(fd.get(), base, static_cast<std::size_t>(header)) !=
-      static_cast<ssize_t>(header)) {
-    return 0;
-  }
-  const auto tail_bytes = static_cast<std::size_t>(size - cut_offset);
-  if (::write(fd.get(), base + cut_offset, tail_bytes) !=
-      static_cast<ssize_t>(tail_bytes)) {
-    return 0;
-  }
-  fd.reset();
-  if (::rename(tmp.c_str(), path_.c_str()) != 0) return 0;
-  const auto dropped = cut_offset - header;
-
-  // Rebase the persisted consumer cursors.
-  if (!state_root_.empty()) {
-    const std::string dir = state_root_ + "/cursors/" + name_;
-    std::error_code ec;
-    if (fs::exists(dir, ec)) {
-      for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file()) continue;
-        if (entry.path().extension() != ".cursor") continue;
-        const auto p = entry.path().string();
-        const auto c = readCursorImpl(p);
-        if (c == 0) continue;
-        const auto rebased = rebaseCursor(Cursor{c}, dropped).offset_;
-        if (rebased != c) writeCursorImpl(p, rebased);
-      }
-    }
-  }
-
-  return dropped;
-}
-
-// ── Journal::trimByPolicy ─────────────────────────────────────────────────
-
-auto Journal::trimByPolicy(std::int64_t retention_ms, std::int64_t max_bytes,
-                           std::int64_t now_ms, bool clamp_to_cursor)
-    -> std::int64_t {
-  if (state_root_.empty()) {
-    fatal("trimByPolicy: journal has no state_root+name; "
-          "construct with Journal(state_root, name)");
-  }
-  auto recs = dump();
-  if (!recs || recs->empty()) return 0;
-
-  std::vector<retention::RecordMeta> meta;
-  meta.reserve(recs->size());
-  for (const auto& rec : *recs) {
-    meta.push_back({toOffset(rec.position),
-                    toOffset(cursorAfter(rec)),
-                    rec.append_ms});
-  }
-
-  const auto header = static_cast<std::int64_t>(kJournalHeaderBytes);
-  const auto min_cursor = clamp_to_cursor ? minConsumerOffset() : 0;
-  const auto plan = retention::planTrim(meta, now_ms, retention_ms, max_bytes,
-                                       header, min_cursor, clamp_to_cursor);
-  if (plan.dropped_bytes <= 0) return 0;
-
-  // Cut cursor: find the record whose position == plan.cut_offset and use it,
-  // or synthesize one. Since plan.cut_offset is always a record boundary produced
-  // by planTrim (which sets cut = r.next_offset or r.offset), we build the Cursor
-  // from the offset directly (private Cursor ctor available here).
-  return trimHead(Cursor{plan.cut_offset});
-}
-
 // ── Journal cursor-store methods ──────────────────────────────────────────
 
 auto Journal::cursorFilePath(std::string_view consumer) const -> std::string {
@@ -779,16 +700,6 @@ auto Journal::cursorFromToken(std::string_view token) -> Cursor {
   return Cursor::fromToken(token);
 }
 
-// ── Cursor rebase ─────────────────────────────────────────────────────────
-
-auto Journal::rebaseCursor(Cursor c, std::int64_t dropped_bytes) const
-    -> Cursor {
-  if (dropped_bytes <= 0) return c;
-  const auto header = static_cast<std::int64_t>(kJournalHeaderBytes);
-  const auto rebased = c.offset_ - dropped_bytes;
-  return Cursor{rebased < header ? header : rebased, c.journal_tag_};
-}
-
 // ── Journal::cursorAfter ──────────────────────────────────────────────────
 
 auto Journal::cursorAfter(const Record& r) -> Cursor {
@@ -804,31 +715,9 @@ auto Journal::cursorAfter(const Record& r) -> Cursor {
 // ── Journal::toOffset ──────────────────────────────────────────────────────
 
 auto Journal::toOffset(Cursor c) -> std::int64_t {
-  // The kernel exposes this only to itself — retention planning and trimHead
-  // need a raw offset to compute cut points and RecordMeta. Every caller
-  // outside the kernel holds Cursors opaquely via comparison or token
-  // round-trip and never sees the numeric value.
+  // Private — callers hold Cursors opaquely; only the kernel needs the raw
+  // byte position to drive the read path (peek, consumerCursor, cursorAfter).
   return c.offset_;
-}
-
-// ── Journal::minConsumerOffset ────────────────────────────────────────────
-
-auto Journal::minConsumerOffset() const -> std::int64_t {
-  if (state_root_.empty()) {
-    fatal("minConsumerOffset: journal has no state_root+name; "
-          "construct with Journal(state_root, name)");
-  }
-  const std::string dir = state_root_ + "/cursors/" + name_;
-  std::error_code ec;
-  if (!fs::exists(dir, ec)) return 0;
-  std::int64_t min_cursor = -1;
-  for (const auto& entry : fs::directory_iterator(dir, ec)) {
-    if (!entry.is_regular_file()) continue;
-    if (entry.path().extension() != ".cursor") continue;
-    const auto c = readCursorImpl(entry.path().string());
-    if (min_cursor < 0 || c < min_cursor) min_cursor = c;
-  }
-  return min_cursor < 0 ? 0 : min_cursor;
 }
 
 }  // namespace bus

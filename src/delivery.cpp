@@ -1567,15 +1567,7 @@ auto Loop::maybeScanTokens() -> void {
   }
 }
 
-// --- Log retention (D1 + D2) --------------------------------------------
-
-// Smallest consumer cursor across every $STATE/cursors/<topic>/*.cursor.
-// Delegates to Journal::minConsumerOffset so the kernel owns the scan.
-auto Loop::minConsumerCursor(std::string_view topic) const -> std::int64_t {
-  bus::Journal log{cfg_.state_dir, std::string{topic}};
-  return log.minConsumerOffset();
-}
-
+// --- Log trim (D1: events.jsonl only) -----------------------------------
 
 // events.jsonl: when it exceeds CLAUDE_BUS_EVENTS_MAX_BYTES, rewrite it
 // keeping only the most recent ~half, aligned to a line boundary. The
@@ -1610,6 +1602,8 @@ auto Loop::trimEventsLog() -> void {
   events_offset_ = fileSize(log);
 }
 
+// maybeTrimLogs — rate-limited trim of the advisory events.jsonl log (D1).
+// Topic log byte offsets are immutable; no per-topic head trim is performed.
 auto Loop::maybeTrimLogs() -> void {
   const auto now = nowMs();
   // Default 60 s; CLAUDE_BUS_TRIM_INTERVAL_MS lets tests trigger the sweep
@@ -1623,67 +1617,6 @@ auto Loop::maybeTrimLogs() -> void {
   trim_last_scan_ms_ = now;
 
   trimEventsLog();  // D1
-
-  // D2: per-topic head trim (retention_ms + absolute size cap).
-  std::int64_t topic_max_bytes = 8 * 1024 * 1024;
-  if (const char* env = std::getenv("CLAUDE_BUS_TOPIC_MAX_BYTES");
-      env != nullptr && *env != '\0') {
-    topic_max_bytes = std::atoll(env);
-  }
-  for (const auto& tc : registry_.list()) {
-    const std::int64_t retention_ms = tc.retention_ms;
-    if (retention_ms <= 0 && topic_max_bytes <= 0) continue;  // dead config
-
-    // Delivery-guaranteed kinds clamp to the consumer floor so undelivered
-    // / in-flight mail is never dropped; fire-and-forget kinds expire
-    // regardless (lets audit.log, which has no persistent consumer, shrink).
-    //
-    // CRIT #3: inbox-ops / inbox-human are broker-produced escalation sinks
-    // with NO live draining consumer — their consumer cursor sits at the
-    // header forever, so the clamp pins retention and they grow unbounded.
-    // Exempt them: bound by size/age like a fire-and-forget log (newest
-    // kept). The GC reaper still PROTECTS these topics (same {human,ops}
-    // reserved set) — we bound the log, never reap the topic.
-    const bool reserved_sink =
-        tc.name == "inbox-ops" || tc.name == "inbox-human";
-    const bool guaranteed = !reserved_sink &&
-                            (tc.kind == std::string{kKindAgentInbox} ||
-                             tc.kind == std::string{kKindTuiCommands});
-
-    // Construct with state_root+name so trimByPolicy can rebase persisted
-    // consumer cursors and read minConsumerOffset (the kernel owns both).
-    bus::Journal log{cfg_.state_dir, tc.name};
-    const auto dropped =
-        log.trimByPolicy(retention_ms, topic_max_bytes, now, guaranteed);
-    if (dropped <= 0) continue;  // no-op / refused — nothing shifted
-
-    // Rebase in-flight Cursor values for this topic. Persisted cursors
-    // were already rebased by trimHead above; in-flight ones live in
-    // memory (and their on-disk .json trackers), so we fix them here.
-    for (auto& [id, f] : in_flight_) {
-      if (f.topic != tc.name) continue;
-      f.cursor_after = log.rebaseCursor(f.cursor_after, dropped);
-      writeInflight(f);
-    }
-
-    // Audit the trim (skip when trimming audit itself — that would feed the
-    // loop and isn't useful; broker.log via the daemon already records it).
-    if (tc.name != "audit") {
-      TopicConfig audit;
-      audit.name = "audit";
-      audit.kind = std::string{kKindAppendLog};
-      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-      bus::msg::Envelope a_env;
-      a_env.sender = "broker";
-      a_env.protocol = "retention-trim";
-      stampEpoch(a_env, current_epoch_);
-      a_env.body = std::format(
-          "retention-trim topic={} dropped_bytes={}",
-          tc.name, dropped);
-      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
-    }
-  }
 
   // CRIT #4: evict soft per-agent state for vanished agents on the same 60 s
   // cadence as the log trim — same "GC my own $STATE" sweep.

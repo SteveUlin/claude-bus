@@ -2,7 +2,6 @@
 #include "crc32c.h"
 #include "journal.h"
 #include "journal_internal.h"
-#include "retention.h"
 
 #include <cstddef>
 #include <cstdio>
@@ -124,66 +123,6 @@ TEST(parsefrom_empty_or_headerless_buffer) {
   CHECK_EQ(Journal::parseForTest({}, 0).size(), std::size_t{0});
   std::vector<std::byte> tiny(10);
   CHECK_EQ(Journal::parseForTest(tiny, 0).size(), std::size_t{0});
-}
-
-// ── trimHead ─────────────────────────────────────────────────────────────────
-
-TEST(trimhead_drops_head_keeps_tail) {
-  const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("first"));
-  (void)log.append(bytesOf("second"));
-  (void)log.append(bytesOf("third"));
-
-  auto before = log.dump();
-  CHECK(before.has_value());
-  CHECK_EQ(before->size(), std::size_t{3});
-  // Cut at second record's position (keep records 1 + 2 i.e. "second"/"third").
-  const auto cut_cursor = (*before)[1].position;
-  const auto cut_raw = static_cast<std::int64_t>(
-      std::stoll(Journal::cursorToToken(cut_cursor)));
-
-  const auto dropped = log.trimHead(cut_cursor);
-  CHECK_EQ(dropped, cut_raw - static_cast<std::int64_t>(kJournalHeaderBytes));
-
-  auto after = log.dump();
-  CHECK(after.has_value());
-  CHECK_EQ(after->size(), std::size_t{2});
-  CHECK_EQ((*after)[0].payload, bytesOf("second"));
-  CHECK_EQ((*after)[1].payload, bytesOf("third"));
-  // The surviving tail is re-addressed from the header.
-  // Use "<offset>:0" — cursorFromToken requires a colon; plain decimal now
-  // decodes to start-of-log (Cursor{}) not offset 64.
-  const auto header_cursor =
-      Journal::cursorFromToken(std::to_string(kJournalHeaderBytes) + ":0");
-  CHECK_EQ((*after)[0].position, header_cursor);
-  CHECK_EQ(Journal::cursorAfter((*after)[0]), (*after)[1].position);
-
-  std::remove(path.c_str());
-}
-
-TEST(trimhead_noop_out_of_range) {
-  const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("one"));
-  (void)log.append(bytesOf("two"));
-
-  // header-boundary cursor: at header offset → no-op (nothing to drop).
-  const auto header_cursor =
-      Journal::cursorFromToken(std::to_string(kJournalHeaderBytes));
-  CHECK_EQ(log.trimHead(header_cursor), std::int64_t{0});
-  // start-of-log cursor (offset 0) → before header, no-op.
-  CHECK_EQ(log.trimHead(Journal::Cursor{}), std::int64_t{0});
-  // well-past-EOF cursor → no-op.
-  const auto far_cursor =
-      Journal::cursorFromToken(std::to_string(1'000'000'000));
-  CHECK_EQ(log.trimHead(far_cursor), std::int64_t{0});
-
-  auto after = log.dump();
-  CHECK(after.has_value());
-  CHECK_EQ(after->size(), std::size_t{2});  // untouched
-
-  std::remove(path.c_str());
 }
 
 // ── CRC integrity ─────────────────────────────────────────────────────────────
@@ -308,31 +247,6 @@ TEST(tail_n_larger_than_count) {
   CHECK_EQ(t->size(), std::size_t{2});
   CHECK_EQ((*t)[0].payload, bytesOf("x"));
   CHECK_EQ((*t)[1].payload, bytesOf("y"));
-
-  std::remove(path.c_str());
-}
-
-// tail after a head trim still works.
-TEST(tail_after_trimhead) {
-  const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("alpha"));
-  (void)log.append(bytesOf("beta"));
-  (void)log.append(bytesOf("gamma"));
-  (void)log.append(bytesOf("delta"));
-
-  // Trim the first record.
-  auto before = log.dump();
-  CHECK(before.has_value());
-  const auto dropped = log.trimHead((*before)[1].position);
-  CHECK(dropped > 0);
-
-  // tail(2) should still return the last 2 of the surviving records.
-  auto t = log.tail(2);
-  CHECK(t.has_value());
-  CHECK_EQ(t->size(), std::size_t{2});
-  CHECK_EQ((*t)[0].payload, bytesOf("gamma"));
-  CHECK_EQ((*t)[1].payload, bytesOf("delta"));
 
   std::remove(path.c_str());
 }
@@ -683,156 +597,6 @@ TEST(journal_ack_never_rewinds) {
   CHECK_EQ(log.consumerCursor(""), ca2);
 
   std::filesystem::remove_all(state_root);
-}
-
-// ── trimHead rebases persisted consumer cursor ───────────────────────────────
-
-// After a head trim the persisted consumer cursor must still point at the
-// same logical record — the new on-disk position of that record.
-TEST(trimhead_rebases_persisted_cursor) {
-  static int n = 0;
-  const std::string state_root =
-      std::string{"/tmp/claude-bus-test-trim-cursor-"} + std::to_string(++n);
-  const std::string name = "trim-test";
-  std::filesystem::create_directories(state_root + "/topics");
-
-  Journal log{state_root, name};
-  (void)log.append(bytesOf("alpha"));
-  (void)log.append(bytesOf("beta"));
-  (void)log.append(bytesOf("gamma"));
-
-  auto before = log.dump();
-  CHECK(before.has_value());
-  CHECK_EQ(before->size(), std::size_t{3});
-
-  // Advance consumer cursor to just past the first record (pointing at beta).
-  const auto cursor_at_beta = Journal::cursorAfter((*before)[0]);
-  CHECK(log.ack("", cursor_at_beta));
-  CHECK_EQ(log.consumerCursor(""), cursor_at_beta);
-
-  // Trim the first record — cut at beta's original position.
-  const auto dropped = log.trimHead((*before)[1].position);
-  CHECK(dropped > 0);
-
-  // After the trim, the log has [beta, gamma] with beta at the header.
-  auto after = log.dump();
-  CHECK(after.has_value());
-  CHECK_EQ(after->size(), std::size_t{2});
-  CHECK_EQ((*after)[0].payload, bytesOf("beta"));
-  // Use "<offset>:0" — cursorFromToken requires a colon; plain decimal now
-  // decodes to start-of-log (Cursor{}) not offset 64.
-  // operator== compares only offset, so tag mismatch is intentionally fine.
-  const auto expected_header =
-      Journal::cursorFromToken(std::to_string(kJournalHeaderBytes) + ":0");
-  CHECK_EQ((*after)[0].position, expected_header);
-
-  // The persisted cursor must have been rebased so it still refers to
-  // the same logical position. cursor_at_beta was alpha.next_offset
-  // (== beta.offset before trim). After trim, beta lands at the header,
-  // so the rebased cursor should snap exactly to kJournalHeaderBytes.
-  const auto rebased = log.consumerCursor("");
-  // The pre-trim cursor_at_beta must have changed — rebase is non-trivial.
-  CHECK(rebased != cursor_at_beta);
-  // Exact pin: beta is now at the header, so the rebased cursor == header.
-  CHECK_EQ(rebased, expected_header);
-  // rebased <= end-of-log (no overflow).
-  CHECK(rebased <= Journal::cursorAfter((*after)[1]));
-  // Use the rebased cursor directly with peek (no raw int needed).
-  auto from_rebased = log.peek(rebased, 1);
-  CHECK(from_rebased.has_value());
-  CHECK(!from_rebased->empty());
-  CHECK_EQ(from_rebased->front().payload, bytesOf("beta"));
-
-  std::filesystem::remove_all(state_root);
-}
-
-// ── rebaseCursor for in-flight ────────────────────────────────────────────────
-
-// Journal::rebaseCursor correctly shifts an in-flight Cursor after a head
-// trim, snapping cursors inside the dropped region to the new head.
-TEST(rebase_cursor_after_trim) {
-  const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("r1"));
-  (void)log.append(bytesOf("r2"));
-  (void)log.append(bytesOf("r3"));
-
-  auto recs = log.dump();
-  CHECK(recs.has_value());
-  CHECK_EQ(recs->size(), std::size_t{3});
-
-  const auto ca0 = Journal::cursorAfter((*recs)[0]);  // after r1
-  const auto ca1 = Journal::cursorAfter((*recs)[1]);  // after r2
-  const auto ca2 = Journal::cursorAfter((*recs)[2]);  // after r3
-
-  // Trim r1 (cut at r2's position).
-  const auto dropped = log.trimHead((*recs)[1].position);
-  CHECK(dropped > 0);
-
-  // cursor after r2 in new log == kJournalHeaderBytes + r2's size.
-  auto after = log.dump();
-  CHECK(after.has_value());
-  CHECK_EQ(after->size(), std::size_t{2});
-
-  // An in-flight cursor pointing inside the dropped region (ca0) should snap
-  // to the new head. Peek from the rebased position — must see r2 first.
-  const auto rebased_ca0 = log.rebaseCursor(ca0, dropped);
-  {
-    auto p = log.peek(rebased_ca0, 1);
-    CHECK(p.has_value());
-    CHECK(!p->empty());
-    CHECK_EQ(p->front().payload, bytesOf("r2"));
-  }
-
-  // ca1 and ca2 are past the drop point — they shift down by dropped and
-  // must match the new records' cursor_after values.
-  const auto rebased_ca1 = log.rebaseCursor(ca1, dropped);
-  const auto rebased_ca2 = log.rebaseCursor(ca2, dropped);
-  CHECK_EQ(rebased_ca1, Journal::cursorAfter((*after)[0]));
-  CHECK_EQ(rebased_ca2, Journal::cursorAfter((*after)[1]));
-
-  std::remove(path.c_str());
-}
-
-// ── clamp-to-cursor retention does not drop un-acked record ──────────────────
-
-// planTrim with clamp_to_cursor=true must not cut past min_cursor, so an
-// un-acked (or in-flight) record at the head is never trimmed away.
-// (Tests the retention math that protects the at-least-once guarantee.)
-TEST(clamp_to_cursor_protects_unacked_record) {
-  using namespace bus::retention;
-
-  // Three records at offsets 64, 164, 264. Header = 64.
-  // All are "old" (sent_ms far in the past), so the age rule would cut all.
-  constexpr std::int64_t kHeader = 64;
-  const std::int64_t now = 1'000'000'000LL;
-  const std::int64_t retention_ms = 1'000;  // 1 s — all records expired
-
-  std::vector<RecordMeta> recs = {
-      {kHeader,       kHeader + 100, now - 10'000},  // offset 64
-      {kHeader + 100, kHeader + 200, now - 10'000},  // offset 164
-      {kHeader + 200, kHeader + 300, now - 10'000},  // offset 264
-  };
-
-  // min_cursor points at record 1 (has NOT yet acked record 0 or 1).
-  const std::int64_t min_cursor = kHeader + 100;  // == recs[1].offset
-
-  const auto plan = planTrim(recs, now, retention_ms,
-                             /*max_bytes=*/0, kHeader,
-                             min_cursor, /*clamp_to_cursor=*/true);
-
-  // The cut must not exceed min_cursor — record 0 can be dropped (cursor
-  // passed it), but record 1 must stay.
-  CHECK(plan.cut_offset <= min_cursor);
-  CHECK(plan.cut_offset >= kHeader);
-
-  // Without the clamp, all records would be cut.
-  const auto plan_ff = planTrim(recs, now, retention_ms,
-                                /*max_bytes=*/0, kHeader,
-                                /*min_cursor=*/0,
-                                /*clamp_to_cursor=*/false);
-  CHECK_EQ(plan_ff.cut_offset, recs.back().next_offset);
-  CHECK(plan_ff.dropped_bytes > plan.dropped_bytes);
 }
 
 // ── Journal-tag binding ───────────────────────────────────────────────────────

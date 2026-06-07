@@ -1,14 +1,34 @@
 #pragma once
 
-// A durable, append-only log of opaque byte records. The caller owns what
-// the payload bytes mean; this layer stores and returns them verbatim and
-// never interprets them, so one log serves any record shape. One file holds
-// one log.
+#include "types.h"
+
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace bus {
+
+constexpr std::uint32_t kJournalFormatVersion = 6;
+constexpr std::size_t kJournalHeaderBytes = 64;
+constexpr std::size_t kJournalMaxRecordBytes = 1 << 20;  // 1 MiB
+
+// Write-durability for an append.
+enum class Durability : std::uint8_t { Buffered = 0, Synced = 1 };
+
+struct Record;
+
+// A Journal is a durable append only log of opaque byte records. The caller
+// owns what the payload bytes mean.
 //
 // On-disk wire — v6:
 //
+//   TODO: Add a UUID to the header
 //   file header (64 bytes):
-//     "BUS\0"               4
+//     "BUS\0"               4    - magic bytes for filetype
 //     version (u32 LE)      4    — value 6
 //     reserved              56   — forward-compat tail
 //
@@ -31,47 +51,32 @@
 // id format: "{append_ms:013}-{seq:04x}". The per-millisecond seq makes the
 // pair unique, so the id carries no writer identity.
 //
+// TODO: updated id format
+// "{human readable alpha num (is meaningless for the api)}-{uuid}-{append_ms:13}-{seq:04x}}"
+// TODO: why time based ids? Consider keeping append_ms for debugging only
+//       maybe store the number of records at the end of the file and just
+//       have a monotonically increasing id? Simplifies referencing records
+//       --- 
+//       maybe an id should have a byte offset for direct reads?
+// TODO: Isnt an id just a cursor? Can we dedupe
+//
 // On read, the CRC is verified before fields are parsed: a mismatch means
 // a corrupt/torn record buried mid-log, so parsing stops there (truncate
 // at first bad == logical EOF), preserving the refuse-torn-tail invariant.
 //
-// A single writer appends, so reads need no lock and the pre-write size
-// capture in append() is race-free.
-
-#include "types.h"
-
-#include <compare>
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
-
-namespace bus {
-
-constexpr std::uint32_t kJournalFormatVersion = 6;
-constexpr std::size_t kJournalHeaderBytes = 64;
-// Soft runaway-protection cap. A single writer means record size is
-// bounded only by application content, not by concurrent-writer
-// interleave. 1 MiB is roomy for any human-typed prompt while still
-// catching a runaway producer that would balloon parse memory and slow
-// restart replay.
-constexpr std::size_t kJournalMaxRecordBytes = 1 << 20;  // 1 MiB
-
-// Write-durability for an append. Buffered = today's single O_APPEND write
-// (no sync); Synced = fdatasync the file (and, on file creation, fsync the
-// parent dir) before returning so the record survives a crash/power-loss.
-enum class Durability : std::uint8_t { Buffered = 0, Synced = 1 };
-
-struct Record;
+// We should bail and give the callers the functions to decide on a recovery
+// scheme
 
 // Open / lazily-create a journal at the given path. Reads on a fresh
 // path return empty result sets.
 //
+// TODO: no lazy creation (lazy actions are for higher level apis if needed)
+//
 // state_root and name are needed for the cursor-store API (consumerCursor,
 // ack, lastAckedId). They may be left empty when only the raw I/O methods
-// (append, peek, dump, tail, trimHead) are used.
+// (append, peek, dump, tail) are used.
+//
+// Thought: a journal should support multiple cursors
 class Journal {
  public:
   // Opaque position handle for a consumer's read head in a journal. Carries
@@ -93,6 +98,9 @@ class Journal {
   // operator<=> / operator== compare only the offset (offset_): cursors from
   // the same journal are comparable by position, and cross-journal ordering
   // is never relied on.
+  //
+  // TODO: Should cursors contain logic for reading to and and from files?
+  //       Nah, probably should be free functions that do this.
   class Cursor {
    public:
     Cursor() = default;
@@ -146,29 +154,11 @@ class Journal {
   // are dropped, consistent with forward's truncate-at-first-bad).
   auto tail(std::size_t n) const -> bus::Result<std::vector<Record>>;
 
-  // Drop the head of the log up to `cut` (a record boundary Cursor), preserving
-  // the file header and splicing the surviving tail down so it begins right
-  // after the header. Atomic (tmp + rename). Returns the number of bytes
-  // dropped on success, or 0 when the cut is a no-op / out of range (≤ header
-  // or ≥ the file size). After a successful trim, persisted consumer cursors
-  // for this journal are rebased automatically so they still point at the same
-  // logical record (the kernel owns that rebase — callers never compute the
-  // shift).
-  auto trimHead(Cursor cut) -> std::int64_t;
-
-  // Plan and execute a head trim by retention policy. Reads all records,
-  // calls planTrim with the given parameters, then trims and rebases in one
-  // step. Returns the bytes dropped (0 = nothing trimmed). The caller passes
-  // only policy knobs; all offset arithmetic stays inside the kernel.
-  //
-  // BAD CALL: calling on a journal without state_root+name crashes (needed
-  // for cursor rebase + minConsumerOffset).
-  auto trimByPolicy(std::int64_t retention_ms, std::int64_t max_bytes,
-                    std::int64_t now_ms, bool clamp_to_cursor) -> std::int64_t;
-
   // Path to the journal file.
   auto path() const -> const std::string& { return path_; }
 
+  /// Why is this here, can this be a higher level abstraction if needed
+  ///
   // ── Cursor-store API (requires state_root + name) ──────────────────────
   //
   // Read the persisted cursor for `consumer` ("" = default). Returns the
@@ -203,29 +193,12 @@ class Journal {
   // start-of-log on an empty or malformed token.
   static auto cursorFromToken(std::string_view token) -> Cursor;
 
-  // ── Trim-rebase for in-flight Cursors ─────────────────────────────────
-  //
-  // After trimHead drops `dropped_bytes` from the head, rebase a Cursor
-  // that was recorded before the trim. A cursor inside the dropped region
-  // snaps to the new head (header position). Callers (delivery) use this
-  // for in-flight cursor_after values; the kernel uses it for persisted
-  // consumer cursors inside trimHead.
-  auto rebaseCursor(Cursor c, std::int64_t dropped_bytes) const -> Cursor;
-
   // ── Kernel accessor: cursor after a record ────────────────────────────
   //
   // Derive the Cursor that advances past `r` — equivalent to the
   // next-record start. The kernel owns this arithmetic so callers never
   // compute offsets directly.
   static auto cursorAfter(const Record& r) -> Cursor;
-
-  // Minimum persisted consumer offset across all consumers for this
-  // journal. Returns 0 when no cursor files exist (the "nobody has read"
-  // floor). Used by the retention planner to enforce the at-least-once
-  // clamp.
-  //
-  // BAD CALL: calling on a journal without state_root+name crashes.
-  auto minConsumerOffset() const -> std::int64_t;
 
   // ── Test entry point ──────────────────────────────────────────────────────
   //
@@ -251,8 +224,9 @@ class Journal {
   auto cursorFilePath(std::string_view consumer) const -> std::string;
   auto lastIdFilePath(std::string_view consumer) const -> std::string;
 
-  // Extract the raw byte offset from a Cursor. Private — only the kernel
-  // (retention planning, trimHead, trimByPolicy, peek) uses this.
+  // Extract the raw byte offset from a Cursor. Private — the kernel owns all
+  // offset arithmetic so callers hold Cursors opaquely. Used by the read path
+  // (peek, consumerCursor) and cursorAfter to compute record positions.
   static auto toOffset(Cursor c) -> std::int64_t;
 
   // Wire parser shared by peek, dump, tail, and parseForTest. Kept private

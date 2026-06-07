@@ -163,8 +163,7 @@ class Loop {
   // behaviors as actors here, not as new Loop methods (docs/policy-actors.md).
   policy::PolicyEngine engine_;
 
-  // Last time the log-retention sweep ran (events.jsonl rewrite +
-  // per-topic head trim). Rate-limited; see maybeTrimLogs.
+  // Last time the events.jsonl trim ran. Rate-limited; see maybeTrimLogs.
   std::int64_t trim_last_scan_ms_{0};
 
   // Per-agent transcript tail state for the token-scan watcher. The
@@ -243,11 +242,8 @@ class Loop {
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;
 
-  // In-tick log retention (roadmap D1+D2).
-  // maybeTrimLogs is the rate-limited entry from tick(); it rewrites
-  // events.jsonl (advisory tail-preserving) and head-trims topic logs
-  // (retention_ms + size cap), rebasing every affected cursor + in-flight
-  // tracker.
+  // Rate-limited entry from tick(). Trims the advisory events.jsonl log
+  // (D1). Byte offsets in topic logs are immutable; no per-topic trim.
   auto maybeTrimLogs() -> void;
   auto trimEventsLog() -> void;
   // Evict a vanished agent's soft per-agent state (cooldown/alarm maps) so
@@ -256,7 +252,6 @@ class Loop {
   // pruneDeadAgents from the trim sweep.
   auto forgetAgent(std::string_view name) -> void;
   auto pruneDeadAgents() -> void;
-  auto minConsumerCursor(std::string_view topic) const -> std::int64_t;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;

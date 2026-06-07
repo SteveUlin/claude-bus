@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <random>
 #include <span>
 #include <string>
 #include <system_error>
@@ -39,7 +40,9 @@ namespace bus {
 namespace {
 
 constexpr std::size_t kVersionOffset = 4;
-// v6 fixed framing per record: crc(4) + front_len(8) + append_ms(8) +
+constexpr std::size_t kUuidOffset = 8;
+constexpr std::size_t kUuidBytes = 16;
+// Fixed framing per record: crc(4) + front_len(8) + append_ms(8) +
 // seq(2) + trailer(8).  Payload length = record_len - kRecordOverhead.
 constexpr std::uint64_t kRecordOverhead = 30;
 
@@ -151,14 +154,15 @@ auto getU64(std::span<const std::byte> b) -> std::uint64_t {
   return v;
 }
 
-// FNV-1a 64-bit over `name`. Stable across processes (no std::hash).
-// Tag 0 is reserved = "unbound"; a name that hashes to 0 is remapped to 1.
-auto journalTag(std::string_view name) -> std::uint64_t {
+// FNV-1a 64-bit over a 16-byte UUID. Stable across processes (no std::hash).
+// Tag 0 is reserved = "unbound"; a UUID that hashes to 0 (vanishingly unlikely)
+// is remapped to 1 so it never collides with the unbound sentinel.
+auto journalTagFromUuid(std::span<const std::byte> uuid) -> std::uint64_t {
   constexpr std::uint64_t kFnvOffset = 14'695'981'039'346'656'037ULL;
   constexpr std::uint64_t kFnvPrime  =        1'099'511'628'211ULL;
   std::uint64_t h = kFnvOffset;
-  for (const unsigned char c : name) {
-    h ^= static_cast<std::uint64_t>(c);
+  for (const auto b : uuid) {
+    h ^= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(b));
     h *= kFnvPrime;
   }
   return h == 0 ? 1 : h;
@@ -173,6 +177,15 @@ auto makeFileHeader() -> std::array<std::byte, kJournalHeaderBytes> {
   const std::uint32_t v = kJournalFormatVersion;
   for (int i = 0; i < 4; ++i) {
     h[kVersionOffset + i] = std::byte((v >> (i * 8)) & 0xFF);
+  }
+  // Random 16-byte UUID at kUuidOffset (bytes 8..23). Each file gets a unique
+  // identity; the UUID is the source of the cursor binding tag.
+  std::random_device rd;
+  const std::uint64_t u0 = (static_cast<std::uint64_t>(rd()) << 32) | rd();
+  const std::uint64_t u1 = (static_cast<std::uint64_t>(rd()) << 32) | rd();
+  for (int i = 0; i < 8; ++i) {
+    h[kUuidOffset + i]     = std::byte((u0 >> (i * 8)) & 0xFF);
+    h[kUuidOffset + 8 + i] = std::byte((u1 >> (i * 8)) & 0xFF);
   }
   return h;
 }
@@ -455,6 +468,30 @@ Journal::Journal(std::string state_root, std::string name)
       state_root_{std::move(state_root)},
       name_{std::move(name)} {}
 
+// Read the UUID from the file header and derive the tag via FNV-1a.
+// Returns 0 when the file doesn't exist or is too short (unbound).
+// Caches the first non-zero result so subsequent calls skip the I/O.
+auto Journal::tag() const -> std::uint64_t {
+  if (cached_tag_ != 0) return cached_tag_;
+  Fd fd{::open(path_.c_str(), O_RDONLY)};
+  if (!fd.valid()) return 0;
+  std::array<std::byte, kUuidOffset + kUuidBytes> hdr{};
+  if (::pread(fd.get(), hdr.data(), hdr.size(), 0) !=
+      static_cast<ssize_t>(hdr.size())) {
+    return 0;
+  }
+  const std::span<const std::byte> uuid{hdr.data() + kUuidOffset, kUuidBytes};
+  // An all-zero UUID means the header was never written; treat as unbound.
+  bool allzero = true;
+  for (const auto b : uuid) {
+    if (b != std::byte{0}) { allzero = false; break; }
+  }
+  if (allzero) return 0;
+  const auto t = journalTagFromUuid(uuid);
+  cached_tag_ = t;  // only cache non-zero (journalTagFromUuid remaps 0→1)
+  return t;
+}
+
 auto Journal::append(std::span<const std::byte> payload, Durability durability)
     -> Result<std::string> {
   if (payload.size() > 0xFFFFFFFFULL) {
@@ -555,8 +592,8 @@ auto Journal::peek(Cursor from, std::size_t limit,
     -> Result<std::vector<Record>> {
   auto buf = readAll(path_);
   if (!buf) return std::unexpected{buf.error()};
-  const auto tag = name_.empty() ? 0 : journalTag(name_);
-  return ParseFromBuffer(*buf, toOffset(from), limit, tag, truncated_at);
+  const auto t = this->tag();
+  return ParseFromBuffer(*buf, toOffset(from), limit, t, truncated_at);
 }
 
 auto Journal::dump(std::int64_t* truncated_at) const
@@ -579,9 +616,9 @@ auto Journal::tail(std::size_t n, std::int64_t* truncated_at) const
     return std::vector<Record>{};
   }
 
-  const auto tag = name_.empty() ? 0 : journalTag(name_);
+  const auto tag = this->tag();
 
-  // v6 minimum record size = kRecordOverhead (30 bytes, empty payload).
+  // minimum record size = kRecordOverhead (30 bytes, empty payload).
   constexpr std::uint64_t kMinRecordLen = kRecordOverhead;
   constexpr std::size_t kTrailerSize = 8;
 
@@ -687,7 +724,7 @@ auto Journal::consumerCursor(std::string_view consumer) const -> Cursor {
           "construct with Journal(state_root, name)");
   }
   const auto offset = readCursorImpl(cursorFilePath(consumer));
-  return Cursor{offset, name_.empty() ? 0 : journalTag(name_)};
+  return Cursor{offset, tag()};
 }
 
 auto Journal::ack(std::string_view consumer, Cursor target,
@@ -700,8 +737,11 @@ auto Journal::ack(std::string_view consumer, Cursor target,
   // journal's tag is always a programmer error — it means the caller is
   // acking the wrong journal. Crash immediately; silent corruption would
   // be far harder to diagnose.
-  if (!name_.empty() && target.journal_tag_ != 0 &&
-      target.journal_tag_ != journalTag(name_)) {
+  // tag() == 0 means the file doesn't exist yet (unbound); skip the check
+  // so an un-created journal never crashes on a tagged cursor.
+  const auto my_tag = tag();
+  if (my_tag != 0 && target.journal_tag_ != 0 &&
+      target.journal_tag_ != my_tag) {
     fatal("ack: cross-journal cursor — cursor was issued by a different "
           "journal; check that cursor origin matches the journal being acked");
   }

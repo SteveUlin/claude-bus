@@ -12,7 +12,7 @@
 
 namespace bus {
 
-constexpr std::uint32_t kJournalFormatVersion = 6;
+constexpr std::uint32_t kJournalFormatVersion = 7;
 constexpr std::size_t kJournalHeaderBytes = 64;
 constexpr std::size_t kJournalMaxRecordBytes = 1 << 20;  // 1 MiB
 
@@ -24,13 +24,14 @@ struct Record;
 // A Journal is a durable append only log of opaque byte records. The caller
 // owns what the payload bytes mean.
 //
-// On-disk wire — v6:
+// On-disk wire — v7:
 //
-//   TODO: Add a UUID to the header
 //   file header (64 bytes):
 //     "BUS\0"               4    - magic bytes for filetype
-//     version (u32 LE)      4    — value 6
-//     reserved              56   — forward-compat tail
+//     version (u32 LE)      4    — value 7
+//     uuid  (16 bytes)      16   — random per-file identity; source of the
+//                                  cursor binding tag (UUID-derived FNV-1a)
+//     reserved              40   — forward-compat tail
 //
 //   record:
 //     crc32c      (u32 LE)  4    CRC32C over [front record_len .. trailer],
@@ -89,11 +90,12 @@ class Journal {
   // doing arithmetic (e.g. assert(new_cursor > old_cursor)).
   //
   // journal_tag_ binds a cursor to the journal that issued it (FNV-1a of
-  // the journal name). Tag 0 = unbound (unnamed journal / start-of-log). The tag
-  // is stamped whenever a NAMED journal hands out a cursor, and is persisted
-  // in toToken as "<offset>:<tag>". Journal::ack crashes (fatal) when a
-  // cursor's non-zero tag doesn't match the journal's own tag — cross-journal
-  // acks are programmer errors, not runtime conditions.
+  // the journal's on-disk UUID). Tag 0 = unbound (file not yet created /
+  // path-only journal). The tag is stamped when a journal that has an
+  // on-disk UUID hands out a cursor, and is persisted in toToken as
+  // "<offset>:<tag>". Journal::ack crashes (fatal) when a cursor's non-zero
+  // tag doesn't match the journal's own tag — cross-journal acks are
+  // programmer errors, not runtime conditions.
   //
   // operator<=> / operator== compare only the offset (offset_): cursors from
   // the same journal are comparable by position, and cross-journal ordering
@@ -233,6 +235,11 @@ class Journal {
   std::string path_;
   std::string state_root_;  // empty when constructed without cursor-store args
   std::string name_;        // empty when constructed without cursor-store args
+
+  // UUID-derived tag: read once from the file header, cached on first non-zero
+  // result. Returns 0 when the file doesn't exist yet or is too short.
+  mutable std::uint64_t cached_tag_{0};
+  auto tag() const -> std::uint64_t;
 
   auto cursorFilePath(std::string_view consumer) const -> std::string;
   auto lastIdFilePath(std::string_view consumer) const -> std::string;

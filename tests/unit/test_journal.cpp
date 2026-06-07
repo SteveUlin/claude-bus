@@ -212,7 +212,7 @@ TEST(seq_monotonic_same_ms) {
   std::remove(path.c_str());
 }
 
-// ── v6 tail() — reverse read ──────────────────────────────────────────────────
+// ── tail() — reverse read ────────────────────────────────────────────────────
 
 // tail(n) returns the last n records in chronological order.
 TEST(tail_returns_last_n_chronological) {
@@ -316,16 +316,16 @@ TEST(tail_offsets_chain_correctly) {
   std::remove(path.c_str());
 }
 
-// ── v6 hand-built buffer oracle ───────────────────────────────────────────────
+// ── Hand-built buffer oracle ──────────────────────────────────────────────────
 
 namespace {
 
-// Build a minimal valid v6 file buffer in memory (no I/O).
+// Build a minimal valid v7 file buffer in memory (no I/O).
 //   header (64 bytes) + one record with the given payload.
-// Record layout (v6, no payload_len field):
+// Record layout (no payload_len field):
 //   crc(4) | record_len(8) | append_ms(8) | seq(2) | payload(n) | trailer(8)
 //   Total = 30 + n
-auto MakeV6Buffer(std::string_view the_payload,
+auto MakeV7Buffer(std::string_view the_payload,
                   std::int64_t append_ms = 1'700'000'000'000LL,
                   std::uint16_t seq = 0x0042) -> std::vector<std::byte> {
   auto putLE = [](std::vector<std::byte>& b, std::uint64_t v, int n) {
@@ -369,14 +369,14 @@ auto MakeV6Buffer(std::string_view the_payload,
 
 }  // namespace
 
-// parseFrom on a hand-crafted v6 buffer must decode the exact field values
+// parseFrom on a hand-crafted v7 buffer must decode the exact field values
 // that were written — pins the wire format against symmetric round-trip drift.
-TEST(parsefrom_handbuilt_v6_buffer) {
+TEST(parsefrom_handbuilt_v7_buffer) {
   const std::string kPayload = "wire-oracle";
   const std::int64_t kMs = 1'700'000'000'123LL;
   const std::uint16_t kSeq = 0x00AB;
 
-  const auto buf = MakeV6Buffer(kPayload, kMs, kSeq);
+  const auto buf = MakeV7Buffer(kPayload, kMs, kSeq);
   const auto recs = Journal::parseForTest(buf, kJournalHeaderBytes);
 
   CHECK_EQ(recs.size(), std::size_t{1});
@@ -408,7 +408,7 @@ TEST(parsefrom_handbuilt_v6_buffer) {
 
 namespace {
 
-// Append the record bytes from a single-record MakeV6Buffer onto an existing
+// Append the record bytes from a single-record MakeV7Buffer onto an existing
 // multi-record buffer (strips the 64-byte file header from the source).
 auto AppendRecord(std::vector<std::byte>& dst,
                   const std::vector<std::byte>& src) -> void {
@@ -420,10 +420,10 @@ auto AppendRecord(std::vector<std::byte>& dst,
 // parseForTest reports the byte offset of the bad record when CRC is corrupt.
 TEST(truncated_at_reports_corruption_offset) {
   // Build: header + rec0("alpha") + rec1("beta") + rec2("gamma", but CRC flipped)
-  auto buf = MakeV6Buffer("alpha");
-  AppendRecord(buf, MakeV6Buffer("beta"));
+  auto buf = MakeV7Buffer("alpha");
+  AppendRecord(buf, MakeV7Buffer("beta"));
   const std::size_t rec2_offset = buf.size();  // start of the third record
-  AppendRecord(buf, MakeV6Buffer("gamma"));
+  AppendRecord(buf, MakeV7Buffer("gamma"));
 
   // Flip one byte inside rec2's CRC-covered region (offset 10 past rec2 start =
   // inside the append_ms field, which is covered by the CRC).
@@ -443,9 +443,9 @@ TEST(truncated_at_reports_corruption_offset) {
 
 // A clean log yields truncated_at == -1.
 TEST(truncated_at_clean_log_is_minus_one) {
-  auto buf = MakeV6Buffer("x");
-  AppendRecord(buf, MakeV6Buffer("y"));
-  AppendRecord(buf, MakeV6Buffer("z"));
+  auto buf = MakeV7Buffer("x");
+  AppendRecord(buf, MakeV7Buffer("y"));
+  AppendRecord(buf, MakeV7Buffer("z"));
 
   std::int64_t trunc = 0;  // must be overwritten to -1
   const auto recs =
@@ -458,9 +458,9 @@ TEST(truncated_at_clean_log_is_minus_one) {
 // A limit-bounded read of a healthy log must yield truncated_at == -1 — the
 // limit stop is not a corruption signal.
 TEST(truncated_at_limit_stop_is_minus_one) {
-  auto buf = MakeV6Buffer("one");
-  AppendRecord(buf, MakeV6Buffer("two"));
-  AppendRecord(buf, MakeV6Buffer("three"));
+  auto buf = MakeV7Buffer("one");
+  AppendRecord(buf, MakeV7Buffer("two"));
+  AppendRecord(buf, MakeV7Buffer("three"));
 
   std::int64_t trunc = 0;  // must be overwritten to -1
   const auto recs =
@@ -807,4 +807,81 @@ TEST(cross_journal_ack_refused) {
 
   std::filesystem::remove_all(sr_a);
   std::filesystem::remove_all(sr_b);
+}
+
+// ── UUID identity: each journal file gets a distinct UUID ─────────────────────
+
+// Two journals at different paths must have different header UUIDs (bytes 8..23)
+// after their first append. A cursor minted by one journal is rejected by the
+// other (cross-journal guard), confirming UUID-derived tags diverge.
+TEST(uuid_identity_distinct_per_file) {
+  static int n = 0;
+  const std::string sr_x =
+      std::string{"/tmp/claude-bus-test-uuid-x-"} + std::to_string(++n);
+  const std::string sr_y =
+      std::string{"/tmp/claude-bus-test-uuid-y-"} + std::to_string(n);
+  std::filesystem::create_directories(sr_x + "/topics");
+  std::filesystem::create_directories(sr_y + "/topics");
+
+  Journal jx{sr_x, "uuid-x"};
+  Journal jy{sr_y, "uuid-y"};
+
+  (void)jx.append(bytesOf("px"));
+  (void)jy.append(bytesOf("py"));
+
+  // Read the raw header bytes of each file.
+  const auto path_x = sr_x + "/topics/uuid-x.log";
+  const auto path_y = sr_y + "/topics/uuid-y.log";
+  const auto buf_x = readBytes(path_x);
+  const auto buf_y = readBytes(path_y);
+
+  // Both files must be at least a full header.
+  CHECK(buf_x.size() >= kJournalHeaderBytes);
+  CHECK(buf_y.size() >= kJournalHeaderBytes);
+
+  // Extract UUID bytes at offset 8..23.
+  constexpr std::size_t kUuidOff = 8;
+  constexpr std::size_t kUuidLen = 16;
+  std::vector<std::byte> uuid_x(buf_x.begin() + kUuidOff,
+                                buf_x.begin() + kUuidOff + kUuidLen);
+  std::vector<std::byte> uuid_y(buf_y.begin() + kUuidOff,
+                                buf_y.begin() + kUuidOff + kUuidLen);
+
+  // UUIDs must differ (astronomically unlikely to collide).
+  CHECK(uuid_x != uuid_y);
+
+  // A cursor from jx carries jx's UUID-derived tag; acking it against jy
+  // (which has a different UUID tag) must crash. We verify the POSITIVE
+  // direction only (same-journal ack succeeds) since the cross-journal path
+  // calls fatal() / abort() and cannot be tested without fork.
+  auto x_recs = jx.dump();
+  CHECK(x_recs.has_value());
+  CHECK(!x_recs->empty());
+  const auto cx = Journal::cursorAfter((*x_recs)[0]);
+
+  // Same-journal ack succeeds.
+  CHECK(jx.ack("", cx));
+
+  // Confirm the cursor from jx carries a non-zero tag that differs from jy's.
+  const auto tok_cx = Journal::cursorToToken(cx);
+  const auto colon = tok_cx.find(':');
+  CHECK(colon != std::string::npos);
+  const auto tag_x = std::stoull(tok_cx.substr(colon + 1));
+  CHECK(tag_x != 0);
+
+  auto y_recs = jy.dump();
+  CHECK(y_recs.has_value());
+  CHECK(!y_recs->empty());
+  const auto cy = Journal::cursorAfter((*y_recs)[0]);
+  const auto tok_cy = Journal::cursorToToken(cy);
+  const auto colon_y = tok_cy.find(':');
+  CHECK(colon_y != std::string::npos);
+  const auto tag_y = std::stoull(tok_cy.substr(colon_y + 1));
+  CHECK(tag_y != 0);
+
+  // Tags from distinct files must differ.
+  CHECK(tag_x != tag_y);
+
+  std::filesystem::remove_all(sr_x);
+  std::filesystem::remove_all(sr_y);
 }

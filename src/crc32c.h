@@ -1,13 +1,14 @@
 #pragma once
 
-// CRC32C (Castagnoli) — software, table-driven, zero-dependency. Used as
-// the per-record integrity check in the topic-log wire format (v5): a
-// torn or corrupt record is detected on read and treated as logical EOF.
+// CRC32C (Castagnoli) — software, table-driven, zero-dependency. The
+// Journal wire format covers every byte after the crc field with this
+// checksum; a mismatch on read means a corrupt or torn record, which the
+// parser treats as logical EOF to preserve the refuse-torn-tail invariant.
 //
 // A hardware path exists (SSE4.2 _mm_crc32_u64 on x86-64, the ARMv8 CRC
-// extension on aarch64) and is ~10x faster, but the broker's record
-// volume is tiny and software keeps this portable across every host the
-// fleet runs on — so we use the table version unconditionally.
+// extension on aarch64) and is ~10x faster, but record volume is small
+// and the table version runs on every host without build-time CPUID
+// conditionals — so we use it unconditionally.
 
 #include <array>
 #include <cstddef>

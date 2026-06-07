@@ -52,10 +52,11 @@ namespace bus {
 
 constexpr std::uint32_t kJournalFormatVersion = 6;
 constexpr std::size_t kJournalHeaderBytes = 64;
-// Soft runaway-protection cap. Single broker = no concurrent-writer
-// interleave, so PIPE_BUF is no longer the binding constraint. 1 MiB
-// is roomy for any human-typed prompt while still catching a runaway
-// producer that would balloon parse memory and slow restart replay.
+// Soft runaway-protection cap. A single writer means record size is
+// bounded only by application content, not by concurrent-writer
+// interleave. 1 MiB is roomy for any human-typed prompt while still
+// catching a runaway producer that would balloon parse memory and slow
+// restart replay.
 constexpr std::size_t kJournalMaxRecordBytes = 1 << 20;  // 1 MiB
 
 // Write-durability for an append. Buffered = today's single O_APPEND write
@@ -113,9 +114,10 @@ class Journal {
     Cursor(std::int64_t v, std::uint64_t tag) : offset_{v}, journal_tag_{tag} {}
     std::int64_t offset_{0};
     std::uint64_t journal_tag_{0};
-    // Enclosing class accesses private constructors and members to mint
-    // tagged cursors. The external friend for parseFrom is eliminated (the
-    // whole point of nesting: parseFrom is now a private Journal static).
+    // Cursor's constructors are private so a position value can't be forged
+    // from a raw integer outside this unit. Journal is the sole factory —
+    // it mints tagged Cursors in ParseFromBuffer, consumerCursor, and
+    // cursorAfter. Every other caller holds them opaquely.
     friend class Journal;
   };
 
@@ -225,11 +227,12 @@ class Journal {
   // BAD CALL: calling on a journal without state_root+name crashes.
   auto minConsumerOffset() const -> std::int64_t;
 
-  // ── Test entry point (narrowly exposed; production code uses peek/dump) ──
+  // ── Test entry point ──────────────────────────────────────────────────────
   //
-  // Parse records from a raw journal buffer. Equivalent to the private wire
-  // parser, but accessible for hand-built buffer tests (CRC corruption,
-  // torn tail, corrupt record_len). Stops cleanly at the last whole record.
+  // Exposes the private wire parser for hand-built buffer tests (CRC
+  // corruption, torn tail, oversized record_len). Kept off the public
+  // surface so the parser implementation can change without affecting
+  // production callers, who always go through peek / dump / tail.
   // start_offset is clamped to kJournalHeaderBytes.
   static auto parseForTest(std::span<const std::byte> buf,
                            std::int64_t start_offset,
@@ -252,7 +255,9 @@ class Journal {
   // (retention planning, trimHead, trimByPolicy, peek) uses this.
   static auto toOffset(Cursor c) -> std::int64_t;
 
-  // Internal wire parser — private; production entry points are peek/dump/tail.
+  // Wire parser shared by peek, dump, tail, and parseForTest. Kept private
+  // so the on-disk layout is owned entirely by Journal — no caller can bypass
+  // the CRC/torn-record logic or produce a Record with an unvalidated offset.
   static auto ParseFromBuffer(std::span<const std::byte> buf,
                               std::int64_t start_offset,
                               std::size_t limit,

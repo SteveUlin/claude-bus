@@ -395,8 +395,9 @@ auto Journal::ParseFromBuffer(std::span<const std::byte> buf,
 
 // ── Journal::parseForTest ──────────────────────────────────────────────────
 
-// NARROWLY exposed for hand-built buffer tests. Production code uses
-// peek/dump/tail.
+// Delegates to the private wire parser with tag=0 (unbound). Tag 0 lets
+// tests build arbitrary in-memory buffers without constructing a named
+// Journal — the tag mismatch check only fires on non-zero tags.
 auto Journal::parseForTest(std::span<const std::byte> buf,
                            std::int64_t start_offset,
                            std::size_t limit) -> std::vector<Record> {
@@ -803,9 +804,10 @@ auto Journal::cursorAfter(const Record& r) -> Cursor {
 // ── Journal::toOffset ──────────────────────────────────────────────────────
 
 auto Journal::toOffset(Cursor c) -> std::int64_t {
-  // Extracts the raw byte offset from an opaque Cursor. Reserved for the
-  // retention→trim pipeline (feeding RecordMeta / trimHead). All other
-  // callers hold cursors opaquely via comparison / token round-trip.
+  // The kernel exposes this only to itself — retention planning and trimHead
+  // need a raw offset to compute cut points and RecordMeta. Every caller
+  // outside the kernel holds Cursors opaquely via comparison or token
+  // round-trip and never sees the numeric value.
   return c.offset_;
 }
 

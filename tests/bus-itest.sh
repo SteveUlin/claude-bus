@@ -229,9 +229,10 @@ else
     tc_fail "TC29 topic create" "rc=$rc out=$(cat /tmp/bus-itest.out)"
 fi
 
-# TC30: duplicate topic rejected.
+# TC30: duplicate topic rejected. Uses a valid kind so the duplicate check is
+# what fires (an invalid kind is now rejected first, on its own merits).
 echo "=== TC30: duplicate topic rejected ==="
-CLAUDE_BUS_STATE=$BROKER_STATE "$BUS" topic create tasks --kind whatever \
+CLAUDE_BUS_STATE=$BROKER_STATE "$BUS" topic create tasks --kind work-queue \
     >/tmp/bus-itest.out 2>&1
 rc=$?
 if [ "$rc" = "1" ] && grep -q 'already exists' /tmp/bus-itest.out; then

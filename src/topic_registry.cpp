@@ -166,7 +166,9 @@ auto TopicRegistry::create(TopicConfig cfg)
     return std::unexpected{Error{std::string{"invalid topic name \""} + cfg.name +
                            "\" (lowercase + digit + - / _ only)"}};
   }
-  if (cfg.kind == TopicKind::Unknown) return std::unexpected{Error{"missing topic kind"}};
+  if (cfg.kind == TopicKind::Unknown) {
+    return std::unexpected{Error{"missing or unrecognized topic kind"}};
+  }
   if (topics_.contains(cfg.name)) {
     return std::unexpected{Error{std::string{"topic \""} + cfg.name +
                            "\" already exists"}};

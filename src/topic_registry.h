@@ -45,10 +45,23 @@ using TopicKindConfig = std::variant<
     BlackboardConfig,
     AppendLogConfig>;
 
+enum class TopicKind {
+  AgentInbox,
+  TuiCommands,
+  WorkQueue,
+  Pubsub,
+  Blackboard,
+  AppendLog,
+  Unknown,
+};
+
+auto topicKindFromStr(std::string_view) -> TopicKind;
+auto topicKindToStr(TopicKind) -> std::string_view;
+
 // A topic is a typed, persisted message stream.
 struct TopicConfig {
   std::string name;
-  std::string kind;
+  TopicKind kind{TopicKind::Unknown};
   json::Value kind_config{json::Value::null_()};
   TopicKindConfig parsed_config;  // free-form per-kind blob
 

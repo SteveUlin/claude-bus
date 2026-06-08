@@ -17,6 +17,29 @@
 
 namespace bus {
 
+auto topicKindFromStr(std::string_view s) -> TopicKind {
+  if (s == kKindAgentInbox) return TopicKind::AgentInbox;
+  if (s == kKindTuiCommands) return TopicKind::TuiCommands;
+  if (s == kKindWorkQueue)   return TopicKind::WorkQueue;
+  if (s == kKindPubsub)      return TopicKind::Pubsub;
+  if (s == kKindBlackboard)  return TopicKind::Blackboard;
+  if (s == kKindAppendLog)   return TopicKind::AppendLog;
+  return TopicKind::Unknown;
+}
+
+auto topicKindToStr(TopicKind k) -> std::string_view {
+  switch (k) {
+    case TopicKind::AgentInbox: return kKindAgentInbox;
+    case TopicKind::TuiCommands: return kKindTuiCommands;
+    case TopicKind::WorkQueue:   return kKindWorkQueue;
+    case TopicKind::Pubsub:      return kKindPubsub;
+    case TopicKind::Blackboard:  return kKindBlackboard;
+    case TopicKind::AppendLog:   return kKindAppendLog;
+    case TopicKind::Unknown:     return "";
+  }
+  return "";  // unreachable, silences -Wreturn-type
+}
+
 auto isValidTopicName(std::string_view name) -> bool {
   if (name.empty() || name.size() > 128) return false;
   for (char c : name) {
@@ -30,7 +53,7 @@ auto isValidTopicName(std::string_view name) -> bool {
 auto TopicConfig::toJson() const -> json::Value {
   std::map<std::string, json::Value> m;
   m.insert({"name", json::Value::from(name)});
-  m.insert({"kind", json::Value::from(kind)});
+  m.insert({"kind", json::Value::from(std::string{topicKindToStr(kind)})});
   if (!kind_config.isNull()) {
     m.insert({"kind_config", kind_config});
   }
@@ -43,22 +66,32 @@ auto TopicConfig::fromJson(const json::Value& v)
   TopicConfig cfg;
   cfg.name = v.getOrString("name");
   if (cfg.name.empty()) return std::unexpected{Error{"missing topic name"}};
-  cfg.kind = v.getOrString("kind");
-  if (cfg.kind.empty()) return std::unexpected{Error{"missing topic kind"}};
+  const auto kind_str = v.getOrString("kind");
+  if (kind_str.empty()) return std::unexpected{Error{"missing topic kind"}};
+  cfg.kind = topicKindFromStr(kind_str);
   if (const auto* kc = v.get("kind_config"); kc != nullptr) {
     cfg.kind_config = *kc;
-    if (cfg.kind == kKindAgentInbox) {
-      cfg.parsed_config = AgentInboxConfig{kc->getOrString("agent")};
-    } else if (cfg.kind == kKindTuiCommands) {
-      cfg.parsed_config = TuiCommandsConfig{kc->getOrString("agent")};
-    } else if (cfg.kind == kKindPubsub) {
-      cfg.parsed_config = PubsubConfig{};
-    } else if (cfg.kind == kKindWorkQueue) {
-      cfg.parsed_config = WorkQueueConfig{};
-    } else if (cfg.kind == kKindBlackboard) {
-      cfg.parsed_config = BlackboardConfig{};
-    } else if (cfg.kind == kKindAppendLog) {
-      cfg.parsed_config = AppendLogConfig{};
+    switch (cfg.kind) {
+      case TopicKind::AgentInbox:
+        cfg.parsed_config = AgentInboxConfig{kc->getOrString("agent")};
+        break;
+      case TopicKind::TuiCommands:
+        cfg.parsed_config = TuiCommandsConfig{kc->getOrString("agent")};
+        break;
+      case TopicKind::Pubsub:
+        cfg.parsed_config = PubsubConfig{};
+        break;
+      case TopicKind::WorkQueue:
+        cfg.parsed_config = WorkQueueConfig{};
+        break;
+      case TopicKind::Blackboard:
+        cfg.parsed_config = BlackboardConfig{};
+        break;
+      case TopicKind::AppendLog:
+        cfg.parsed_config = AppendLogConfig{};
+        break;
+      case TopicKind::Unknown:
+        break;
     }
   }
   return cfg;
@@ -133,7 +166,7 @@ auto TopicRegistry::create(TopicConfig cfg)
     return std::unexpected{Error{std::string{"invalid topic name \""} + cfg.name +
                            "\" (lowercase + digit + - / _ only)"}};
   }
-  if (cfg.kind.empty()) return std::unexpected{Error{"missing topic kind"}};
+  if (cfg.kind == TopicKind::Unknown) return std::unexpected{Error{"missing topic kind"}};
   if (topics_.contains(cfg.name)) {
     return std::unexpected{Error{std::string{"topic \""} + cfg.name +
                            "\" already exists"}};
@@ -197,7 +230,7 @@ auto TopicRegistry::getOrAutoCreate(std::string_view name)
           std::string{name} + "\" (agent \"" + agent +
           "\" is itself a topic name); pass a bare agent name"}};
     }
-    cfg.kind = std::string{kKindAgentInbox};
+    cfg.kind = TopicKind::AgentInbox;
     std::map<std::string, json::Value> kc;
     kc.insert({"agent", json::Value::from(agent)});
     cfg.kind_config = json::Value::fromObject(std::move(kc));
@@ -210,7 +243,7 @@ auto TopicRegistry::getOrAutoCreate(std::string_view name)
           std::string{name} + "\" (agent \"" + agent +
           "\" is itself a topic name); pass a bare agent name"}};
     }
-    cfg.kind = std::string{kKindTuiCommands};
+    cfg.kind = TopicKind::TuiCommands;
     std::map<std::string, json::Value> kc;
     kc.insert({"agent", json::Value::from(agent)});
     cfg.kind_config = json::Value::fromObject(std::move(kc));

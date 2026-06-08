@@ -22,7 +22,7 @@ TEST(getOrAutoCreate_inbox_normal) {
   auto r = reg.getOrAutoCreate("inbox-human");
   CHECK(r.has_value());
   if (r) {
-    CHECK_EQ(r->kind, std::string{kKindAgentInbox});
+    CHECK_EQ(r->kind, TopicKind::AgentInbox);
     CHECK_EQ(r->kind_config.getOrString("agent"), std::string{"human"});
   }
 }
@@ -32,7 +32,7 @@ TEST(getOrAutoCreate_commands_normal) {
   auto r = reg.getOrAutoCreate("commands-bob");
   CHECK(r.has_value());
   if (r) {
-    CHECK_EQ(r->kind, std::string{kKindTuiCommands});
+    CHECK_EQ(r->kind, TopicKind::TuiCommands);
     CHECK_EQ(r->kind_config.getOrString("agent"), std::string{"bob"});
   }
 }
@@ -59,4 +59,20 @@ TEST(getOrAutoCreate_rejects_nested_commands_topic) {
   auto r = reg.getOrAutoCreate("commands-commands-bob");
   CHECK(!r.has_value());
   CHECK(!reg.contains("commands-commands-bob"));
+}
+
+// topicKindFromStr / topicKindToStr roundtrip: every known kind survives
+// kind → string → kind identity; an unknown string → Unknown.
+TEST(topicKindRoundtrip) {
+  const TopicKind kinds[] = {
+      TopicKind::AgentInbox, TopicKind::TuiCommands, TopicKind::WorkQueue,
+      TopicKind::Pubsub,     TopicKind::Blackboard,  TopicKind::AppendLog,
+  };
+  for (const auto k : kinds) {
+    const auto s = topicKindToStr(k);
+    CHECK(!s.empty());
+    CHECK_EQ(topicKindFromStr(s), k);
+  }
+  CHECK_EQ(topicKindFromStr("totally-unknown"), TopicKind::Unknown);
+  CHECK_EQ(topicKindToStr(TopicKind::Unknown), std::string_view{""});
 }

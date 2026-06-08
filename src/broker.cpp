@@ -424,7 +424,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   server.on("topic_create", [&registry](const json::Value& req) {
     TopicConfig tc;
     tc.name = req.getOrString("name");
-    tc.kind = req.getOrString("kind");
+    tc.kind = topicKindFromStr(req.getOrString("kind"));
     if (const auto* kc = req.get("kind_config"); kc != nullptr) {
       tc.kind_config = *kc;
     }
@@ -505,7 +505,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // replay); each subscriber gets a delivery copy via its inbox-
     // <name> agent-inbox topic (which the broker's delivery loop
     // pushes to the recipient pane).
-    if (tcfg != nullptr && tcfg->kind == std::string{kKindPubsub}) {
+    if (tcfg != nullptr && tcfg->kind == TopicKind::Pubsub) {
       const auto* subs_v = tcfg->kind_config.get("subscribers");
       if (subs_v != nullptr && subs_v->isArray()) {
         for (const auto& sub : subs_v->asArray()) {
@@ -522,7 +522,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // record so peek/fetch return only the latest. Older records
     // stay on disk for audit but become unreachable through normal
     // reads.
-    if (tcfg != nullptr && tcfg->kind == std::string{kKindBlackboard}) {
+    if (tcfg != nullptr && tcfg->kind == TopicKind::Blackboard) {
       auto all = log.dump();
       if (all && !all->empty()) {
         const auto& latest = all->back();
@@ -567,8 +567,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // write (see fetch handler for the full rationale).
     const auto* tcfg = registry.get(name);
     const bool single_recipient =
-        tcfg != nullptr && (tcfg->kind == std::string{kKindAgentInbox} ||
-                            tcfg->kind == std::string{kKindTuiCommands});
+        tcfg != nullptr && (tcfg->kind == TopicKind::AgentInbox ||
+                            tcfg->kind == TopicKind::TuiCommands);
     const auto consumer =
         single_recipient ? std::string{} : req.getOrString("consumer");
     const auto limit = req.getOrInt("limit", 0);
@@ -749,9 +749,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     const auto* tcfg = registry.get(name);
     const bool is_blackboard =
-        tcfg != nullptr && tcfg->kind == std::string{kKindBlackboard};
+        tcfg != nullptr && tcfg->kind == TopicKind::Blackboard;
     const bool is_agent_inbox =
-        tcfg != nullptr && tcfg->kind == std::string{kKindAgentInbox};
+        tcfg != nullptr && tcfg->kind == TopicKind::AgentInbox;
     // C1: agent-inbox and tui-commands are single-recipient — delivery and
     // drain always use the "" (_default) cursor. A fetch/peek that passes
     // an arbitrary --consumer would open a divergent <consumer>.cursor and
@@ -759,7 +759,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // drift seen live → lost / re-delivered mail). Normalize to "".
     const bool single_recipient =
         is_agent_inbox ||
-        (tcfg != nullptr && tcfg->kind == std::string{kKindTuiCommands});
+        (tcfg != nullptr && tcfg->kind == TopicKind::TuiCommands);
     const auto consumer =
         single_recipient ? std::string{} : req.getOrString("consumer");
 
@@ -982,7 +982,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     {
       TopicConfig audit;
       audit.name = "audit";
-      audit.kind = std::string{kKindAppendLog};
+      audit.kind = TopicKind::AppendLog;
       if (!registry.contains("audit")) {
         auto _ig = registry.create(audit);
       }
@@ -1079,10 +1079,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // registry mid-iteration is safe.
     for (const auto& tc : registry.list()) {
       std::string agent;
-      if (tc.kind == std::string{kKindAgentInbox} &&
+      if (tc.kind == TopicKind::AgentInbox &&
           tc.name.starts_with("inbox-")) {
         agent = tc.name.substr(6);
-      } else if (tc.kind == std::string{kKindTuiCommands} &&
+      } else if (tc.kind == TopicKind::TuiCommands &&
                  tc.name.starts_with("commands-")) {
         agent = tc.name.substr(9);
       } else {
@@ -1130,7 +1130,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       if (!registry.contains("audit")) {
         TopicConfig audit;
         audit.name = "audit";
-        audit.kind = std::string{kKindAppendLog};
+        audit.kind = TopicKind::AppendLog;
         auto _ig = registry.create(audit);
       }
       auto& audit_log = getOrOpenLog("audit");

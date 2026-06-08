@@ -426,7 +426,7 @@ auto Loop::scanEvents() -> void {
       {
         TopicConfig audit;
         audit.name = "audit";
-        audit.kind = std::string{kKindAppendLog};
+        audit.kind = TopicKind::AppendLog;
         if (!registry_.contains("audit")) {
           auto _ = registry_.create(audit);
         }
@@ -506,7 +506,7 @@ auto Loop::scanEvents() -> void {
 }
 
 auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
-  if (cfg.kind != std::string{kKindAgentInbox}) return;
+  if (cfg.kind != TopicKind::AgentInbox) return;
 
   // Resolve recipient agent from kind_config.
   const auto* agent_v = cfg.kind_config.get("agent");
@@ -669,7 +669,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
 }
 
 auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
-  if (cfg.kind != std::string{kKindTuiCommands}) return;
+  if (cfg.kind != TopicKind::TuiCommands) return;
 
   const auto* agent_v = cfg.kind_config.get("agent");
   if (agent_v == nullptr || !agent_v->isString()) return;
@@ -765,7 +765,7 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   // Append to the audit topic (auto-create if absent).
   TopicConfig audit;
   audit.name = "audit";
-  audit.kind = std::string{kKindAppendLog};
+  audit.kind = TopicKind::AppendLog;
   if (!registry_.contains("audit")) {
     auto _ = registry_.create(audit);
   }
@@ -862,7 +862,7 @@ auto Loop::scanRetries() -> void {
     // that path keeps re-running the state machine. Slash re-dispatch
     // dedup is tracked as a separate follow-up.
     const auto* tcfg = registry_.get(f.topic);
-    if (tcfg != nullptr && tcfg->kind == std::string{kKindTuiCommands}) {
+    if (tcfg != nullptr && tcfg->kind == TopicKind::TuiCommands) {
       dispatch::dispatchTui(cfg_, f.agent, rec_env.body);
     }
     f.attempts += 1;  // deadline tick (agent-inbox) / re-dispatch count (tui)
@@ -881,8 +881,8 @@ auto Loop::tick() -> void {
   maybeWakeIdleOffTty();
   maybeTrimLogs();
   for (const auto& cfg : registry_.list()) {
-    if (cfg.kind == std::string{kKindAgentInbox}) dispatchAgentInbox(cfg);
-    else if (cfg.kind == std::string{kKindTuiCommands})
+    if (cfg.kind == TopicKind::AgentInbox) dispatchAgentInbox(cfg);
+    else if (cfg.kind == TopicKind::TuiCommands)
       dispatchTuiCommands(cfg);
   }
   // D8 Part B: emit any overrun escalations + recompute next_deadline_ms_
@@ -931,7 +931,7 @@ auto Loop::maybeEscalateStuck() -> void {
   auto auditAlarm = [&](std::string_view protocol, const std::string& body) {
     TopicConfig audit;
     audit.name = "audit";
-    audit.kind = std::string{kKindAppendLog};
+    audit.kind = TopicKind::AppendLog;
     if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
     bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
     bus::msg::Envelope a_env;
@@ -1111,7 +1111,7 @@ auto Loop::maybeAutoClear() -> void {
     {
       TopicConfig audit;
       audit.name = "audit";
-      audit.kind = std::string{kKindAppendLog};
+      audit.kind = TopicKind::AppendLog;
       if (!registry_.contains("audit")) {
         auto _ = registry_.create(audit);
       }
@@ -1218,7 +1218,7 @@ auto Loop::runPolicy() -> void {
   // cost is O(work-queue count), and only the head matters for one-per-tick
   // assignment.
   for (const auto& tcfg : registry_.list()) {
-    if (tcfg.kind != std::string{kKindWorkQueue}) continue;
+    if (tcfg.kind != TopicKind::WorkQueue) continue;
     bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
     bus::CursorStore wq_cursors{cfg_.state_dir, tcfg.name};
     auto r = log.peek(wq_cursors.consumerCursor(""), 16);  // bounded head window → batch-assign
@@ -1233,7 +1233,7 @@ auto Loop::runPolicy() -> void {
   // cursor as we fold, so a BlackboardActor stays stateless). The cursor file
   // persists, so a restart resumes past already-notified posts.
   for (const auto& tcfg : registry_.list()) {
-    if (tcfg.kind != std::string{kKindBlackboard}) continue;
+    if (tcfg.kind != TopicKind::Blackboard) continue;
     bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
     bus::CursorStore bb_cursors{cfg_.state_dir, tcfg.name};
     auto r = log.peek(bb_cursors.consumerCursor("_dispatch"), 16);  // bounded window of new posts
@@ -1262,7 +1262,7 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
         if (!registry_.contains("audit")) {
           TopicConfig audit;
           audit.name = "audit";
-          audit.kind = std::string{kKindAppendLog};
+          audit.kind = TopicKind::AppendLog;
           auto _ = registry_.create(audit);
         }
       } else if (auto cr = registry_.getOrAutoCreate(a.topic); !cr) {
@@ -1394,7 +1394,7 @@ auto Loop::maybeWakeIdleOffTty() -> void {
       const auto queued_ms = now - mail_queued_since_ms_[name];
       TopicConfig audit;
       audit.name = "audit";
-      audit.kind = std::string{kKindAppendLog};
+      audit.kind = TopicKind::AppendLog;
       if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
       bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
       bus::msg::Envelope a_env;
@@ -1454,7 +1454,7 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     {
       TopicConfig audit;
       audit.name = "audit";
-      audit.kind = std::string{kKindAppendLog};
+      audit.kind = TopicKind::AppendLog;
       if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
       bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
       bus::msg::Envelope a_env;

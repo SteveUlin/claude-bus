@@ -6,6 +6,19 @@ A living proposal list. Walk through it with Claude by referencing item numbers 
 
 > A completeness-critic pass (see **Completeness-critic addenda** before the sequence section) folded in 7 gaps the first pass missed and flagged 3 items (B2, C4, F3) as exceeding the surgical bar — read those before scheduling those three.
 
+## Landed (autonomous drive, 2026-06-07)
+
+Driven as separate build-green, force-verified commits on `main`. Skip these in the walk-through:
+
+- **J1** — `CursorStore` extraction; `Journal` is now total + path-only (`1668be4c`)
+- **C1** — `TopicKind` enum replaces the raw `kind` string, 39 sites (`0194b202`)
+- **D1** — `TokenWatcher` extracted out of the `delivery::Loop` god-object (`1b334a55`)
+- **D3 + D4** — `emitAudit()` + `isAgentIdle()` private helpers in `delivery::Loop` (`fcf9f081`)
+
+Also landed earlier in the session (journal kernel): in-place trim removed (offsets immutable), `retention_ms` dropped, read-truncation surfaced (`truncated_at`), per-file UUID header (wire v7, tag from UUID).
+
+**Deferred deliberately:** **J2** (open/create factories — changes absent-file semantics + needs a Result-factory ergonomics decision) and **D2** (epoch helpers → `bus::msg` — lower value than the doc claims: broker keeps `delivery.h` for `Loop`, so it doesn't decouple). Both want a quick decision in the walk-through.
+
 ---
 
 ## Principles applied

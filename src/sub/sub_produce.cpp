@@ -7,6 +7,7 @@
 #include "../rpc.h"
 #include "../state_paths.h"
 #include "../sub.h"
+#include "sub_util.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -290,17 +291,7 @@ auto subBroadcast(std::span<const char* const> args) -> int {
   }
 
   // Split AGENTS on commas.
-  std::vector<std::string> agents;
-  std::string cur;
-  for (char c : to_csv) {
-    if (c == ',') {
-      if (!cur.empty()) agents.push_back(std::move(cur));
-      cur.clear();
-    } else if (c != ' ' && c != '\t') {
-      cur += c;
-    }
-  }
-  if (!cur.empty()) agents.push_back(std::move(cur));
+  auto agents = splitCsv(to_csv);
   if (agents.empty()) {
     std::println(stderr, "bus msg broadcast: --to AGENTS resolved to empty list");
     return 2;

@@ -5,6 +5,7 @@
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../sub.h"
+#include "sub_util.h"
 
 #include <cstdio>
 #include <map>
@@ -125,16 +126,8 @@ auto subTopic(std::span<const char* const> args) -> int {
     // Parse subscribers (pubsub kind) into kind_config.
     if (!subscribers.empty()) {
       std::vector<json::Value> subs;
-      std::string cur;
-      for (char c : subscribers) {
-        if (c == ',') {
-          if (!cur.empty()) subs.push_back(json::Value::from(cur));
-          cur.clear();
-        } else if (c != ' ' && c != '\t') {
-          cur += c;
-        }
-      }
-      if (!cur.empty()) subs.push_back(json::Value::from(cur));
+      for (const auto& s : splitCsv(subscribers))
+        subs.push_back(json::Value::from(s));
       std::map<std::string, json::Value> kc;
       kc.insert({"subscribers", json::Value::fromArray(std::move(subs))});
       m.insert(

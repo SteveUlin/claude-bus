@@ -45,26 +45,6 @@ auto onSignalMonitor(int) -> void { gStopMonitor = 1; }
 
 // ─── data layer ──────────────────────────────────────────────────────
 
-// Convert the wire state label back to the State enum so we can keep
-// using stateName / stateColor / stateGlyph for table rendering.
-auto computeStateFromLabel(std::string_view label) -> State {
-  if (label == "NEW") return State::New;
-  if (label == "STARTING") return State::Starting;
-  if (label == "IDLE") return State::Idle;
-  if (label == "HAS_MAIL") return State::HasMail;
-  if (label == "WORKING") return State::Working;
-  if (label == "QUIET") return State::Quiet;
-  if (label == "NEEDS_NUDGE") return State::NeedsNudge;
-  if (label == "ORCHESTRATING") return State::Orchestrating;
-  if (label == "STUCK") return State::Stuck;
-  if (label == "COMPACTING") return State::Compacting;
-  if (label == "NEEDS_INPUT") return State::NeedsInput;
-  if (label == "BOOT_STUCK") return State::BootStuck;
-  if (label == "ENDED") return State::Ended;
-  if (label == "GONE") return State::Gone;
-  return State::New;
-}
-
 // One RPC + a broker-liveness flag. broker_alive=false signals
 // "couldn't reach the broker" — the dashboard renders a banner so a
 // dead broker is visible rather than masquerading as an empty fleet.
@@ -439,7 +419,7 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
     const auto state_label = entry.getOrString("state");
     if (state_label == "GONE" || state_label == "ENDED") continue;
 
-    const auto st = computeStateFromLabel(state_label);
+    const auto st = bus::stateFrom(state_label);
 
     // P3 trigger feed — same derivation `bus triggers` uses. Refresh the
     // $STATE/triggers/<agent>.json file every tick so elodin's decoupled

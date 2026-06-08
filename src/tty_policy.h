@@ -16,10 +16,18 @@
 //     in layouts/fleet.kdl's broker pane) for any additional opt-outs,
 //     without a rebuild.
 
+#include <array>
 #include <cstdlib>
 #include <string_view>
 
 namespace bus {
+
+// Roles excluded from automatic context clearing (comms / primary maintain
+// high cross-thread continuity and should only clear on explicit human cue —
+// see clear-policy.md §6). Used by delivery.cpp (maybeAutoClear) and
+// recovery_actor.cpp (R1 idle-context triage).
+inline constexpr std::array<std::string_view, 2> kNoClearRoles{"comms",
+                                                                "primary"};
 
 // True iff `agent` is on the TTY push path (i.e. in the opt-out set).
 inline auto isTtyAgent(std::string_view agent) -> bool {

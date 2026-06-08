@@ -24,6 +24,7 @@
 #include "../json_min.h"
 #include "../state_paths.h"
 #include "../sub.h"
+#include "sub_util.h"
 
 #include <algorithm>
 #include <array>
@@ -189,13 +190,6 @@ auto readClaims(const std::set<std::string>& only) -> std::vector<Claim> {
     }
   }
   return claims;
-}
-
-auto truncate(std::string s, std::size_t w) -> std::string {
-  if (s.size() <= w) return s;
-  s.resize(w - 1);
-  s += "…";
-  return s;
 }
 
 }  // namespace

@@ -202,6 +202,9 @@ auto mailAxisFrom(std::string_view s) -> MailAxis;
 auto tuiAxisFrom(std::string_view s) -> TuiAxis;
 
 auto stateName(State s) -> std::string_view;
+// Inverse of stateName — parse a wire label back to the State enum.
+// Returns State::New on miss; never throws.
+auto stateFrom(std::string_view label) -> State;
 auto stateColor(State s) -> std::string_view;
 
 // One emoji per state. Cheap shape sulin can scan without reading the

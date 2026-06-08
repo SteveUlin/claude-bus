@@ -622,26 +622,25 @@ auto sendToPaneSafe(std::string_view agent_name,
   // In every case, our state read is unreliable. Deliver later instead
   // of risking a write into the wrong context. The broker's retry loop
   // will pick it up.
-  if (ps.mode == "unknown") return false;
+  if (!ps.modeKnown()) return false;
 
   // LOCKED: the TUI is in a modal that doesn't accept input.
-  if (ps.mode == "LOCKED") return false;
+  if (ps.isLocked()) return false;
 
   // bypass-perms is off — claude will prompt for human approval on any
   // tool use the message triggers. The chat write itself wouldn't be
   // blocked, but interrupting a human-supervised attach session with
   // a bus delivery is a bad default. Defer; broker retries. When the
   // human re-enables bypass (or the agent emits Stop, clearing any
-  // permission prompt), delivery resumes. mode != "unknown" guarantees
+  // permission prompt), delivery resumes. modeKnown() guarantees
   // we positively observed the footer — never a false-positive on a
   // scrolled pane.
-  if (ps.bypass_perms == "off") return false;
+  if (ps.bypassKnown() && !ps.bypassOn()) return false;
 
   // Snapshot the human-typed draft. Suggestions are claude's ghost
   // autocomplete — generated on demand from the buffer — so we don't
   // preserve them; they regenerate when the draft is retyped.
-  const std::string saved =
-      (ps.buffer != "(empty)") ? ps.buffer : std::string{};
+  const std::string saved = ps.hasBuffer() ? ps.buffer : std::string{};
 
   // Always send `i` then `Ctrl u` before writing. Rationale:
   //   - If the pane is actually in NORMAL or VISUAL (whether the

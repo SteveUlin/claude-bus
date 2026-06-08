@@ -32,6 +32,16 @@ struct PaneState {
   std::string buffer;        // typed input; "(empty)" when blank
   std::string suggestion;    // ghost autocomplete; "(none)" when blank
   std::string bypass_perms;  // "on" / "off" / "" (unknown)
+
+  // Typed predicates over the wire-string fields. Keep the raw fields
+  // (they're the JSON/RPC wire and the parsing target in pane.cpp);
+  // business logic should go through these rather than string literals.
+  auto isInsert()    const -> bool { return mode == "INSERT"; }
+  auto isLocked()    const -> bool { return mode == "LOCKED"; }
+  auto modeKnown()   const -> bool { return mode != "unknown"; }
+  auto bypassOn()    const -> bool { return bypass_perms == "on"; }
+  auto bypassKnown() const -> bool { return !bypass_perms.empty(); }
+  auto hasBuffer()   const -> bool { return buffer != "(empty)"; }
 };
 
 }  // namespace bus

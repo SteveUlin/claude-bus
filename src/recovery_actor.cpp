@@ -1,5 +1,6 @@
 #include "recovery_actor.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -11,6 +12,7 @@
 
 #include "agent_status.h"
 #include "json_min.h"
+#include "tty_policy.h"
 
 namespace bus::delivery {
 
@@ -97,7 +99,7 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
   // only when it actually logs. Emits an Enqueue the loop executes.
   auto logWould = [&](const std::string& agent, std::string_view sig,
                       std::string_view action, const std::string& signals) {
-    const std::string key = agent + "\x1f" + std::string{sig};
+    const auto key = std::make_pair(agent, std::string{sig});
     if (now < would_recover_next_log_ms_[key]) return;
     would_recover_next_log_ms_[key] = now + 5 * 60'000;  // per-sig cooldown
     policy::PolicyAction a;
@@ -171,11 +173,11 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
     // on human cue; see clear-policy.md §6). In observe mode this logs what it
     // WOULD do (maybeAutoClear still acts); in soft/on mode the engine acts
     // through the breaker/backoff ledger and maybeAutoClear steps aside.
-    static const std::set<std::string> kClearSkip{"comms", "primary"};
     if (ax.turn == TurnAxis::Ready && !pending && !has_in_flight &&
         info.last.event == "Stop" &&
         (now - info.last.ts_ms) >= idle_clear_ms &&
-        !kClearSkip.contains(name)) {
+        std::find(kNoClearRoles.begin(), kNoClearRoles.end(),
+                  std::string_view{name}) == kNoClearRoles.end()) {
       const std::string signals =
           std::format("idle_min={},inbox=empty,in_flight=0",
                       (now - info.last.ts_ms) / 60'000);
@@ -231,7 +233,7 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
     if (transcript_stale && (wedged || dropped_turn)) {
       const std::string sig = dropped_turn ? "dropped-turn" : "wedged";
       const std::string action = dropped_turn ? "nudge" : "relaunch";
-      const std::string wkey = name + "\x1f" + sig;
+      const auto wkey = std::make_pair(name, sig);
       if (now >= would_recover_next_log_ms_[wkey]) {
         const auto pane = ctx.pane(name);  // forks zellij — gated above
         const auto ax_pane =
@@ -257,13 +259,10 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
 }
 
 auto RecoveryActor::pruneDeadAgents(const std::set<std::string>& live) -> void {
-  // would_recover_next_log_ms_ is keyed by "<agent>\x1f<sig>" — drop every
+  // would_recover_next_log_ms_ is keyed by (agent, sig) — drop every
   // signature entry for an agent no longer in the live set.
   std::erase_if(would_recover_next_log_ms_, [&](const auto& kv) {
-    const auto sep = kv.first.find('\x1f');
-    const auto agent =
-        sep == std::string::npos ? kv.first : kv.first.substr(0, sep);
-    return !live.contains(agent);
+    return !live.contains(kv.first.first);
   });
 }
 

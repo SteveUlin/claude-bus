@@ -19,6 +19,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "policy.h"
@@ -49,7 +50,8 @@ class RecoveryActor : public policy::PolicyActor {
   // Scan rate-limit + per-(agent,signature) would-recover cooldown so a
   // persistently-wedged agent logs once, not every scan.
   std::int64_t auto_recover_last_scan_ms_{0};
-  std::map<std::string, std::int64_t> would_recover_next_log_ms_;
+  std::map<std::pair<std::string, std::string>, std::int64_t>
+      would_recover_next_log_ms_;
   // Wall-jump detection (§6.1a): the previous tick's (wall,mono) pair; a
   // Δwall − Δmono past the threshold marks a suspend/clock-jump → arm grace.
   std::int64_t last_tick_wall_ms_{0};

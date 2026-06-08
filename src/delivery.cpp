@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -280,7 +281,7 @@ auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool
   const auto pane = paneStateCached(agent);
   const auto st = computeState(info, 0, now, pane.ok);
   return st == State::Idle ||
-         (st == State::Starting && pane.ok && pane.mode == "INSERT");
+         (st == State::Starting && pane.ok && pane.isInsert());
 }
 
 auto Loop::writeInflight(const InFlight& f) -> void {
@@ -1022,16 +1023,15 @@ auto Loop::maybeAutoClear() -> void {
   if (threshold_min <= 0) return;
   const auto idle_threshold_ms = threshold_min * 60'000;
 
-  // Role-exclusion list. comms and primary hold cross-thread continuity
+  // Role-exclusion list — comms and primary hold cross-thread continuity
   // (see clear-policy.md §6); they should only clear under explicit
   // human direction. Anything else is fair game.
-  static const std::set<std::string> kSkipRoles{"comms", "primary"};
-
   const std::string events_log = cfg_.state_dir + "/events.jsonl";
   auto agents = readAgents(events_log, {});
 
   for (const auto& [name, info] : agents) {
-    if (kSkipRoles.contains(name)) continue;
+    if (std::find(kNoClearRoles.begin(), kNoClearRoles.end(),
+                  std::string_view{name}) != kNoClearRoles.end()) continue;
     if (info.last.event != "Stop") continue;
     if ((now - info.last.ts_ms) < idle_threshold_ms) continue;
     if (now < auto_clear_next_allowed_ms_[name]) continue;

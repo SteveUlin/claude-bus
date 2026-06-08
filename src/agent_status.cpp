@@ -148,6 +148,24 @@ auto stateName(State s) -> std::string_view {
   return "?";
 }
 
+auto stateFrom(std::string_view label) -> State {
+  if (label == "NEW") return State::New;
+  if (label == "STARTING") return State::Starting;
+  if (label == "IDLE") return State::Idle;
+  if (label == "HAS_MAIL") return State::HasMail;
+  if (label == "WORKING") return State::Working;
+  if (label == "QUIET") return State::Quiet;
+  if (label == "NEEDS_NUDGE") return State::NeedsNudge;
+  if (label == "ORCHESTRATING") return State::Orchestrating;
+  if (label == "STUCK") return State::Stuck;
+  if (label == "COMPACTING") return State::Compacting;
+  if (label == "NEEDS_INPUT") return State::NeedsInput;
+  if (label == "BOOT_STUCK") return State::BootStuck;
+  if (label == "ENDED") return State::Ended;
+  if (label == "GONE") return State::Gone;
+  return State::New;
+}
+
 auto stateGlyph(State s) -> std::string_view {
   switch (s) {
     case State::New:
@@ -368,7 +386,7 @@ auto computeAxes(const AgentInfo& a, std::size_t unread,
   // ---- TUI axis (write-time only — never gates lifecycle state) ----
   if (pane == nullptr || !pane->ok) {
     ax.tui = TuiAxis::Unknown;
-  } else if (pane->mode == "INSERT") {
+  } else if (pane->isInsert()) {
     ax.tui = TuiAxis::Writable;
   } else if (pane->mode == "unknown") {
     ax.tui = TuiAxis::Unknown;
@@ -450,7 +468,7 @@ auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool {
   // preserved.
   if ((ax.process == ProcessAxis::Starting ||
        ax.process == ProcessAxis::Stuck) &&
-      pane != nullptr && pane->ok && pane->mode == "INSERT") {
+      pane != nullptr && pane->ok && pane->isInsert()) {
     return true;
   }
   return false;

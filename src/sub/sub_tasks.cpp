@@ -31,6 +31,7 @@
 #include "../signals.h"
 #include "../sub.h"
 #include "../task_model.h"
+#include "sub_util.h"
 
 #include <chrono>
 #include <csignal>
@@ -68,13 +69,6 @@ auto fmtAge(std::int64_t ms) -> std::string {
   return std::to_string(s / 86400) + "d";
 }
 
-auto truncate(std::string s, std::size_t w) -> std::string {
-  if (s.size() <= w) return s;
-  s.resize(w - 1);
-  s += "…";
-  return s;
-}
-
 // State-cell color — the glance signal. open=cyan (waiting), in_flight=
 // yellow (live), done=dim green, cancelled=dim.
 auto stateColor(TaskState st) -> std::string_view {
@@ -100,22 +94,6 @@ auto depsCell(const std::vector<std::string>& deps) -> std::string {
     if (!out.empty()) out += ",";
     out += d;
   }
-  return out;
-}
-
-// Split a comma-separated list, trimming surrounding whitespace.
-auto splitCsv(std::string_view s) -> std::vector<std::string> {
-  std::vector<std::string> out;
-  std::string cur;
-  for (char c : s) {
-    if (c == ',') {
-      if (!cur.empty()) out.push_back(std::move(cur));
-      cur.clear();
-    } else if (c != ' ' && c != '\t') {
-      cur += c;
-    }
-  }
-  if (!cur.empty()) out.push_back(std::move(cur));
   return out;
 }
 

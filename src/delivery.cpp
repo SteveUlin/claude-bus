@@ -209,12 +209,8 @@ auto Loop::load() -> void {
   // below on a fresh boot must not skip it). The observe/soft/on mode is a
   // runtime decision read here and handed to the actor; the engine never sees
   // it. Add future autonomous behaviors as additional registerActor calls.
-  const char* mode_env = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
-  const std::string mode = (mode_env != nullptr && *mode_env != '\0')
-                               ? mode_env
-                               : "observe";
   engine_.registerActor(
-      std::make_unique<RecoveryActor>(cfg_.state_dir, mode));
+      std::make_unique<RecoveryActor>(cfg_.state_dir, recoveryModeFromEnv()));
   // M2: the work-queue dispatcher. Inert until a work-queue topic exists (empty
   // queue_head → no assignments), so registering it is behavior-neutral on a
   // fleet with no work-queue. See docs/work-queue-dispatch.md.
@@ -1005,9 +1001,9 @@ auto Loop::maybeAutoClear() -> void {
   // cleared twice. In observe/off mode (the default) this standalone loop stays
   // the actor, so the default config keeps its exact behavior. See
   // docs/broker-auto-recovery.md §8.
-  if (const char* m = std::getenv("CLAUDE_BUS_AUTO_RECOVERY"); m != nullptr) {
-    const std::string_view mode{m};
-    if (mode == "soft" || mode == "on") return;
+  {
+    const auto rm = recoveryModeFromEnv();
+    if (rm == RecoveryMode::Soft || rm == RecoveryMode::On) return;
   }
 
   const auto now = nowMs();

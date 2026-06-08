@@ -17,6 +17,18 @@
 
 namespace bus::delivery {
 
+// ── Recovery mode (CLAUDE_BUS_AUTO_RECOVERY) ─────────────────────────────────
+// off / "0"    — no auto-recovery behavior (0 is a legacy alias for off).
+// observe      — log what would fire ("would-recover"); default.
+// soft         — log + act on non-destructive rows (R1 /clear).
+// on           — log + act on all rows including relaunch (Phase C).
+enum class RecoveryMode { Off, Observe, Soft, On };
+
+// Read CLAUDE_BUS_AUTO_RECOVERY once and return the mode. Returns Observe when
+// the variable is unset or empty. fatal() on an unrecognized non-empty value —
+// a misconfigured mode is a programmer/config error.
+auto recoveryModeFromEnv() -> RecoveryMode;
+
 // ── Ledger (§6.1, §7) ────────────────────────────────────────────────────
 // Per-agent recovery state, persisted to $STATE/recovery/<agent>.json so the
 // breaker survives a broker restart (a crash-looping agent that bounced the

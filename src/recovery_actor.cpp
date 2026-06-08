@@ -14,8 +14,8 @@
 
 namespace bus::delivery {
 
-RecoveryActor::RecoveryActor(std::string state_dir, std::string mode)
-    : state_dir_{std::move(state_dir)}, mode_{std::move(mode)} {
+RecoveryActor::RecoveryActor(std::string state_dir, RecoveryMode mode)
+    : state_dir_{std::move(state_dir)}, mode_{mode} {
   loadRecovery();
 }
 
@@ -30,12 +30,12 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
     -> std::vector<policy::PolicyAction> {
   std::vector<policy::PolicyAction> out;
 
-  if (mode_ == "off" || mode_ == "0") return out;
-  // "soft" enables the non-destructive rows (R1 clear); "on" additionally arms
-  // relaunch (Phase C). "observe" only logs would-recover and leaves the
+  if (mode_ == RecoveryMode::Off) return out;
+  // Soft enables the non-destructive rows (R1 clear); On additionally arms
+  // relaunch (Phase C). Observe only logs would-recover and leaves the
   // standalone loops (maybeAutoClear / doorbell) as the actors — so the default
   // config has ZERO behavior change.
-  const bool acting = (mode_ == "soft" || mode_ == "on");
+  const bool acting = (mode_ == RecoveryMode::Soft || mode_ == RecoveryMode::On);
   const auto rec_th = recoveryThresholds();
 
   const auto now = ctx.now_wall_ms;

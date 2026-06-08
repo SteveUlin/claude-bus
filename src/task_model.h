@@ -23,7 +23,13 @@
 #include <string_view>
 #include <vector>
 
+#include "trigger_feed.h"
+
 namespace bus {
+
+enum class TaskState { Open, InFlight, Done, Cancelled, Unknown };
+auto taskStateToStr(TaskState) -> std::string_view;
+auto taskStateFromStr(std::string_view) -> TaskState;
 
 // The open-task spine (task-model B): an append-log topic that holds the
 // task records minted at dispatch. The producer (`bus tasks open/close`)
@@ -36,7 +42,7 @@ inline constexpr std::string_view kTasksTopic = "tasks";
 // — the writer is a viewer and viewers die; a stale overlay is no-overlay).
 struct OwnerLive {
   bool valid{false};
-  std::string boundary;  // "done" | "idle" | "none"
+  Boundary boundary{Boundary::None};  // Done | Idle | None
   int ctx_pct{-1};
 };
 
@@ -51,7 +57,7 @@ struct Task {
   std::string id;     // Option A: synth "<owner>-<ts>"; Option B: dispatch-minted
   std::string owner;  // agent name
   std::string title;  // human-readable (done.task, or a dispatch title under B)
-  std::string state;  // "done" (A) | "open" | "in_flight" | "unknown" (B)
+  TaskState state{TaskState::Unknown};
   std::vector<std::string> deps;  // task ids; empty until B exists
   DoneClaim done_claim;           // ts<0 => none
   OwnerLive owner_live;           // valid=false => none

@@ -9,12 +9,12 @@ using namespace bus;
 
 namespace {
 
-auto mk(std::string id, std::string state, std::vector<std::string> deps = {})
-    -> Task {
+auto mk(std::string id, std::string_view state_str,
+        std::vector<std::string> deps = {}) -> Task {
   Task t;
   t.id = std::move(id);
   t.title = t.id;  // title == id keeps assertions readable
-  t.state = std::move(state);
+  t.state = taskStateFromStr(state_str);
   t.deps = std::move(deps);
   return t;
 }
@@ -113,4 +113,16 @@ TEST(graph_detects_cycle_and_terminates) {
   };
   const auto g = buildTaskGraph(tasks);
   CHECK(g.has_cycle);
+}
+
+// ─── taskStateFromStr / taskStateToStr roundtrip ───
+
+TEST(task_state_roundtrip_all_values) {
+  // Every known wire string survives a fromStr → toStr roundtrip unchanged.
+  for (std::string_view s : {"open", "in_flight", "done", "cancelled"}) {
+    CHECK_EQ(taskStateToStr(taskStateFromStr(s)), s);
+  }
+  // Unknown string → Unknown enum → "unknown" wire string.
+  CHECK_EQ(taskStateFromStr("bogus"), TaskState::Unknown);
+  CHECK_EQ(taskStateToStr(TaskState::Unknown), std::string_view{"unknown"});
 }

@@ -77,10 +77,10 @@ auto truncate(std::string s, std::size_t w) -> std::string {
 
 // State-cell color — the glance signal. open=cyan (waiting), in_flight=
 // yellow (live), done=dim green, cancelled=dim.
-auto stateColor(std::string_view st) -> std::string_view {
-  if (st == "in_flight") return kYellow;
-  if (st == "open") return kCyan;
-  if (st == "done") return kGreen;
+auto stateColor(TaskState st) -> std::string_view {
+  if (st == TaskState::InFlight) return kYellow;
+  if (st == TaskState::Open)     return kCyan;
+  if (st == TaskState::Done)     return kGreen;
   return kDim;  // cancelled / unknown
 }
 
@@ -88,7 +88,7 @@ auto stateColor(std::string_view st) -> std::string_view {
 // the task view to the P3 trigger feed — same glance shows who's free.
 auto liveCell(const OwnerLive& l) -> std::string {
   if (!l.valid) return std::string{kDim} + "—" + std::string{kReset};
-  std::string out{l.boundary};
+  std::string out{std::string{boundaryStr(l.boundary)}};
   if (l.ctx_pct >= 0) out += " " + std::to_string(l.ctx_pct) + "%";
   return out;
 }
@@ -293,9 +293,9 @@ auto emitTable(const std::set<std::string>& only, bool live) -> void {
     const std::string age =
         t.done_claim.ts >= 0 ? fmtAge(now - t.done_claim.ts) : "—";
     std::println("{:<10} {}{:<10}{} {:<34} {:<10} {:<7} {}{}", t.owner,
-                 stateColor(t.state), t.state, kReset, truncate(t.title, 34),
-                 truncate(depsCell(t.deps), 10), age, liveCell(t.owner_live),
-                 eol);
+                 stateColor(t.state), taskStateToStr(t.state), kReset,
+                 truncate(t.title, 34), truncate(depsCell(t.deps), 10), age,
+                 liveCell(t.owner_live), eol);
   }
   std::println("{}", eol);
   std::println("{}{} task(s) — open/in_flight from the `tasks` spine, done "
@@ -311,11 +311,11 @@ auto tasksView(std::span<const char* const> args) -> int {
 }
 
 // Compact per-state mark for the graph view.
-auto stateMark(std::string_view st) -> std::string_view {
-  if (st == "done") return "✓";
-  if (st == "in_flight") return "◐";
-  if (st == "cancelled") return "✗";
-  return "○";  // open
+auto stateMark(TaskState st) -> std::string_view {
+  if (st == TaskState::Done)      return "✓";
+  if (st == TaskState::InFlight)  return "◐";
+  if (st == TaskState::Cancelled) return "✗";
+  return "○";  // open / unknown
 }
 
 // `bus tasks graph` — the critical-path view, structural half (deps DAG).
@@ -335,8 +335,8 @@ auto tasksGraph(std::span<const char* const> args) -> int {
   for (const auto& t : tasks) by_id.emplace(t.id, &t);
   auto label = [&](const std::string& id) -> std::string {
     auto it = by_id.find(id);
-    const std::string_view st = it != by_id.end() ? std::string_view{it->second->state}
-                                                  : std::string_view{"open"};
+    const TaskState st =
+        it != by_id.end() ? it->second->state : TaskState::Open;
     std::string ttl = (it != by_id.end() && !it->second->title.empty())
                           ? truncate(it->second->title, 24)
                           : id;
@@ -374,7 +374,7 @@ auto tasksGraph(std::span<const char* const> args) -> int {
       if (it != by_id.end())
         for (const auto& d : it->second->deps) {
           auto dit = by_id.find(d);
-          if (dit == by_id.end() || dit->second->state != "done") {
+          if (dit == by_id.end() || dit->second->state != TaskState::Done) {
             if (!unmet.empty()) unmet += ", ";
             unmet += dit != by_id.end() && !dit->second->title.empty()
                          ? truncate(dit->second->title, 18)

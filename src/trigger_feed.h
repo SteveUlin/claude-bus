@@ -28,6 +28,8 @@ namespace bus {
 
 enum class Boundary { Done, Idle, None };
 auto boundaryStr(Boundary b) -> std::string_view;
+// Inverse bridge for deserialization ("done"|"idle"|"none"; unknown → None).
+auto stringToBoundary(std::string_view s) -> Boundary;
 
 // Glance recommendation: ACT (urgent + boundary != none) / WAIT (urgent +
 // mid-turn) / OK (not urgent).

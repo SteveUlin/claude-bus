@@ -29,9 +29,9 @@ namespace bus::delivery {
 class RecoveryActor : public policy::PolicyActor {
  public:
   // state_dir backs the ledger ($STATE/recovery/<agent>.json); mode is the
-  // resolved CLAUDE_BUS_AUTO_RECOVERY value (observe | soft | on | off). Loads
-  // the ledger on construction (a boot-id mismatch resets the windows).
-  RecoveryActor(std::string state_dir, std::string mode);
+  // resolved CLAUDE_BUS_AUTO_RECOVERY value. Loads the ledger on construction
+  // (a boot-id mismatch resets the windows).
+  RecoveryActor(std::string state_dir, RecoveryMode mode);
 
   auto name() const -> std::string_view override { return "recovery"; }
   auto evaluate(const policy::PolicyContext& ctx)
@@ -42,7 +42,7 @@ class RecoveryActor : public policy::PolicyActor {
 
  private:
   std::string state_dir_;
-  std::string mode_;  // observe | soft | on | off
+  RecoveryMode mode_{RecoveryMode::Observe};
 
   // Recovery ledger (per agent), loaded on boot, persisted on mutation.
   std::map<std::string, RecoveryLedger> recovery_;

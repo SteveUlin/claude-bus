@@ -87,7 +87,7 @@ TEST(recovery_actor_observe_flags_wedged_not_healthy) {
   std::filesystem::remove_all("/tmp/bus_test_policy_observe");
   setenv("CLAUDE_BUS_WEDGE_BUDGET_MS", "1000", 1);
   const std::int64_t now = 1'000'000;
-  RecoveryActor actor{"/tmp/bus_test_policy_observe", "observe"};
+  RecoveryActor actor{"/tmp/bus_test_policy_observe", RecoveryMode::Observe};
 
   // wedged: looks busy (Working) + transcript stale + pane not awaiting input.
   AgentInfo wedged = mkInfo("PreToolUse", now - 1000);
@@ -127,7 +127,7 @@ TEST(recovery_actor_quiet_routes_to_dropped_turn_nudge) {
   std::filesystem::remove_all("/tmp/bus_test_policy_quiet");
   setenv("CLAUDE_BUS_WEDGE_BUDGET_MS", "1000", 1);
   const std::int64_t now = 1'000'000;
-  RecoveryActor actor{"/tmp/bus_test_policy_quiet", "observe"};
+  RecoveryActor actor{"/tmp/bus_test_policy_quiet", RecoveryMode::Observe};
 
   // A Quiet agent (stale, NOTHING in flight — a dropped/silent turn) with a
   // not-input-ready pane → the dropped-turn row → NUDGE, not relaunch. The
@@ -156,7 +156,7 @@ TEST(recovery_actor_soft_clears_idle) {
   setenv("CLAUDE_BUS_AUTO_CLEAR_MIN", "1", 1);      // idle_clear = 60 s
   setenv("CLAUDE_BUS_WEDGE_BUDGET_MS", "1000", 1);  // keep R4 off here
   const std::int64_t now = 2'000'000;
-  RecoveryActor actor{"/tmp/bus_test_policy_soft", "soft"};
+  RecoveryActor actor{"/tmp/bus_test_policy_soft", RecoveryMode::Soft};
 
   // alice: 2 min idle at a ready Stop prompt, no mail, no in-flight → R1 clear.
   AgentInfo idle = mkInfo("Stop", now - 120'000);

@@ -6,13 +6,36 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <format>
 #include <fstream>
 #include <map>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <vector>
 
 namespace bus::delivery {
+
+[[noreturn]] static auto fatal(std::string_view msg) -> void {
+  std::string s = "bus::recovery fatal: ";
+  s += msg;
+  s += '\n';
+  [[maybe_unused]] auto _ = ::write(STDERR_FILENO, s.data(), s.size());
+  std::abort();
+}
+
+auto recoveryModeFromEnv() -> RecoveryMode {
+  const char* e = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
+  if (e == nullptr || *e == '\0') return RecoveryMode::Observe;
+  const std::string_view v{e};
+  if (v == "off" || v == "0") return RecoveryMode::Off;
+  if (v == "observe")         return RecoveryMode::Observe;
+  if (v == "soft")            return RecoveryMode::Soft;
+  if (v == "on")              return RecoveryMode::On;
+  fatal(std::format("unrecognized CLAUDE_BUS_AUTO_RECOVERY=\"{}\" "
+                    "(valid: off, 0, observe, soft, on)", v));
+}
 
 // ── monotonic clock + boot id (§6.1) ──────────────────────────────────────
 

@@ -86,6 +86,12 @@ auto boundaryStr(Boundary b) -> std::string_view {
   return "none";
 }
 
+auto stringToBoundary(std::string_view s) -> Boundary {
+  if (s == "done") return Boundary::Done;
+  if (s == "idle") return Boundary::Idle;
+  return Boundary::None;
+}
+
 auto recOf(const Trig& t) -> Rec {
   if (t.pct < kUrgentPct) return Rec::Ok;          // includes pct<0 unknown
   return t.boundary == Boundary::None ? Rec::Wait : Rec::Act;

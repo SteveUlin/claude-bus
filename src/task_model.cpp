@@ -7,6 +7,7 @@
 #include "journal.h"
 #include "json_min.h"
 #include "state_paths.h"
+#include "trigger_feed.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -16,6 +17,25 @@
 #include <utility>
 
 namespace bus {
+
+auto taskStateToStr(TaskState s) -> std::string_view {
+  switch (s) {
+    case TaskState::Open:      return "open";
+    case TaskState::InFlight:  return "in_flight";
+    case TaskState::Done:      return "done";
+    case TaskState::Cancelled: return "cancelled";
+    case TaskState::Unknown:   return "unknown";
+  }
+  return "unknown";
+}
+
+auto taskStateFromStr(std::string_view s) -> TaskState {
+  if (s == "open")       return TaskState::Open;
+  if (s == "in_flight")  return TaskState::InFlight;
+  if (s == "done")       return TaskState::Done;
+  if (s == "cancelled")  return TaskState::Cancelled;
+  return TaskState::Unknown;
+}
 
 namespace {
 
@@ -40,7 +60,7 @@ auto ownerLiveFor(std::string_view agent, std::int64_t now) -> OwnerLive {
   const auto computed = v->getOrInt("computed_at_ms", -1);
   if (computed < 0 || (now - computed) > kOwnerLiveStaleMs) return out;
   if (const auto* safety = v->get("safety"); safety != nullptr)
-    out.boundary = safety->getOrString("boundary");
+    out.boundary = stringToBoundary(safety->getOrString("boundary"));
   if (const auto* urgency = v->get("urgency"); urgency != nullptr)
     out.ctx_pct = static_cast<int>(urgency->getOrInt("ctx_fill_pct", -1));
   out.valid = true;
@@ -152,18 +172,18 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
   for (auto& [id, t] : by_id) {
     t.owner_live = liveFor(t.owner);
     if (t.done_claim.ts >= 0)
-      t.state = "done";
+      t.state = TaskState::Done;
     else if (cancelled.contains(id))
-      t.state = "cancelled";
-    else if (t.owner_live.valid && t.owner_live.boundary == "none")
-      t.state = "in_flight";
+      t.state = TaskState::Cancelled;
+    else if (t.owner_live.valid && t.owner_live.boundary == Boundary::None)
+      t.state = TaskState::InFlight;
     else
-      t.state = "open";
+      t.state = TaskState::Open;
     tasks.push_back(std::move(t));
   }
   for (auto& t : anon_done) {
     t.owner_live = liveFor(t.owner);
-    t.state = "done";
+    t.state = TaskState::Done;
     tasks.push_back(std::move(t));
   }
 
@@ -174,9 +194,9 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
   // within a rank, newest first (mint ts for not-done, completion ts for
   // done) so the cockpit reads top-down by urgency then recency.
   auto rank = [](const Task& t) {
-    if (t.state == "in_flight") return 0;
-    if (t.state == "open") return 1;
-    if (t.state == "done") return 2;
+    if (t.state == TaskState::InFlight) return 0;
+    if (t.state == TaskState::Open)     return 1;
+    if (t.state == TaskState::Done)     return 2;
     return 3;  // cancelled / unknown
   };
   auto sortTs = [&](const Task& t) {
@@ -260,18 +280,18 @@ auto buildTaskGraph(const std::vector<Task>& tasks) -> TaskGraph {
     for (const auto& d : t.deps)
       if (!by_id.contains(d)) g.dangling.push_back({t.id, d});
 
-    if (t.state != "open" && t.state != "in_flight") continue;
+    if (t.state != TaskState::Open && t.state != TaskState::InFlight) continue;
     bool deps_met = true;
     for (const auto& d : t.deps) {
       auto it = by_id.find(d);
-      if (it == by_id.end() || it->second->state != "done") {
+      if (it == by_id.end() || it->second->state != TaskState::Done) {
         deps_met = false;
         break;
       }
     }
     if (!deps_met) {
       g.blocked.push_back(t.id);  // open OR in_flight, waiting on a dep
-    } else if (t.state == "open") {
+    } else if (t.state == TaskState::Open) {
       g.ready.push_back(t.id);  // not started + deps satisfied = actionable
     }
     // in_flight + deps_met → already running; shown in the chain, no bucket.

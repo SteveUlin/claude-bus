@@ -180,16 +180,28 @@ server + queue. `rpc.h` either splits to match or keeps both declarations.
 god-objects (`delivery::Loop`, the `runBroker` closure). The honest fix is **not**
 a file shuffle — it's the responsibility split already designed in
 [broker-seam-redesign.md](broker-seam-redesign.md): **Log** (= `bus::Journal`,
-landed), **Router**, **Transport**, **Readers**, **Policy**, **Daemon** — each a
-real class with its own `.h`/`.cpp` and a minimal interface. That doc is exactly
-"true logical separation," and it's already gated on your scope call.
+landed), **Router**, **Readers**, **Policy**, **Daemon** — each a real class
+with its own `.h`/`.cpp` and a minimal interface. That doc is the authority for
+this elephant; defer to its sequencing, don't re-plan it here.
 
-**Recommendation:** execute it incrementally rather than re-plan it. The
-cleanest first cut is **Transport** — a leaf with a one-line interface
-(`deliver(record) -> {Delivered | Deferred}`) and no dependents — extractable
-without touching the cursor/ack invariant. (B2's "hoist `getOrOpenLog` /
-`recordToJson` out of the closure" remains a fine low-risk warm-up on the broker
-side; it survives the redesign because the Daemon still needs them.)
+**⚠ Transport is NOT a cut — settled at the gate.** An earlier draft of this
+doc listed "Transport first." That was wrong: broker-seam-redesign **§6 OUTCOME**
+(2026-06-04) examined it and the collapse-to-if tripwire fired. The two-arm fork
+— `isOffTty()` selector + `deliverInline`→`sendToPaneSafe` (TTY arm) + "don't
+push, the drain RPC pulls" (off-TTY arm) + `maybeWakeIdleOffTty` (doorbell) — is
+**already factored** in `delivery.cpp`. A `Transport` class would be *ceremony
+over an existing fork* — exactly the body-scattering this doc's principle
+rejects. The seam's value was delivered as **documentation**
+([broker-spec §"Delivery model"](broker-spec.md)), and that doc is accurate
+against the current code. Do not extract it.
+
+**The real `delivery.cpp` cuts** are the two *endorsed* seam steps — **trim→Log**
+(retention math behind the Log boundary so offsets stop shifting mid-dispatch)
+and **scanEvents→Router.onAck** (split the parse-vs-ack weld). Both are
+behaviorally neutral but **touch the at-least-once / ack / offset kernel**, are
+gated on P2, and carry the design's "never big-bang; broker delivers mail at
+every commit" rule. That's supervised kernel work — schedule it deliberately,
+not as a solo autonomous pass.
 
 The earlier "mechanical TU split of `Loop` across `delivery_*.cpp`" idea is
 **dropped** — it's body-scattering, the thing this doc's principle rejects.
@@ -212,12 +224,16 @@ The earlier "mechanical TU split of `Loop` across `delivery_*.cpp`" idea is
 
 ## Recommended order
 
-1. **M1** (`process`) — deletes the most duplication; unblocks pane + lifecycle.
-2. **M4** (`pane_parse`) — unlocks unit tests on the brittle parse logic.
-3. **M2** (`peer_registry`) — real domain type; de-dups broker too.
-4. **M3** (extend C2's `time_util`) — fold in when C2 lands.
-5. **Transport** extraction — the first real elephant cut, per seam-redesign.
-6. **M5 / M6** — opportunistic.
+1. **M1** (`process`) — deletes the most duplication; unblocks pane + lifecycle. **[LANDED `5c462d4f`]**
+2. **M4** (`pane_parse`) — unlocks unit tests on the brittle parse logic. **[LANDED `1b1c491e`]**
+3. **M2** (`peer_registry`) — real domain type; de-dups broker too. **[LANDED `568a8799`]**
+4. **M5** (`context_stats`) — CTX reader out of the monitor render. **[LANDED `d53b4589`]**
+5. **M3** (extend C2's `time_util`) — blocked: needs C2 (`time_util.h`) to land first (lives in structural-review.md).
+6. **M6** (`rpc_client`) — opportunistic, low value.
 
-Each step is a new header (a new boundary), every existing call site becomes a
-client of it, and the build stays green + force-verified per commit.
+Not on this list: the **delivery.cpp / broker.cpp elephants** belong to
+broker-seam-redesign.md (kernel-touching, gated, supervised), and **Transport is
+a settled no-extract** — see the elephants section above.
+
+Each landed step is a new header (a new boundary), every existing call site
+became a client of it, and the build stayed green + force-verified per commit.

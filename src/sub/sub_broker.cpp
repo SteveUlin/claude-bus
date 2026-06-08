@@ -65,7 +65,7 @@ auto brokerGc() -> int {
   const auto n_reaped = (reaped && reaped->isArray()) ? reaped->asArray().size() : 0;
   if (reaped && reaped->isArray()) {
     for (const auto& t : reaped->asArray()) {
-      std::println("reaped  {}", t.asString());
+      if (t.isString()) std::println("reaped  {}", t.asString());
     }
   }
   if (skipped && skipped->isArray()) {

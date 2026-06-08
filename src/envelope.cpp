@@ -1,6 +1,7 @@
 #include "envelope.h"
 
-#include <cassert>
+#include "types.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -29,11 +30,11 @@ auto putBytes(std::vector<std::byte>& b, std::string_view s) -> void {
 
 auto encodeEnvelope(const Envelope& env) -> std::vector<std::byte> {
   // sender and protocol are length-prefixed with a u8 field — 255 bytes max.
-  // Callers must not exceed this limit; silent truncation produces a corrupt
-  // on-wire record that decodes with a shortened sender/protocol.
-  assert(env.sender.size() <= 0xFF && "encodeEnvelope: sender exceeds 255 bytes");
-  assert(env.protocol.size() <= 0xFF &&
-         "encodeEnvelope: protocol exceeds 255 bytes");
+  // Callers must not exceed this limit; violating this is a programmer error.
+  if (env.sender.size() > 0xFF)
+    bus::fatal("encodeEnvelope: sender exceeds 255 bytes");
+  if (env.protocol.size() > 0xFF)
+    bus::fatal("encodeEnvelope: protocol exceeds 255 bytes");
   const auto slen = static_cast<std::uint8_t>(env.sender.size());
   const auto plen = static_cast<std::uint8_t>(env.protocol.size());
 

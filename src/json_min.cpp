@@ -1,5 +1,7 @@
 #include "json_min.h"
 
+#include "types.h"
+
 #include <cctype>
 #include <charconv>
 #include <stdexcept>
@@ -111,7 +113,7 @@ class Parser {
       return std::unexpected{"expected null"};
     }
     pos_ += 4;
-    return Value::null_();
+    return Value{};
   }
 
   auto parseBool() -> std::expected<Value, std::string> {
@@ -260,11 +262,6 @@ class Parser {
 
 }  // namespace
 
-auto Value::null_() -> Value {
-  Value v;
-  v.type_ = Type::Null;
-  return v;
-}
 auto Value::from(bool b) -> Value {
   Value v;
   v.type_ = Type::Bool;
@@ -297,15 +294,45 @@ auto Value::fromObject(std::map<std::string, Value> m) -> Value {
   return out;
 }
 
-auto Value::asBool() const -> bool { return b_; }
-auto Value::asInt() const -> std::int64_t { return i_; }
-auto Value::asString() const -> const std::string& { return s_; }
-auto Value::asArray() const -> const std::vector<Value>& { return *arr_; }
+namespace {
+auto typeStr(Type t) -> std::string_view {
+  switch (t) {
+    case Type::Null:   return "null";
+    case Type::Bool:   return "bool";
+    case Type::Int:    return "int";
+    case Type::String: return "string";
+    case Type::Array:  return "array";
+    case Type::Object: return "object";
+  }
+  return "unknown";
+}
+}  // namespace
+
+auto Value::asBool() const -> bool {
+  if (type_ != Type::Bool)
+    bus::fatal(std::string{"json::Value::asBool on "} + std::string{typeStr(type_)});
+  return b_;
+}
+auto Value::asInt() const -> std::int64_t {
+  if (type_ != Type::Int)
+    bus::fatal(std::string{"json::Value::asInt on "} + std::string{typeStr(type_)});
+  return i_;
+}
+auto Value::asString() const -> const std::string& {
+  if (type_ != Type::String)
+    bus::fatal(std::string{"json::Value::asString on "} + std::string{typeStr(type_)});
+  return s_;
+}
+auto Value::asArray() const -> const std::vector<Value>& {
+  if (type_ != Type::Array)
+    bus::fatal(std::string{"json::Value::asArray on "} + std::string{typeStr(type_)});
+  return *arr_;
+}
 auto Value::asObject() const -> const std::map<std::string, Value>& {
+  if (type_ != Type::Object)
+    bus::fatal(std::string{"json::Value::asObject on "} + std::string{typeStr(type_)});
   return *obj_;
 }
-auto Value::asArray() -> std::vector<Value>& { return *arr_; }
-auto Value::asObject() -> std::map<std::string, Value>& { return *obj_; }
 
 auto Value::get(std::string_view key) const -> const Value* {
   if (type_ != Type::Object || !obj_) return nullptr;

@@ -771,7 +771,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (!r) return rpc::errorResponse(r.error().message);
     if (r->empty()) {
       std::map<std::string, json::Value> resp;
-      resp.insert({"message", json::Value::null_()});
+      resp.insert({"message", json::Value{}});
       return rpc::okResponse(std::move(resp));
     }
     const auto& rec = r->front();
@@ -783,7 +783,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // re-dispatch).
     if (is_agent_inbox && dl_ref.inFlight().contains(rec.id)) {
       std::map<std::string, json::Value> resp;
-      resp.insert({"message", json::Value::null_()});
+      resp.insert({"message", json::Value{}});
       return rpc::okResponse(std::move(resp));
     }
 

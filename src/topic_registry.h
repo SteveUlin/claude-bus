@@ -62,7 +62,7 @@ auto topicKindToStr(TopicKind) -> std::string_view;
 struct TopicConfig {
   std::string name;
   TopicKind kind{TopicKind::Unknown};
-  json::Value kind_config{json::Value::null_()};
+  json::Value kind_config{};
   TopicKindConfig parsed_config;  // free-form per-kind blob
 
   // Serialize / deserialize for topics.json.

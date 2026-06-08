@@ -3,6 +3,8 @@
 
 #include "recovery.h"
 
+#include "types.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -17,14 +19,6 @@
 
 namespace bus::delivery {
 
-[[noreturn]] static auto fatal(std::string_view msg) -> void {
-  std::string s = "bus::recovery fatal: ";
-  s += msg;
-  s += '\n';
-  [[maybe_unused]] auto _ = ::write(STDERR_FILENO, s.data(), s.size());
-  std::abort();
-}
-
 auto recoveryModeFromEnv() -> RecoveryMode {
   const char* e = std::getenv("CLAUDE_BUS_AUTO_RECOVERY");
   if (e == nullptr || *e == '\0') return RecoveryMode::Observe;
@@ -33,8 +27,8 @@ auto recoveryModeFromEnv() -> RecoveryMode {
   if (v == "observe")         return RecoveryMode::Observe;
   if (v == "soft")            return RecoveryMode::Soft;
   if (v == "on")              return RecoveryMode::On;
-  fatal(std::format("unrecognized CLAUDE_BUS_AUTO_RECOVERY=\"{}\" "
-                    "(valid: off, 0, observe, soft, on)", v));
+  bus::fatal(std::format("unrecognized CLAUDE_BUS_AUTO_RECOVERY=\"{}\" "
+                         "(valid: off, 0, observe, soft, on)", v));
 }
 
 // ── monotonic clock + boot id (§6.1) ──────────────────────────────────────
@@ -112,7 +106,8 @@ auto ledgerFromJson(const json::Value& v) -> RecoveryLedger {
   }
   if (const auto* rl = v.get("relaunch_mono_ms");
       rl != nullptr && rl->isArray()) {
-    for (const auto& t : rl->asArray()) l.relaunch_mono_ms.push_back(t.asInt());
+    for (const auto& t : rl->asArray())
+      if (t.isInt()) l.relaunch_mono_ms.push_back(t.asInt());
   }
   l.breaker = breakerFromStr(v.getOrString("breaker", "closed"));
   l.open_until_mono_ms = v.getOrInt("open_until_mono_ms", 0);

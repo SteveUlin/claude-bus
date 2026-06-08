@@ -18,15 +18,6 @@ namespace fs = std::filesystem;
 
 namespace bus {
 
-// ── Fatal error (programmer error; always crashes) ────────────────────────
-
-[[noreturn]] static auto fatal(std::string_view msg) -> void {
-  std::string s = "bus::CursorStore fatal: ";
-  s += msg;
-  s += '\n';
-  [[maybe_unused]] auto _ = ::write(STDERR_FILENO, s.data(), s.size());
-  std::abort();
-}
 
 namespace {
 

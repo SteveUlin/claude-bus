@@ -20,7 +20,6 @@ enum class Type { Null, Bool, Int, String, Array, Object };
 class Value {
  public:
   Value() = default;
-  static auto null_() -> Value;
   static auto from(bool b) -> Value;
   static auto from(std::int64_t i) -> Value;
   static auto from(std::string s) -> Value;
@@ -41,8 +40,6 @@ class Value {
   auto asString() const -> const std::string&;
   auto asArray() const -> const std::vector<Value>&;
   auto asObject() const -> const std::map<std::string, Value>&;
-  auto asArray() -> std::vector<Value>&;
-  auto asObject() -> std::map<std::string, Value>&;
 
   // Object accessors. `get(key)` returns nullptr on miss. `getOr*`
   // returns the value or the default when key absent / wrong type.

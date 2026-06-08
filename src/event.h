@@ -55,7 +55,7 @@ struct Event {
   // Escape hatch: the parsed payload object (null when absent), for the
   // rare field no struct member covers. Keeps the common path typed
   // without forcing a member per key.
-  json::Value payload{json::Value::null_()};
+  json::Value payload{};
 };
 
 // Parse one events.jsonl line. nullopt when the line isn't a JSON object.

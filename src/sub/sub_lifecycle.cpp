@@ -8,6 +8,7 @@
 #include "../sub.h"
 #include "../broker.h"
 #include "../json_min.h"
+#include "../peer_registry.h"
 #include "../process.h"
 #include "../rpc.h"
 #include "../state_paths.h"
@@ -232,18 +233,10 @@ layout {{
   // session continuity is free (agent-launch --continue resumes by
   // name+workspace). profile MUST persist or a restore-peers relaunch silently
   // demotes an orchestrator back to the default (worker) envelope.
-  {
-    namespace fs = std::filesystem;
-    const std::string reg_dir = stateRoot() + "/dynamic-peers";
-    std::error_code ec;
-    fs::create_directories(reg_dir, ec);
-    std::ofstream out{reg_dir + "/" + name};
-    if (out) {
-      out << "role=" << role << "\n"
-          << "project_dir=" << project_dir << "\n"
-          << "profile=" << profile << "\n";
-    }
-  }
+  PeerRegistry{stateRoot()}.add(Peer{.name = name,
+                                     .role = role,
+                                     .project_dir = project_dir,
+                                     .profile = profile});
 
   // Silent success used to leave callers unsure whether anything
   // happened. One-line confirmation on stdout matches the rest of the
@@ -259,33 +252,25 @@ layout {{
 // the peer's prior session (agent-launch --continue keys on name+workspace),
 // bringing back its in-progress context, not a fresh agent.
 auto subRestorePeers(std::span<const char* const>) -> int {
-  namespace fs = std::filesystem;
-  const std::string reg_dir = stateRoot() + "/dynamic-peers";
-  std::error_code ec;
-  if (!fs::exists(reg_dir, ec)) {
+  const auto peers = PeerRegistry{stateRoot()}.list();
+  if (peers.empty()) {
     std::println("restore-peers: no dynamic peers registered");
     return 0;
   }
   int registered = 0, spawned = 0;
-  for (const auto& entry : fs::directory_iterator(reg_dir, ec)) {
-    if (!entry.is_regular_file()) continue;
-    const std::string name = entry.path().filename().string();
-    std::string role, project_dir, profile, line;
-    std::ifstream in{entry.path()};
-    while (std::getline(in, line)) {
-      if (line.starts_with("role=")) role = line.substr(5);
-      else if (line.starts_with("project_dir=")) project_dir = line.substr(12);
-      else if (line.starts_with("profile=")) profile = line.substr(8);
-    }
+  for (const auto& p : peers) {
     ++registered;
     std::vector<std::string> a;
-    if (!role.empty()) { a.emplace_back("--role"); a.push_back(role); }
-    if (!project_dir.empty()) {
+    if (!p.role.empty()) { a.emplace_back("--role"); a.push_back(p.role); }
+    if (!p.project_dir.empty()) {
       a.emplace_back("--project-dir");
-      a.push_back(project_dir);
+      a.push_back(p.project_dir);
     }
-    if (!profile.empty()) { a.emplace_back("--profile"); a.push_back(profile); }
-    a.push_back(name);
+    if (!p.profile.empty()) {
+      a.emplace_back("--profile");
+      a.push_back(p.profile);
+    }
+    a.push_back(p.name);
     std::vector<const char*> argv;
     argv.reserve(a.size());
     for (const auto& s : a) argv.push_back(s.c_str());
@@ -308,9 +293,7 @@ auto subDespawn(std::span<const char* const> args) -> int {
     return 2;
   }
   const std::string name{args[0]};
-  namespace fs = std::filesystem;
-  std::error_code ec;
-  const bool pruned = fs::remove(stateRoot() + "/dynamic-peers/" + name, ec);
+  const bool pruned = PeerRegistry{stateRoot()}.remove(name);
   // Close the tab only if it exists AND we can focus it first — gating the
   // close on go-to-tab-name succeeding avoids ever closing the wrong (merely
   // focused) tab if this peer's tab already vanished.

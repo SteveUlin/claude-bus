@@ -74,7 +74,11 @@ program against it.
 **Blast:** 4 open-coded sites → method calls. Folds in C4's `dynamicPeersPath()`
 concern — the registry owns the path, so C4 doesn't need an accessor for it.
 
-**Status:** [ ] proposed
+**Status:** [x] LANDED — `bus::PeerRegistry` + `struct Peer` in `bus_core`,
+`tests/unit/test_peer_registry.cpp` (4 cases). All 4 sites (3 in sub_lifecycle,
+broker GC) now program against `add`/`remove`/`list`. Minor: `restore-peers` on
+an empty-but-present dir now prints "no dynamic peers registered" (was a 0/0
+line) — `list()` collapses absent and empty.
 
 ---
 

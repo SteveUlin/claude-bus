@@ -6,6 +6,7 @@
 #include "delivery.h"
 #include "json_min.h"
 #include "pane.h"  // paneState() — was transitive via agent_status.h.
+#include "peer_registry.h"
 #include "rpc.h"
 #include "state_paths.h"
 #include "envelope.h"
@@ -1071,9 +1072,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
           live.insert(e.path().stem().string());
         }
       }
-      for (const auto& e :
-           fs::directory_iterator(cfg.state_dir + "/dynamic-peers", ec)) {
-        live.insert(e.path().filename().string());
+      for (const auto& p : PeerRegistry{cfg.state_dir}.list()) {
+        live.insert(p.name);
       }
     }
 

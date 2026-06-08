@@ -16,6 +16,11 @@ Driven as separate build-green, force-verified commits on `main`. Skip these in 
 - **D3 + D4** — `emitAudit()` + `isAgentIdle()` private helpers in `delivery::Loop` (`fcf9f081`)
 - **JN3** — `okResponse`/`errorResponse` moved from `bus::json` to `bus::rpc`, 42 sites (`ad87752a`)
 - **C5** — typed enums for `TaskState` / `Boundary` / `RecoveryMode` (`91a2fb57`)
+- **C3/JN1/JN2/JN4/J4/F2** — crash-contract: one shared `bus::fatal`, json_min `as*` fatal-on-misuse, drop dead overloads + `null_()`, envelope `assert`→`fatal`, delete `Error()` default ctor (`f3d5711b`)
+- **(C1 follow-up)** — fixed a C1 topic-create regression `bus-itest` had masked; integration suite now **45/45** (`9bde27a9`)
+- **B1** — broker caches a `{Journal, CursorStore}` pair per topic; 7 ephemeral cursor re-opens consolidated (`6e44196d`)
+- **B3/B7/D6/DM2/CL4** — decouple `dispatchTui` from `BrokerConfig`/rpc-singleton, `continuitySinceMs` private, `isValidTopicName` anon-ns, `bus msg` exit 2 (`0f343cfb`)
+- **P2/P3/CL3/PS1/PS3** — typed pair key, hoist `kNoClearRoles`, `splitCsv`/`truncate` util, PaneState predicates, `stateFrom` inverse (`32879f10`)
 
 Also landed earlier in the session (journal kernel): in-place trim removed (offsets immutable), `retention_ms` dropped, read-truncation surfaced (`truncated_at`), per-file UUID header (wire v7, tag from UUID).
 

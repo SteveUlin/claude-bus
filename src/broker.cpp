@@ -396,11 +396,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   rpc::Server server{cfg.socket_path};
 
   server.on("ping", [](const json::Value&) {
-    return json::okResponse();
+    return rpc::okResponse();
   });
   server.on("stop", [](const json::Value&) {
     rpc::Server::requestStop();
-    return json::okResponse();
+    return rpc::okResponse();
   });
   server.on("info", [&](const json::Value&) {
     std::map<std::string, json::Value> m;
@@ -418,7 +418,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     m.insert({"topic_count",
               json::Value::from(
                   static_cast<std::int64_t>(registry.list().size()))});
-    return json::okResponse(std::move(m));
+    return rpc::okResponse(std::move(m));
   });
 
   server.on("topic_create", [&registry](const json::Value& req) {
@@ -429,9 +429,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       tc.kind_config = *kc;
     }
     if (auto r = registry.create(std::move(tc)); !r) {
-      return json::errorResponse(r.error().message);
+      return rpc::errorResponse(r.error().message);
     }
-    return json::okResponse();
+    return rpc::okResponse();
   });
 
   server.on("topic_list", [&registry](const json::Value&) {
@@ -439,19 +439,19 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     for (const auto& cfg : registry.list()) arr.push_back(cfg.toJson());
     std::map<std::string, json::Value> m;
     m.insert({"topics", json::Value::fromArray(std::move(arr))});
-    return json::okResponse(std::move(m));
+    return rpc::okResponse(std::move(m));
   });
 
   server.on("topic_show", [&registry](const json::Value& req) {
     const auto name = req.getOrString("name");
-    if (name.empty()) return json::errorResponse("missing name");
+    if (name.empty()) return rpc::errorResponse("missing name");
     const auto* cfg = registry.get(name);
     if (cfg == nullptr) {
-      return json::errorResponse(std::string{"no such topic: "} + name);
+      return rpc::errorResponse(std::string{"no such topic: "} + name);
     }
     std::map<std::string, json::Value> m;
     m.insert({"topic", cfg->toJson()});
-    return json::okResponse(std::move(m));
+    return rpc::okResponse(std::move(m));
   });
 
   // -- enqueue / peek / fetch -------------------------------------
@@ -474,9 +474,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
   server.on("enqueue", [&](const json::Value& req) {
     const auto name = req.getOrString("topic");
-    if (name.empty()) return json::errorResponse("missing topic");
+    if (name.empty()) return rpc::errorResponse("missing topic");
     if (auto r = registry.getOrAutoCreate(name); !r) {
-      return json::errorResponse(r.error().message);
+      return rpc::errorResponse(r.error().message);
     }
     const auto sender = req.getOrString("sender", "unknown");
     const auto body = req.getOrString("body");
@@ -495,7 +495,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     auto& log = getOrOpenLog(name);
     auto r = log.append(bus::msg::encodeEnvelope(env));
-    if (!r) return json::errorResponse(r.error().message);
+    if (!r) return rpc::errorResponse(r.error().message);
 
     const auto* tcfg = registry.get(name);
 
@@ -533,7 +533,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     std::map<std::string, json::Value> m;
     m.insert({"id", json::Value::from(*r)});
-    return json::okResponse(std::move(m));
+    return rpc::okResponse(std::move(m));
   });
 
   auto recordToJson = [](const bus::Record& rec) {
@@ -558,9 +558,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
   server.on("peek", [&, recordToJson](const json::Value& req) {
     const auto name = req.getOrString("topic");
-    if (name.empty()) return json::errorResponse("missing topic");
+    if (name.empty()) return rpc::errorResponse("missing topic");
     if (!registry.contains(name)) {
-      return json::errorResponse(std::string{"no such topic: "} + name);
+      return rpc::errorResponse(std::string{"no such topic: "} + name);
     }
     // C1: single-recipient kinds share one logical cursor — normalize any
     // client --consumer to "" so peek reads the same cursor delivery/drain
@@ -579,7 +579,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     auto& log = getOrOpenLog(name);
     auto r = log.peek(from,
                       limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX);
-    if (!r) return json::errorResponse(r.error().message);
+    if (!r) return rpc::errorResponse(r.error().message);
     std::vector<json::Value> arr;
     const auto now = nowMs();
     for (const auto& rec : *r) {
@@ -592,7 +592,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"messages", json::Value::fromArray(std::move(arr))});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   // -- state --------------------------------------------------------
@@ -691,7 +691,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // and clamp event-age; the axes above are already clamped at that floor.
     resp.insert({"continuity_since_ms",
                  json::Value::from(continuity_since_ms)});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   // fetch handler is registered AFTER `dl` is constructed below so it
@@ -705,7 +705,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // is the full content regardless of inline-vs-pointer storage.
   server.on("body", [&, recordToJson](const json::Value& req) {
     const auto msg_id = req.getOrString("msg_id");
-    if (msg_id.empty()) return json::errorResponse("missing msg_id");
+    if (msg_id.empty()) return rpc::errorResponse("missing msg_id");
     for (const auto& tcfg : registry.list()) {
       auto& log = getOrOpenLog(tcfg.name);
       auto all = log.dump();
@@ -715,10 +715,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         std::map<std::string, json::Value> resp;
         resp.insert({"topic", json::Value::from(tcfg.name)});
         resp.insert({"message", recordToJson(rec)});
-        return json::okResponse(std::move(resp));
+        return rpc::okResponse(std::move(resp));
       }
     }
-    return json::errorResponse(std::string{"no such msg_id: "} + msg_id);
+    return rpc::errorResponse(std::string{"no such msg_id: "} + msg_id);
   });
 
   // Delivery loop runs on each pselect tick (every 250ms), serially
@@ -743,9 +743,9 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // design, the others don't go through dispatch + ack at all.
   server.on("fetch", [&, recordToJson, &dl_ref = dl](const json::Value& req) {
     const auto name = req.getOrString("topic");
-    if (name.empty()) return json::errorResponse("missing topic");
+    if (name.empty()) return rpc::errorResponse("missing topic");
     if (!registry.contains(name)) {
-      return json::errorResponse(std::string{"no such topic: "} + name);
+      return rpc::errorResponse(std::string{"no such topic: "} + name);
     }
     const auto* tcfg = registry.get(name);
     const bool is_blackboard =
@@ -768,11 +768,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
 
     auto& log = getOrOpenLog(name);
     auto r = log.peek(from, 1);
-    if (!r) return json::errorResponse(r.error().message);
+    if (!r) return rpc::errorResponse(r.error().message);
     if (r->empty()) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value::null_()});
-      return json::okResponse(std::move(resp));
+      return rpc::okResponse(std::move(resp));
     }
     const auto& rec = r->front();
 
@@ -784,7 +784,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (is_agent_inbox && dl_ref.inFlight().contains(rec.id)) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value::null_()});
-      return json::okResponse(std::move(resp));
+      return rpc::okResponse(std::move(resp));
     }
 
     // blackboard: fetch is a non-destructive read — repeated calls
@@ -795,12 +795,12 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       // false return is a cursor-file I/O failure.
       if (fetch_cursors.consumerCursor(consumer) < bus::Journal::cursorAfter(rec) &&
           !fetch_cursors.ack(consumer, bus::Journal::cursorAfter(rec))) {
-        return json::errorResponse("cursor write failed");
+        return rpc::errorResponse("cursor write failed");
       }
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"message", recordToJson(rec)});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   // drain handler — the OFF-TTY delivery pull (roadmap 2.1 / transport
@@ -826,7 +826,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // drain on the agent's next turn.
   server.on("drain", [&, recordToJson, &dl_ref = dl](const json::Value& req) {
     const auto agent = req.getOrString("agent");
-    if (agent.empty()) return json::errorResponse("missing agent");
+    if (agent.empty()) return rpc::errorResponse("missing agent");
     const auto topic_name = std::string{"inbox-"} + agent;
 
     std::map<std::string, json::Value> resp;
@@ -839,18 +839,18 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (isTtyAgent(agent)) {
       resp.insert({"deferred", json::Value::from(false)});
       resp.insert({"messages", json::Value::fromArray({})});
-      return json::okResponse(std::move(resp));
+      return rpc::okResponse(std::move(resp));
     }
     if (!registry.contains(topic_name)) {
       resp.insert({"deferred", json::Value::from(false)});
       resp.insert({"messages", json::Value::fromArray({})});
-      return json::okResponse(std::move(resp));
+      return rpc::okResponse(std::move(resp));
     }
     // Presence gate — defer the whole drain, cursor untouched.
     if (hasPresenceFile(agent)) {
       resp.insert({"deferred", json::Value::from(true)});
       resp.insert({"messages", json::Value::fromArray({})});
-      return json::okResponse(std::move(resp));
+      return rpc::okResponse(std::move(resp));
     }
 
     bus::CursorStore drain_cursors{cfg.state_dir, topic_name};
@@ -858,7 +858,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     auto& log = getOrOpenLog(topic_name);
     constexpr std::size_t kDrainCap = 16;
     auto r = log.peek(from, kDrainCap);
-    if (!r) return json::errorResponse(r.error().message);
+    if (!r) return rpc::errorResponse(r.error().message);
 
     // C2 idempotency read — skip a record already acked (its bus-ack
     // advanced the cursor and stamped this marker). Guards the boundary
@@ -913,13 +913,13 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         // forward-only so false on already-past is harmless; a genuine
         // I/O failure is indicated only if cursor didn't advance.
         if (drain_cursors.consumerCursor("") < advance_cursor) {
-          return json::errorResponse("cursor write failed");
+          return rpc::errorResponse("cursor write failed");
         }
       }
     }
     resp.insert({"deferred", json::Value::from(false)});
     resp.insert({"messages", json::Value::fromArray(std::move(out))});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   // Drop a record by msg_id without delivering — advance the topic
@@ -931,7 +931,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // verb. Returns ok with {topic, cursor_after, was_inflight}.
   server.on("drop", [&, &dl_ref = dl](const json::Value& req) {
     const auto msg_id = req.getOrString("msg_id");
-    if (msg_id.empty()) return json::errorResponse("missing msg_id");
+    if (msg_id.empty()) return rpc::errorResponse("missing msg_id");
 
     // Locate the record across all known topics. The msg_id alone
     // doesn't tell us which topic owns it, and a single message can
@@ -963,7 +963,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
 
     if (found_topic.empty() || cursor_after_token.empty()) {
-      return json::errorResponse(std::string{"no such msg_id: "} +
+      return rpc::errorResponse(std::string{"no such msg_id: "} +
                                  msg_id);
     }
 
@@ -1005,7 +1005,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     std::map<std::string, json::Value> resp;
     resp.insert({"topic", json::Value::from(found_topic)});
     resp.insert({"cursor_after", json::Value::from(cursor_after_token)});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   if (!server.bind()) {
@@ -1030,7 +1030,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"in_flight", json::Value::fromArray(std::move(arr))});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   // Broker-GC reap: drop orphaned agent-inbox / tui-commands topics whose
@@ -1148,7 +1148,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     std::map<std::string, json::Value> resp;
     resp.insert({"reaped", json::Value::fromArray(std::move(reaped))});
     resp.insert({"skipped", json::Value::fromArray(std::move(skipped))});
-    return json::okResponse(std::move(resp));
+    return rpc::okResponse(std::move(resp));
   });
 
   const int rc = server.run(std::chrono::milliseconds{250},

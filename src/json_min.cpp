@@ -375,23 +375,4 @@ auto parse(std::string_view src) -> std::expected<Value, std::string> {
   return v;
 }
 
-auto okResponse() -> Value {
-  std::map<std::string, Value> m;
-  m.insert({"ok", Value::from(true)});
-  return Value::fromObject(std::move(m));
-}
-
-auto okResponse(std::map<std::string, Value> extras) -> Value {
-  std::map<std::string, Value> m = std::move(extras);
-  m.insert_or_assign("ok", Value::from(true));
-  return Value::fromObject(std::move(m));
-}
-
-auto errorResponse(std::string_view msg) -> Value {
-  std::map<std::string, Value> m;
-  m.insert({"ok", Value::from(false)});
-  m.insert({"error", Value::from(std::string{msg})});
-  return Value::fromObject(std::move(m));
-}
-
 }  // namespace bus::json

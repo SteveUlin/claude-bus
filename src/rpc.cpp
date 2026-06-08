@@ -220,11 +220,11 @@ auto nowMsRt() -> std::int64_t {
 auto Server::dispatch(const json::Value& req) -> json::Value {
   const auto handler_name = req.getOrString("op");
   if (handler_name.empty()) {
-    return json::errorResponse("missing \"op\" field");
+    return errorResponse("missing \"op\" field");
   }
   auto it = handlers_.find(handler_name);
   if (it == handlers_.end()) {
-    return json::errorResponse(std::string{"unknown op: "} + handler_name);
+    return errorResponse(std::string{"unknown op: "} + handler_name);
   }
   return it->second(req);
 }
@@ -375,7 +375,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
     // so in-flight clients get a reply instead of a connection reset.
     for (auto& qr : queue.drain()) {
       writeAll(qr.conn_fd,
-               json::serialize(json::errorResponse("broker shutting down")));
+               json::serialize(errorResponse("broker shutting down")));
       ::close(qr.conn_fd);
     }
     if (timer_fd >= 0) ::close(timer_fd);
@@ -431,7 +431,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
       if (!line) {
         if (line.error().message != "EOF before newline") {
           writeAll(conn,
-                   json::serialize(json::errorResponse(line.error().message)));
+                   json::serialize(errorResponse(line.error().message)));
         }
         ::close(conn);
         continue;
@@ -440,7 +440,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
       if (!req) {
         // Parse error is derived from the input, not from broker state —
         // safe for intake to answer directly.
-        writeAll(conn, json::serialize(json::errorResponse(req.error())));
+        writeAll(conn, json::serialize(errorResponse(req.error())));
         ::close(conn);
         continue;
       }
@@ -449,7 +449,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
         // with a constant string (no broker-state access) and close. CLI
         // RPCs are idempotent one-shots, so a retry is safe.
         writeAll(conn,
-                 json::serialize(json::errorResponse("broker busy, retry")));
+                 json::serialize(errorResponse("broker busy, retry")));
         ::close(conn);
         std::println(stderr, "rpc: queue full — shed one request (busy)");
         continue;
@@ -567,6 +567,25 @@ auto call(const std::string& socket_path, const json::Value& req)
   auto parsed = json::parse(*line);
   if (!parsed) return std::unexpected{Error{parsed.error()}};
   return *parsed;
+}
+
+auto okResponse() -> json::Value {
+  std::map<std::string, json::Value> m;
+  m.insert({"ok", json::Value::from(true)});
+  return json::Value::fromObject(std::move(m));
+}
+
+auto okResponse(std::map<std::string, json::Value> extras) -> json::Value {
+  std::map<std::string, json::Value> m = std::move(extras);
+  m.insert_or_assign("ok", json::Value::from(true));
+  return json::Value::fromObject(std::move(m));
+}
+
+auto errorResponse(std::string_view msg) -> json::Value {
+  std::map<std::string, json::Value> m;
+  m.insert({"ok", json::Value::from(false)});
+  m.insert({"error", json::Value::from(std::string{msg})});
+  return json::Value::fromObject(std::move(m));
 }
 
 }  // namespace bus::rpc

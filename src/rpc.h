@@ -23,7 +23,7 @@ auto defaultSocketPath() -> std::string;
 
 // Handler signature: take the request `json::Value` (already parsed),
 // return the response. Handlers should NOT throw; on error return
-// `json::errorResponse(...)`.
+// `rpc::errorResponse(...)`.
 using Handler = std::function<json::Value(const json::Value& req)>;
 
 class Server {
@@ -109,5 +109,12 @@ auto readLine(int fd, std::size_t max_bytes = 1 << 20)
 // Convenience: write `s` followed by '\n', repeating writes until all
 // bytes are sent or an error occurs.
 auto writeAll(int fd, std::string_view s) -> bool;
+
+// Helpers for the common "build a flat RPC result object" pattern.
+// These encode the "ok"/"error" protocol field names and belong here,
+// not in the domain-agnostic JSON serializer.
+auto okResponse() -> json::Value;
+auto okResponse(std::map<std::string, json::Value> extras) -> json::Value;
+auto errorResponse(std::string_view msg) -> json::Value;
 
 }  // namespace bus::rpc

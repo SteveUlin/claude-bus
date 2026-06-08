@@ -72,9 +72,4 @@ auto serialize(const Value& v) -> std::string;
 // content is an error.
 auto parse(std::string_view src) -> std::expected<Value, std::string>;
 
-// Helpers for the common "build a flat result object" pattern.
-auto okResponse() -> Value;
-auto okResponse(std::map<std::string, Value> extras) -> Value;
-auto errorResponse(std::string_view msg) -> Value;
-
 }  // namespace bus::json

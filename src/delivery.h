@@ -30,6 +30,7 @@
 #include "journal.h"
 #include "json_min.h"
 #include "policy.h"
+#include "token_watcher.h"
 #include "topic_registry.h"
 
 #include <cstdint>
@@ -166,23 +167,10 @@ class Loop {
   // Last time the events.jsonl trim ran. Rate-limited; see maybeTrimLogs.
   std::int64_t trim_last_scan_ms_{0};
 
-  // Per-agent transcript tail state for the token-scan watcher. The
-  // watcher reads each live agent's transcript JSONL, computes context
-  // occupancy from the last assistant turn's usage, and writes
-  // $STATE/status/<agent>.json (the CTX% source the monitor reads).
-  // Offset-based incremental read like scanEvents — only new bytes are
-  // parsed. A path change (new session after /clear or /compact) resets
-  // the offset to re-read the fresh transcript.
-  struct TokenScanState {
-    std::string path;
-    std::int64_t offset{0};
-    std::int64_t last_tokens{-1};
-    std::string last_model;  // last non-<synthetic> assistant model seen;
-                             // emitted into $STATE/status for kvothe's MODEL
-                             // column + P2's token-rate consumer.
-  };
-  std::map<std::string, TokenScanState> token_scan_;
-  std::int64_t token_scan_last_ms_{0};
+  // Transcript-token scanning, extracted into its own class so the scan
+  // concern is off Loop's data surface. scan() is rate-limited internally
+  // (5 s); pruneDead() mirrors the forgetAgent sweep for token scan state.
+  bus::TokenWatcher token_watcher_;
 
   // Doorbell: per-agent cooldown + scan rate-limit for waking idle
   // off-TTY agents that have queued mail (see maybeWakeIdleOffTty).
@@ -238,7 +226,6 @@ class Loop {
   // True iff a record sits past agent's inbox cursor — a snapshot input for the
   // policy context. Pure read.
   auto inboxPending(const std::string& agent) const -> bool;
-  auto maybeScanTokens() -> void;
   auto maybeWakeIdleOffTty() -> void;
   auto maybeEscalateStuck() -> void;
 

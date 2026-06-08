@@ -102,6 +102,7 @@ add_executable(bus
     src/bus.cpp
     src/broker.cpp
     src/delivery.cpp
+    src/token_watcher.cpp
     src/dispatch.cpp
     src/rpc.cpp
     src/topic_registry.cpp

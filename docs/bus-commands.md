@@ -18,8 +18,8 @@ Lifecycle:
   `bin/agent-launch` shell for session-UUID discovery + claude exec).
 
 Topic registry:
-- `bus topic create NAME --kind KIND [--subscribers a,b,c]
-  [--retention-ms N]` — declare a topic. Known kinds:
+- `bus topic create NAME --kind KIND [--subscribers a,b,c]` —
+  declare a topic. Known kinds:
   `agent-inbox` / `tui-commands` / `work-queue` / `pubsub` /
   `blackboard` / `append-log`.
 - `bus topic list` / `bus topic show NAME`.

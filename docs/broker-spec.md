@@ -52,8 +52,8 @@ the payload, so the messaging layer owns this field alone. `stampEpoch()` /
 `recordEpoch()` in `src/delivery.h` set it before encode / read it after decode;
 the broker's per-boot counter persists to `$STATE/broker.epoch` and is stamped
 onto every record at enqueue. (Earlier the epoch was overloaded onto a 16-byte
-`correlation` field in the old `topic_log` wire format; the wire-v6 /
-`bus::Journal` refactor replaced that with the dedicated field above.)
+`correlation` field in the old wire format; the `bus::Journal` refactor
+(wire-v7) replaced that with the dedicated field above.)
 
 ## Delivery model — off-TTY is the default
 
@@ -208,10 +208,10 @@ closes; tightening the TTY ack is a separate worthwhile fix.
 
 ## Retention & trimming
 
-`$STATE` is durable (XDG root, survives reboot), so two log classes that once
-vanished on a `/tmp` wipe now grow unbounded. The broker — the **only** writer to
-topic logs, single-threaded on the same reactor as RPC — trims both in-tick, so
-a rewrite never races a concurrent append.
+`$STATE` is durable (XDG root, survives reboot). The broker — the **only** writer
+to topic logs, single-threaded on the same reactor as RPC — trims the advisory
+`events.jsonl` in-tick (a rewrite never races a concurrent append). The canonical
+binary topic logs are append-only and are **not** trimmed in place.
 
 - **`events.jsonl`** (advisory; the binary topic logs are canonical, so dropping
   old lines is safe): when it exceeds `CLAUDE_BUS_EVENTS_MAX_BYTES` (default
@@ -224,30 +224,16 @@ a rewrite never races a concurrent append.
   positionally ack a newer in-flight record). Accepted caveat: a hook append
   racing the single `rename` writes to the unlinked inode and is lost — advisory
   data, self-heals on the next event.
-- **Topic logs** (`$STATE/topics/<name>.log`, canonical): **head trim with cursor
-  rebase**. `bus::retention::planTrim` (pure, unit-tested) picks a `cut_offset`
-  from the larger of two limits — age (`retention_ms`, per-topic; `0` = none) and
-  size (`CLAUDE_BUS_TOPIC_MAX_BYTES`, default 8 MiB; `0` = none) — by
-  byte-slicing `header(64 B) + bytes[cut..EOF]` to a tmp file and `rename`-ing
-  over the original (record bytes verbatim, timestamps intact — never re-append).
-  Dropping `D` head bytes shifts every surviving absolute offset down by `D`, so
-  the broker rebases each cursor and in-flight `cursor_after` for the topic via
-  `new = max(header, old - D)`.
-
-  **Delivery-guarantee clamp:** for `agent-inbox` / `tui-commands` the cut is
-  clamped to `≤ min_cursor` — only records every consumer has passed are
-  eligible, so **undelivered mail is never dropped** even if "expired" (an inbox
-  with unread mail has `min_cursor = 0` → no trim; in-flight records sit at/after
-  the cursor, so the clamp protects them). Advisory kinds (`audit` / `pubsub` /
-  `work-queue` / `blackboard` / `append-log`) have **no clamp** — age/size expiry
-  drops records regardless of consumption, which is what lets `audit.log` (no
-  persistent consumer) actually shrink.
-
-`retention_ms` is `0` for every auto-created topic today, so age-based expiry is
-**dormant by default** — only the absolute `CLAUDE_BUS_TOPIC_MAX_BYTES` safety
-cap is live. Set `retention_ms` on a topic to opt it into age expiry. (The
-registry also declares a `max_record_bytes` field that **nothing enforces** —
-dead config, flagged for removal by the run-2 redesign.)
+- **Topic logs** (`$STATE/topics/<name>.log`, canonical): **no automatic
+  retention**. In-place head-trim was removed, so byte offsets are immutable and
+  a cursor never rebases. A topic log grows within a session; on boot the broker
+  wipes any log whose header format version differs from the current one, so a
+  format bump is a clean slate (start-from-scratch — no data migration). When
+  multi-day disk bounding becomes necessary, the durable approach is **segment
+  deletion** (roll fixed-size segments, delete whole closed ones), which keeps
+  offsets stable by construction — never in-place trim, which is precisely what
+  forced mutable offsets. The `retention_ms` / per-topic size-cap knobs and the
+  `bus::retention` planner are gone.
 
 ## Lifetime & launch contract
 

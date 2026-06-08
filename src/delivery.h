@@ -240,6 +240,18 @@ class Loop {
   auto forgetAgent(std::string_view name) -> void;
   auto pruneDeadAgents() -> void;
 
+  // Append one record to the audit topic. Auto-creates "audit" if absent,
+  // opens the journal, constructs an Envelope (sender="broker", epoch-stamped),
+  // and appends. Centralises the stampEpoch call — forgetting it causes the
+  // infinite-escalation loop warned about at the escalate() call site.
+  auto emitAudit(std::string_view protocol, std::string_view body) -> void;
+
+  // True iff `agent` is ready to receive a deliver_when=idle record right now.
+  // Reads events.jsonl filtered to the single agent, calls paneStateCached and
+  // computeState, and evaluates the idle predicate. Both dispatchAgentInbox and
+  // dispatchTuiCommands gate deliver_when=1 records on this.
+  auto isAgentIdle(const std::string& agent, std::int64_t now) const -> bool;
+
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;
 

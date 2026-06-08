@@ -254,6 +254,38 @@ auto Loop::load() -> void {
   // events_offset_ stays at -1 so the first tick seeks to EOF.
 }
 
+auto Loop::emitAudit(std::string_view protocol, std::string_view body) -> void {
+  TopicConfig audit;
+  audit.name = "audit";
+  audit.kind = TopicKind::AppendLog;
+  if (!registry_.contains("audit")) {
+    auto _ = registry_.create(audit);
+  }
+  bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+  bus::msg::Envelope env;
+  env.sender = "broker";
+  env.protocol = std::string{protocol};
+  // Stamp the broker's own emissions with the current epoch — without
+  // this, the very next dispatch tick sees the unstamped audit/ops
+  // record as stale, quarantines it, writes another unstamped record,
+  // and the broker dispatches itself into an infinite escalation loop.
+  stampEpoch(env, current_epoch_);
+  env.body = std::string{body};
+  auto _ = audit_log.append(bus::msg::encodeEnvelope(env));
+}
+
+auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool {
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  std::set<std::string> filter{agent};
+  auto agents = readAgents(events_log, filter);
+  AgentInfo info;
+  if (auto it = agents.find(agent); it != agents.end()) info = it->second;
+  const auto pane = paneStateCached(agent);
+  const auto st = computeState(info, 0, now, pane.ok);
+  return st == State::Idle ||
+         (st == State::Starting && pane.ok && pane.mode == "INSERT");
+}
+
 auto Loop::writeInflight(const InFlight& f) -> void {
   std::error_code ec;
   fs::create_directories(inflightDir(cfg_), ec);
@@ -427,22 +459,11 @@ auto Loop::scanEvents() -> void {
       // the broker noticed an agent end. Quiet on inbox-ops by
       // design (the monitor's GONE state is enough surface).
       {
-        TopicConfig audit;
-        audit.name = "audit";
-        audit.kind = TopicKind::AppendLog;
-        if (!registry_.contains("audit")) {
-          auto _ = registry_.create(audit);
-        }
-        bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-        bus::msg::Envelope a_env;
-        a_env.sender = "broker";
-        a_env.protocol = "agent-end";
-        stampEpoch(a_env, current_epoch_);
         const auto& reason = ev->reason;
-        a_env.body = std::format("agent-end agent={} reason={} released={}",
-                                 agent, reason.empty() ? "(none)" : reason,
-                                 to_release.size());
-        auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
+        emitAudit("agent-end",
+                  std::format("agent-end agent={} reason={} released={}",
+                              agent, reason.empty() ? "(none)" : reason,
+                              to_release.size()));
       }
       continue;
     }
@@ -618,19 +639,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     //   2. State::Starting + pane in INSERT — broker has no event
     //      history for this agent (fresh boot, post-wipe) but the
     //      pane is visibly at the prompt; trust the TTY.
-    if (env.deliver_when == 1) {
-      const std::string events_log = cfg_.state_dir + "/events.jsonl";
-      std::set<std::string> filter{agent};
-      auto agents = readAgents(events_log, filter);
-      AgentInfo info;
-      if (auto it = agents.find(agent); it != agents.end()) info = it->second;
-      const auto pane = paneStateCached(agent);
-      const auto st = computeState(info, 0, now, pane.ok);
-      const bool agent_ready =
-          st == State::Idle ||
-          (st == State::Starting && pane.ok && pane.mode == "INSERT");
-      if (!agent_ready) return;
-    }
+    if (env.deliver_when == 1 && !isAgentIdle(agent, now)) return;
 
     // Build payload — inline for small, pointer for large.
     std::string payload;
@@ -718,19 +727,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     // tui-commands records default to deliver_when=idle (set by
     // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or
     // Starting+INSERT for post-wipe boots with no event history.
-    if (env.deliver_when == 1) {
-      const std::string events_log = cfg_.state_dir + "/events.jsonl";
-      std::set<std::string> filter{agent};
-      auto agents = readAgents(events_log, filter);
-      AgentInfo info;
-      if (auto it = agents.find(agent); it != agents.end()) info = it->second;
-      const auto pane = paneStateCached(agent);
-      const auto st = computeState(info, 0, now, pane.ok);
-      const bool agent_ready =
-          st == State::Idle ||
-          (st == State::Starting && pane.ok && pane.mode == "INSERT");
-      if (!agent_ready) return;
-    }
+    if (env.deliver_when == 1 && !isAgentIdle(agent, now)) return;
 
     // Run the dispatch state machine. Synchronous — can take up to
     // ~5s on retries. Only this topic stalls; other topics still
@@ -765,26 +762,12 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
 
 auto Loop::escalate(const InFlight& f, std::string_view reason,
                     std::string_view body) -> void {
-  // Append to the audit topic (auto-create if absent).
-  TopicConfig audit;
-  audit.name = "audit";
-  audit.kind = TopicKind::AppendLog;
-  if (!registry_.contains("audit")) {
-    auto _ = registry_.create(audit);
-  }
-  bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-  bus::msg::Envelope env;
-  env.sender = "broker";
-  env.protocol = "audit";
-  // Stamp the broker's own emissions with the current epoch — without
-  // this, the very next dispatch tick sees the unstamped audit/ops
-  // record as stale, quarantines it, writes another unstamped record,
-  // and the broker dispatches itself into an infinite escalation loop.
-  stampEpoch(env, current_epoch_);
-  env.body = std::format(
-      "delivery exhausted msg_id={} topic={} agent={} reason={} body={}",
-      f.msg_id, f.topic, f.agent, reason, body);
-  auto _ = audit_log.append(bus::msg::encodeEnvelope(env));
+  // Append to the audit topic (auto-create if absent). emitAudit bakes in the
+  // stampEpoch call — forgetting it causes an infinite escalation loop.
+  emitAudit("audit",
+            std::format("delivery exhausted msg_id={} topic={} agent={} "
+                        "reason={} body={}",
+                        f.msg_id, f.topic, f.agent, reason, body));
 
   // Mail inbox-ops (auto-creates the topic). The ops inbox carries
   // infrastructure notifications — delivery failures, retry exhaustion,
@@ -932,17 +915,7 @@ auto Loop::maybeEscalateStuck() -> void {
     if (d > 0 && (next == 0 || d < next)) next = d;
   };
   auto auditAlarm = [&](std::string_view protocol, const std::string& body) {
-    TopicConfig audit;
-    audit.name = "audit";
-    audit.kind = TopicKind::AppendLog;
-    if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-    bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-    bus::msg::Envelope a_env;
-    a_env.sender = "broker";
-    a_env.protocol = std::string{protocol};
-    stampEpoch(a_env, current_epoch_);
-    a_env.body = body;
-    auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
+    emitAudit(protocol, body);
   };
 
   const std::string events_log = cfg_.state_dir + "/events.jsonl";
@@ -1112,22 +1085,10 @@ auto Loop::maybeAutoClear() -> void {
     // sees auto-clear actions land in the same place they see
     // delivery failures.
     {
-      TopicConfig audit;
-      audit.name = "audit";
-      audit.kind = TopicKind::AppendLog;
-      if (!registry_.contains("audit")) {
-        auto _ = registry_.create(audit);
-      }
-      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-      bus::msg::Envelope a_env;
-      a_env.sender = "broker";
-      a_env.protocol = "auto-clear";
-      stampEpoch(a_env, current_epoch_);
       const auto idle_min = (now - info.last.ts_ms) / 60'000;
-      a_env.body = std::format(
-          "auto-clear agent={} idle_min={} threshold_min={}",
-          name, idle_min, threshold_min);
-      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
+      emitAudit("auto-clear",
+                std::format("auto-clear agent={} idle_min={} threshold_min={}",
+                            name, idle_min, threshold_min));
     }
   }
 }
@@ -1395,20 +1356,10 @@ auto Loop::maybeWakeIdleOffTty() -> void {
         !strand_alarmed_.contains(name)) {
       strand_alarmed_.insert(name);
       const auto queued_ms = now - mail_queued_since_ms_[name];
-      TopicConfig audit;
-      audit.name = "audit";
-      audit.kind = TopicKind::AppendLog;
-      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-      bus::msg::Envelope a_env;
-      a_env.sender = "broker";
-      a_env.protocol = "doorbell-strand";
-      stampEpoch(a_env, current_epoch_);
-      a_env.body = std::format(
-          "doorbell-strand agent={} queued_ms={} — off-TTY "
-          "mail undelivered past threshold",
-          name, queued_ms);
-      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
+      emitAudit("doorbell-strand",
+                std::format("doorbell-strand agent={} queued_ms={} — off-TTY "
+                            "mail undelivered past threshold",
+                            name, queued_ms));
     }
 
     // --- wake gates ---
@@ -1454,20 +1405,9 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     wake_next_allowed_ms_[name] = now + 30'000;  // 30 s
 
     // Audit each ring — the objective "a wake fired" signal.
-    {
-      TopicConfig audit;
-      audit.name = "audit";
-      audit.kind = TopicKind::AppendLog;
-      if (!registry_.contains("audit")) { auto _ = registry_.create(audit); }
-      bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
-      bus::msg::Envelope a_env;
-      a_env.sender = "broker";
-      a_env.protocol = "doorbell";
-      stampEpoch(a_env, current_epoch_);
-      a_env.body = std::format("doorbell wake agent={} (off-TTY, idle, mail queued)",
-                               name);
-      auto _ = audit_log.append(bus::msg::encodeEnvelope(a_env));
-    }
+    emitAudit("doorbell",
+              std::format("doorbell wake agent={} (off-TTY, idle, mail queued)",
+                          name));
   }
 }
 

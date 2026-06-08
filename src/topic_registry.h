@@ -28,7 +28,9 @@ struct TuiCommandsConfig {
   std::string agent;
 };
 
-struct PubsubConfig {};
+struct PubsubConfig {
+  std::vector<std::string> subscribers;
+};
 
 struct WorkQueueConfig {};
 
@@ -58,12 +60,22 @@ enum class TopicKind {
 auto topicKindFromStr(std::string_view) -> TopicKind;
 auto topicKindToStr(TopicKind) -> std::string_view;
 
+// Parse a kind_config JSON object into a TopicKindConfig.
+// kc may be nullptr (no kind_config present).
+auto kindConfigFromJson(TopicKind kind, const json::Value* kc)
+    -> TopicKindConfig;
+
 // A topic is a typed, persisted message stream.
 struct TopicConfig {
   std::string name;
   TopicKind kind{TopicKind::Unknown};
-  json::Value kind_config{};
-  TopicKindConfig parsed_config;  // free-form per-kind blob
+  TopicKindConfig parsed_config;
+
+  // Typed accessors over parsed_config.
+  // Returns the agent name for AgentInbox / TuiCommands, else "".
+  auto agentName() const -> std::string;
+  // Returns the subscriber list for Pubsub, else an empty vector.
+  auto subscribers() const -> const std::vector<std::string>&;
 
   // Serialize / deserialize for topics.json.
   auto toJson() const -> json::Value;

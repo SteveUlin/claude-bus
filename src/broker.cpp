@@ -425,9 +425,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     TopicConfig tc;
     tc.name = req.getOrString("name");
     tc.kind = topicKindFromStr(req.getOrString("kind"));
-    if (const auto* kc = req.get("kind_config"); kc != nullptr) {
-      tc.kind_config = *kc;
-    }
+    tc.parsed_config =
+        kindConfigFromJson(tc.kind, req.get("kind_config"));
     if (auto r = registry.create(std::move(tc)); !r) {
       return rpc::errorResponse(r.error().message);
     }
@@ -521,15 +520,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // <name> agent-inbox topic (which the broker's delivery loop
     // pushes to the recipient pane).
     if (tcfg != nullptr && tcfg->kind == TopicKind::Pubsub) {
-      const auto* subs_v = tcfg->kind_config.get("subscribers");
-      if (subs_v != nullptr && subs_v->isArray()) {
-        for (const auto& sub : subs_v->asArray()) {
-          if (!sub.isString()) continue;
-          const auto inbox = std::string{"inbox-"} + sub.asString();
-          if (auto cr = registry.getOrAutoCreate(inbox); !cr) continue;
-          auto& sublog = getOrOpenLog(inbox);
-          auto _ig = sublog.append(bus::msg::encodeEnvelope(env));
-        }
+      for (const auto& sub : tcfg->subscribers()) {
+        const auto inbox = std::string{"inbox-"} + sub;
+        if (auto cr = registry.getOrAutoCreate(inbox); !cr) continue;
+        auto& sublog = getOrOpenLog(inbox);
+        auto _ig = sublog.append(bus::msg::encodeEnvelope(env));
       }
     }
 

@@ -23,7 +23,7 @@ TEST(getOrAutoCreate_inbox_normal) {
   CHECK(r.has_value());
   if (r) {
     CHECK_EQ(r->kind, TopicKind::AgentInbox);
-    CHECK_EQ(r->kind_config.getOrString("agent"), std::string{"human"});
+    CHECK_EQ(r->agentName(), std::string{"human"});
   }
 }
 
@@ -33,7 +33,7 @@ TEST(getOrAutoCreate_commands_normal) {
   CHECK(r.has_value());
   if (r) {
     CHECK_EQ(r->kind, TopicKind::TuiCommands);
-    CHECK_EQ(r->kind_config.getOrString("agent"), std::string{"bob"});
+    CHECK_EQ(r->agentName(), std::string{"bob"});
   }
 }
 

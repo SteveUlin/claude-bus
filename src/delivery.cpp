@@ -530,10 +530,9 @@ auto Loop::scanEvents() -> void {
 auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   if (cfg.kind != TopicKind::AgentInbox) return;
 
-  // Resolve recipient agent from kind_config.
-  const auto* agent_v = cfg.kind_config.get("agent");
-  if (agent_v == nullptr || !agent_v->isString()) return;
-  const std::string agent = agent_v->asString();
+  // Resolve recipient agent from parsed_config.
+  const std::string agent = cfg.agentName();
+  if (agent.empty()) return;
 
   // Off-TTY gate (roadmap 2.1 / transport §5.1). Off-TTY is the FLEET
   // DEFAULT now: every agent's mail is delivered by its own
@@ -681,9 +680,8 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
 auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
   if (cfg.kind != TopicKind::TuiCommands) return;
 
-  const auto* agent_v = cfg.kind_config.get("agent");
-  if (agent_v == nullptr || !agent_v->isString()) return;
-  const std::string agent = agent_v->asString();
+  const std::string agent = cfg.agentName();
+  if (agent.empty()) return;
 
   // Universal gates: attached, blocking-op in flight.
   if (hasPresenceFile(agent)) return;

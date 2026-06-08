@@ -21,10 +21,12 @@ Driven as separate build-green, force-verified commits on `main`. Skip these in 
 - **B1** — broker caches a `{Journal, CursorStore}` pair per topic; 7 ephemeral cursor re-opens consolidated (`6e44196d`)
 - **B3/B7/D6/DM2/CL4** — decouple `dispatchTui` from `BrokerConfig`/rpc-singleton, `continuitySinceMs` private, `isValidTopicName` anon-ns, `bus msg` exit 2 (`0f343cfb`)
 - **P2/P3/CL3/PS1/PS3** — typed pair key, hoist `kNoClearRoles`, `splitCsv`/`truncate` util, PaneState predicates, `stateFrom` inverse (`32879f10`)
+- **DM1** — typed `parsed_config` is the single source of truth for per-topic settings; raw `kind_config` field dropped, wire/disk format unchanged (`2631a0b2`)
+- **J2** — explicit journal lifecycle: private ctor + `open`/`create`/`openOrCreate` factories, lazy-create removed, a missing log errors instead of reading fake-empty (`e5c65c79`)
 
 Also landed earlier in the session (journal kernel): in-place trim removed (offsets immutable), `retention_ms` dropped, read-truncation surfaced (`truncated_at`), per-file UUID header (wire v7, tag from UUID).
 
-**Deferred deliberately:** **J2** (open/create factories — changes absent-file semantics + needs a Result-factory ergonomics decision) and **D2** (epoch helpers → `bus::msg` — lower value than the doc claims: broker keeps `delivery.h` for `Loop`, so it doesn't decouple). Both want a quick decision in the walk-through.
+**Deferred:** **D2** (epoch helpers → `bus::msg`) — lower value than this doc claims: broker keeps `delivery.h` for `Loop`, so moving the helpers doesn't decouple it. Skip unless a reason emerges.
 
 ---
 

@@ -164,9 +164,15 @@ else
     tc_fail "TC16 agent-bar usage" "rc=$rc"
 fi
 
-# TC17: inbox tail runs without crashing.
-echo "=== TC17: bus topic inbox runs ==="
-run_viewer_briefly topic inbox itest-fake-recipient
+# TC17: inbox exits rc=1 with a clear error on a missing topic (J2 open() contract).
+echo "=== TC17: bus topic inbox missing topic ==="
+"$BUS" topic inbox itest-fake-recipient 2>/tmp/bus-itest.err
+rc=$?
+if [ "$rc" = "1" ] && grep -q 'no such topic' /tmp/bus-itest.err; then
+    tc_pass "TC17 inbox: missing topic → rc=1 with 'no such topic'"
+else
+    tc_fail "TC17 inbox: missing topic" "expected rc=1 with 'no such topic', got rc=$rc; stderr=$(cat /tmp/bus-itest.err | head -3)"
+fi
 
 # TC18: inbox usage on bad argc.
 echo "=== TC18: bus topic inbox usage ==="

@@ -72,13 +72,13 @@ struct Record;
 // so a caller distinguishes a clean end-of-log from a corruption-truncated read
 // and picks its own recovery.
 
-// Open / lazily-create a journal at the given path. Reads on a fresh
-// path return empty result sets.
-//
-// TODO: no lazy creation (lazy actions are for higher level apis if needed)
-//
 // Journal is path-only: it owns byte ops (append, peek, dump, tail) only.
 // Per-consumer cursor persistence lives in CursorStore (cursor_store.h).
+//
+// Construction is explicit — use one of the three static factories:
+//   open()         — file must already exist; error on ENOENT.
+//   create()       — create with the v7 header (O_CREAT|O_EXCL); error if exists.
+//   openOrCreate() — open if present, else create. The "make it if needed" path.
 //
 // Thought: a journal should support multiple cursors
 class Journal {
@@ -138,7 +138,18 @@ class Journal {
     friend class CursorStore;
   };
 
-  explicit Journal(std::string path);
+  // ── Static factories ─────────────────────────────────────────────────────
+  //
+  // Open an existing journal. Returns an error if the file does not exist.
+  static auto open(std::string path) -> bus::Result<Journal>;
+
+  // Create a new journal with the v7 header (O_CREAT|O_EXCL). Returns an
+  // error if the file already exists or an I/O failure occurs.
+  static auto create(std::string path) -> bus::Result<Journal>;
+
+  // Open if the file exists, otherwise create it. Behavior-preserving
+  // replacement for the old eager-ctor + lazy-ensureHeader pattern.
+  static auto openOrCreate(std::string path) -> bus::Result<Journal>;
 
   // Append one record. Returns the record's id.
   auto append(std::span<const std::byte> payload,
@@ -220,6 +231,9 @@ class Journal {
   static auto isStaleVersion(const std::string& path) -> bool;
 
  private:
+  // Private — use the static factories (open / create / openOrCreate).
+  explicit Journal(std::string path);
+
   std::string path_;
 
   // UUID-derived tag: delegates to tagOf(path_) and caches the first non-zero

@@ -82,27 +82,29 @@ auto readTasks(const std::set<std::string>& only) -> std::vector<Task> {
 
   const std::string topic_path =
       stateRoot() + "/topics/" + std::string{kTasksTopic} + ".log";
-  bus::Journal spine{topic_path};
-  if (auto dumped = spine.dump()) {
-    for (const auto& rec : *dumped) {
-      const auto task_env = bus::msg::decodeEnvelope(rec.payload);
-      const auto v = json::parse(task_env.body);
-      if (!v) continue;
-      const std::string id = v->getOrString("id");
-      if (id.empty()) continue;
-      if (v->getOrBool("cancelled", false)) {
-        cancelled.insert(id);
-        continue;
+  auto spine_r = bus::Journal::openOrCreate(topic_path);
+  if (spine_r) {
+    if (auto dumped = spine_r->dump()) {
+      for (const auto& rec : *dumped) {
+        const auto task_env = bus::msg::decodeEnvelope(rec.payload);
+        const auto v = json::parse(task_env.body);
+        if (!v) continue;
+        const std::string id = v->getOrString("id");
+        if (id.empty()) continue;
+        if (v->getOrBool("cancelled", false)) {
+          cancelled.insert(id);
+          continue;
+        }
+        Task t;
+        t.id = id;
+        t.owner = v->getOrString("owner");
+        t.title = v->getOrString("title");
+        if (const auto* deps = v->get("deps"); deps != nullptr && deps->isArray())
+          for (const auto& d : deps->asArray())
+            if (d.isString()) t.deps.push_back(d.asString());
+        by_id[id] = std::move(t);
+        mint_ts[id] = v->getOrInt("ts", 0);
       }
-      Task t;
-      t.id = id;
-      t.owner = v->getOrString("owner");
-      t.title = v->getOrString("title");
-      if (const auto* deps = v->get("deps"); deps != nullptr && deps->isArray())
-        for (const auto& d : deps->asArray())
-          if (d.isString()) t.deps.push_back(d.asString());
-      by_id[id] = std::move(t);
-      mint_ts[id] = v->getOrInt("ts", 0);
     }
   }
 

@@ -39,7 +39,9 @@ auto readBytes(const std::string& path) -> std::vector<std::byte> {
 // append bytes -> dump -> same bytes; id is well-formed
 TEST(roundtrip_opaque_payload) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("first payload"));
   (void)log.append(bytesOf("second payload"));
   (void)log.append(bytesOf("third"));
@@ -64,7 +66,9 @@ TEST(roundtrip_opaque_payload) {
 
 TEST(parsefrom_refuses_truncated_tail) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("one"));
   (void)log.append(bytesOf("two"));
   (void)log.append(bytesOf("three"));
@@ -83,7 +87,9 @@ TEST(parsefrom_refuses_truncated_tail) {
 
 TEST(parsefrom_respects_start_offset) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("one"));
   (void)log.append(bytesOf("two"));
 
@@ -105,7 +111,9 @@ TEST(parsefrom_respects_start_offset) {
 
 TEST(parsefrom_respects_limit) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("one"));
   (void)log.append(bytesOf("two"));
   (void)log.append(bytesOf("three"));
@@ -129,7 +137,9 @@ TEST(parsefrom_empty_or_headerless_buffer) {
 
 TEST(crc_corruption_stops_parse) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("first"));
   (void)log.append(bytesOf("CORRUPTME"));
   (void)log.append(bytesOf("third"));
@@ -155,7 +165,9 @@ TEST(crc_corruption_stops_parse) {
 // CRC verification — not reframed past the forged boundary.
 TEST(corrupt_record_len_no_misframe) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("firstbody"));
   (void)log.append(bytesOf("second"));
   (void)log.append(bytesOf("third"));
@@ -189,7 +201,9 @@ TEST(corrupt_record_len_no_misframe) {
 
 TEST(seq_monotonic_same_ms) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   const auto a = log.append(bytesOf("one"));
   const auto b = log.append(bytesOf("two"));
   CHECK(a.has_value());
@@ -217,7 +231,9 @@ TEST(seq_monotonic_same_ms) {
 // tail(n) returns the last n records in chronological order.
 TEST(tail_returns_last_n_chronological) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("a"));
   (void)log.append(bytesOf("b"));
   (void)log.append(bytesOf("c"));
@@ -238,7 +254,9 @@ TEST(tail_returns_last_n_chronological) {
 // tail(n > count) returns all records.
 TEST(tail_n_larger_than_count) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("x"));
   (void)log.append(bytesOf("y"));
 
@@ -255,10 +273,13 @@ TEST(tail_n_larger_than_count) {
 // valid records (no crash, consistent count with dump).
 TEST(tail_torn_tail_fallback) {
   const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("one"));
-  (void)log.append(bytesOf("two"));
-  (void)log.append(bytesOf("three"));
+  {
+    auto log_r = Journal::openOrCreate(path);
+    CHECK(log_r.has_value());
+    (void)log_r->append(bytesOf("one"));
+    (void)log_r->append(bytesOf("two"));
+    (void)log_r->append(bytesOf("three"));
+  }
 
   // Read the file, truncate one byte from the end (tears the last record).
   auto buf = readBytes(path);
@@ -273,7 +294,9 @@ TEST(tail_torn_tail_fallback) {
               static_cast<std::streamsize>(buf.size()));
   }
 
-  Journal torn{torn_path};
+  auto torn_r = Journal::open(torn_path);
+  CHECK(torn_r.has_value());
+  auto& torn = *torn_r;
   // dump() should return 2 (torn tail refused).
   auto d = torn.dump();
   CHECK(d.has_value());
@@ -297,7 +320,9 @@ TEST(tail_torn_tail_fallback) {
 // are within the file.
 TEST(tail_offsets_chain_correctly) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("a"));
   (void)log.append(bytesOf("b"));
   (void)log.append(bytesOf("c"));
@@ -479,12 +504,15 @@ TEST(truncated_at_limit_stop_is_minus_one) {
 // records than the reverse walk already verified).
 TEST(tail_midwalk_crc_corruption_stops_not_fallback) {
   const auto path = tmpPath();
-  Journal log{path};
-  (void)log.append(bytesOf("r1"));
-  (void)log.append(bytesOf("r2"));
-  (void)log.append(bytesOf("r3"));
-  (void)log.append(bytesOf("r4"));
-  (void)log.append(bytesOf("r5"));
+  {
+    auto log_r = Journal::openOrCreate(path);
+    CHECK(log_r.has_value());
+    (void)log_r->append(bytesOf("r1"));
+    (void)log_r->append(bytesOf("r2"));
+    (void)log_r->append(bytesOf("r3"));
+    (void)log_r->append(bytesOf("r4"));
+    (void)log_r->append(bytesOf("r5"));
+  }
 
   // Capture all records to find record r2's span so we can corrupt it.
   auto buf = readBytes(path);
@@ -506,7 +534,9 @@ TEST(tail_midwalk_crc_corruption_stops_not_fallback) {
               static_cast<std::streamsize>(buf.size()));
   }
 
-  Journal corrupted{corrupt_path};
+  auto corrupted_r = Journal::open(corrupt_path);
+  CHECK(corrupted_r.has_value());
+  auto& corrupted = *corrupted_r;
 
   // dump() (forward scan) stops at r2, returning only r1.
   auto d = corrupted.dump();
@@ -536,7 +566,9 @@ TEST(tail_midwalk_crc_corruption_stops_not_fallback) {
 // cursorToToken / cursorFromToken round-trip without losing the value.
 TEST(cursor_token_roundtrip) {
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("record-a"));
   (void)log.append(bytesOf("record-b"));
 
@@ -571,18 +603,18 @@ TEST(cursor_token_roundtrip) {
 
 // ── Journal-tag binding ───────────────────────────────────────────────────────
 
-// An unnamed (path-only) journal — cursors carry tag 0 (unbound).
-// Named journals via CursorStore carry non-zero tags — see test_cursor_store.cpp.
+// Journals created via openOrCreate carry a UUID-derived non-zero tag.
+// cursorToToken / cursorFromToken round-trips offset+tag identically.
 TEST(cursor_tag_unnamed_journal) {
-  // Unnamed (path-only) journal — cursors carry tag 0.
   const auto path = tmpPath();
-  Journal unnamed{path};
+  auto unnamed_r = Journal::openOrCreate(path);
+  CHECK(unnamed_r.has_value());
+  auto& unnamed = *unnamed_r;
   (void)unnamed.append(bytesOf("x"));
   auto unnamed_recs = unnamed.dump();
   CHECK(unnamed_recs.has_value());
   CHECK(!unnamed_recs->empty());
-  // Tag 0 means the token encodes "offset:0" — cursorFromToken decodes it,
-  // and the cursor compares equal to another Cursor at the same offset.
+  // Tag is non-zero (UUID written by openOrCreate); round-trip is exact.
   const auto ua = Journal::cursorAfter((*unnamed_recs)[0]);
   const auto utok = Journal::cursorToToken(ua);
   const auto urt = Journal::cursorFromToken(utok);
@@ -594,10 +626,12 @@ TEST(cursor_tag_unnamed_journal) {
 // cursorToToken → cursorFromToken round-trips both offset and tag.
 // A legacy tag-less token (no colon) decodes to tag 0.
 TEST(cursor_token_roundtrip_with_tag) {
-  // Use a plain path-only Journal; tagOf gives tag=0 until first append.
-  // After append, the file has a UUID and tagOf returns non-zero.
+  // openOrCreate writes the UUID header on creation, so tagOf returns
+  // non-zero immediately (no need for a first append to trigger it).
   const auto path = tmpPath();
-  Journal log{path};
+  auto log_r = Journal::openOrCreate(path);
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   (void)log.append(bytesOf("alpha"));
 
   auto recs = log.dump();
@@ -648,9 +682,12 @@ TEST(cross_journal_ack_refused) {
   std::filesystem::create_directories(sr_a + "/topics");
   std::filesystem::create_directories(sr_b + "/topics");
 
-  // Build using path-only journals + CursorStore for cursor ops.
-  Journal a{sr_a + "/topics/journal-a.log"};
-  Journal b{sr_b + "/topics/journal-b.log"};
+  auto a_r = Journal::openOrCreate(sr_a + "/topics/journal-a.log");
+  auto b_r = Journal::openOrCreate(sr_b + "/topics/journal-b.log");
+  CHECK(a_r.has_value());
+  CHECK(b_r.has_value());
+  auto& a = *a_r;
+  auto& b = *b_r;
 
   (void)a.append(bytesOf("a1"));
   (void)a.append(bytesOf("a2"));
@@ -685,8 +722,12 @@ TEST(uuid_identity_distinct_per_file) {
   const auto path_y =
       std::string{"/tmp/claude-bus-test-uuid-y-"} + std::to_string(n) + ".log";
 
-  Journal jx{path_x};
-  Journal jy{path_y};
+  auto jx_r = Journal::openOrCreate(path_x);
+  auto jy_r = Journal::openOrCreate(path_y);
+  CHECK(jx_r.has_value());
+  CHECK(jy_r.has_value());
+  auto& jx = *jx_r;
+  auto& jy = *jy_r;
 
   (void)jx.append(bytesOf("px"));
   (void)jy.append(bytesOf("py"));

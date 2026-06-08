@@ -91,7 +91,13 @@ auto subInbox(std::span<const char* const> args) -> int {
   const auto log_path =
       cfg.state_dir + "/topics/" + topic_name + ".log";
 
-  bus::Journal log{log_path};
+  auto log_r = bus::Journal::open(log_path);
+  if (!log_r) {
+    std::println(stderr, "inbox: no such topic: {} ({})",
+                 topic_name, log_r.error().message);
+    return 1;
+  }
+  auto log = std::move(*log_r);
   auto initial = log.dump();
   if (!initial) {
     std::println(stderr, "inbox: dump failed: {}", initial.error().message);

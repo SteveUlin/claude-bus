@@ -28,7 +28,9 @@ TEST(cursor_store_ack_never_rewinds) {
   const std::string state_root =
       makeStateRoot("/tmp/claude-bus-test-cs-mono-");
 
-  Journal log{topicLogPath(state_root, "ack-mono")};
+  auto log_r = Journal::openOrCreate(topicLogPath(state_root, "ack-mono"));
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   CursorStore cursors{state_root, "ack-mono"};
 
   // Append three records so we have real cursors to work with.
@@ -83,8 +85,12 @@ TEST(cursor_store_cross_journal_ack_refused) {
   const std::string sr_b =
       makeStateRoot("/tmp/claude-bus-test-cs-xj-b-");
 
-  Journal a{topicLogPath(sr_a, "journal-a")};
-  Journal b{topicLogPath(sr_b, "journal-b")};
+  auto a_r = Journal::openOrCreate(topicLogPath(sr_a, "journal-a"));
+  auto b_r = Journal::openOrCreate(topicLogPath(sr_b, "journal-b"));
+  CHECK(a_r.has_value());
+  CHECK(b_r.has_value());
+  auto& a = *a_r;
+  auto& b = *b_r;
   CursorStore cs_a{sr_a, "journal-a"};
   CursorStore cs_b{sr_b, "journal-b"};
 
@@ -124,7 +130,9 @@ TEST(cursor_store_consumer_cursor_tag) {
   const std::string state_root =
       makeStateRoot("/tmp/claude-bus-test-cs-tag-");
 
-  Journal log{topicLogPath(state_root, "tag-topic")};
+  auto log_r = Journal::openOrCreate(topicLogPath(state_root, "tag-topic"));
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   CursorStore cursors{state_root, "tag-topic"};
 
   // Before any write: file absent → tag is 0, cursor is start-of-log.
@@ -153,7 +161,9 @@ TEST(cursor_store_last_acked_id) {
   const std::string state_root =
       makeStateRoot("/tmp/claude-bus-test-cs-lastid-");
 
-  Journal log{topicLogPath(state_root, "lastid-topic")};
+  auto log_r = Journal::openOrCreate(topicLogPath(state_root, "lastid-topic"));
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
   CursorStore cursors{state_root, "lastid-topic"};
 
   (void)log.append(bytesOf("a"));

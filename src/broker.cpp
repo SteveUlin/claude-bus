@@ -470,9 +470,11 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     if (it != logs.end()) return it->second;
     const std::string path =
         topics_dir + "/" + std::string{name} + ".log";
+    auto log_r = bus::Journal::openOrCreate(path);
+    if (!log_r) fatal("getOrOpen journal: " + log_r.error().message);
     auto [ins, _] = logs.emplace(
         std::string{name},
-        TopicHandles{bus::Journal{path},
+        TopicHandles{std::move(*log_r),
                      bus::CursorStore{cfg.state_dir, std::string{name}}});
     return ins->second;
   };

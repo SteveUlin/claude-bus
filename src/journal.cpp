@@ -178,27 +178,6 @@ auto makeFileHeader() -> std::array<std::byte, kJournalHeaderBytes> {
   return h;
 }
 
-// Returns true iff this call CREATED the file (so the Synced append path
-// knows it must fsync the parent dir to make the new dirent durable).
-auto ensureHeader(const std::string& path) -> Result<bool> {
-  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
-  if (fd >= 0) {
-    Fd guard{fd};
-    const auto h = makeFileHeader();
-    if (::pwrite(fd, h.data(), kJournalHeaderBytes, 0) !=
-        static_cast<ssize_t>(kJournalHeaderBytes)) {
-      const int e = errno;
-      ::unlink(path.c_str());
-      return std::unexpected{errFromErrno(e, "write header")};
-    }
-    return true;
-  }
-  if (errno != EEXIST) {
-    return std::unexpected{errFromErrno(errno, "init journal")};
-  }
-  return false;
-}
-
 auto readAll(const std::string& path) -> Result<std::vector<std::byte>> {
   Fd fd{::open(path.c_str(), O_RDONLY)};
   if (!fd.valid()) {
@@ -390,6 +369,65 @@ auto writeU64File(const std::string& path, std::int64_t v) -> bool {
   return writeCursorImpl(path, v);
 }
 
+// ── Journal static factories ───────────────────────────────────────────────
+
+auto Journal::open(std::string path) -> bus::Result<Journal> {
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0) {
+    if (errno == ENOENT)
+      return std::unexpected{err("no such journal: " + path)};
+    return std::unexpected{errFromErrno(errno, "stat journal")};
+  }
+  return Journal{std::move(path)};
+}
+
+auto Journal::create(std::string path) -> bus::Result<Journal> {
+  std::error_code ec;
+  fs::create_directories(fs::path{path}.parent_path(), ec);
+  if (ec)
+    return std::unexpected{err("create topics dir: " + ec.message())};
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) {
+    if (errno == EEXIST)
+      return std::unexpected{err("journal already exists: " + path)};
+    return std::unexpected{errFromErrno(errno, "create journal")};
+  }
+  Fd guard{fd};
+  const auto h = makeFileHeader();
+  if (::pwrite(fd, h.data(), kJournalHeaderBytes, 0) !=
+      static_cast<ssize_t>(kJournalHeaderBytes)) {
+    const int e = errno;
+    ::unlink(path.c_str());
+    return std::unexpected{errFromErrno(e, "write journal header")};
+  }
+  return Journal{std::move(path)};
+}
+
+auto Journal::openOrCreate(std::string path) -> bus::Result<Journal> {
+  std::error_code ec;
+  fs::create_directories(fs::path{path}.parent_path(), ec);
+  if (ec)
+    return std::unexpected{err("create topics dir: " + ec.message())};
+  // O_CREAT without O_EXCL: create if absent, open if present.
+  const int check_fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  if (check_fd >= 0) {
+    // Newly created — write the v7 header.
+    Fd guard{check_fd};
+    const auto h = makeFileHeader();
+    if (::pwrite(check_fd, h.data(), kJournalHeaderBytes, 0) !=
+        static_cast<ssize_t>(kJournalHeaderBytes)) {
+      const int e = errno;
+      ::unlink(path.c_str());
+      return std::unexpected{errFromErrno(e, "write journal header")};
+    }
+    return Journal{std::move(path)};
+  }
+  if (errno != EEXIST)
+    return std::unexpected{errFromErrno(errno, "open/create journal")};
+  // Already exists — open it.
+  return Journal{std::move(path)};
+}
+
 // ── Journal methods ────────────────────────────────────────────────────────
 
 Journal::Journal(std::string path) : path_{std::move(path)} {}
@@ -429,13 +467,6 @@ auto Journal::append(std::span<const std::byte> payload, Durability durability)
   if (payload.size() > 0xFFFFFFFFULL) {
     return std::unexpected{err("payload too large")};
   }
-
-  std::error_code ec;
-  fs::create_directories(fs::path{path_}.parent_path(), ec);
-  if (ec) return std::unexpected{err("create topics dir: " + ec.message())};
-
-  const auto created = ensureHeader(path_);
-  if (!created) return std::unexpected{created.error()};
 
   auto append_ms = nowMs();
   const auto seq = nextSeq(append_ms);  // may bump append_ms (clock-rewind safe)
@@ -505,7 +536,11 @@ auto Journal::append(std::span<const std::byte> payload, Durability durability)
     if (::fdatasync(fd.get()) != 0) {
       return std::unexpected{errFromErrno(errno, "fdatasync record")};
     }
-    if (*created) {
+    // fsync the parent dir when this is the very first record (presize ==
+    // kJournalHeaderBytes) so the new dirent is durable. Stateless proxy
+    // for "file was just created" — works whether the factory was create()
+    // or openOrCreate() on a new path.
+    if (presize == static_cast<off_t>(kJournalHeaderBytes)) {
       const fs::path parent = fs::path{path_}.parent_path();
       Fd dir{::open(parent.c_str(), O_RDONLY)};
       if (!dir.valid()) {

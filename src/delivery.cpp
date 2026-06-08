@@ -259,7 +259,8 @@ auto Loop::emitAudit(std::string_view protocol, std::string_view body) -> void {
   if (!registry_.contains("audit")) {
     auto _ = registry_.create(audit);
   }
-  bus::Journal audit_log{cfg_.state_dir + "/topics/audit.log"};
+  auto audit_log_r = bus::Journal::openOrCreate(cfg_.state_dir + "/topics/audit.log");
+  if (!audit_log_r) return;  // audit is advisory — skip on I/O failure
   bus::msg::Envelope env;
   env.sender = "broker";
   env.protocol = std::string{protocol};
@@ -269,7 +270,7 @@ auto Loop::emitAudit(std::string_view protocol, std::string_view body) -> void {
   // and the broker dispatches itself into an infinite escalation loop.
   stampEpoch(env, current_epoch_);
   env.body = std::string{body};
-  auto _ = audit_log.append(bus::msg::encodeEnvelope(env));
+  auto _ = audit_log_r->append(bus::msg::encodeEnvelope(env));
 }
 
 auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool {
@@ -560,30 +561,33 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   {
     const std::string commands_topic = "commands-" + agent;
     if (registry_.contains(commands_topic)) {
-      bus::Journal cmds_log{topicLogPath(cfg_.state_dir, commands_topic)};
+      auto cmds_log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, commands_topic));
       bus::CursorStore cmds_cursors{cfg_.state_dir, commands_topic};
-      if (auto p = cmds_log.peek(cmds_cursors.consumerCursor(""), 1);
-          p && !p->empty()) {
-        const auto& rec = (*p)[0];
-        const auto cmds_env = bus::msg::decodeEnvelope(rec.payload);
-        if (cmds_env.body == "/clear" || cmds_env.body == "/compact" ||
-            cmds_env.body.starts_with("/clear ") ||
-            cmds_env.body.starts_with("/compact ")) {
-          std::println(stderr,
-                       "delivery: defer agent-inbox dispatch for {} "
-                       "(blocking-op /{} pending on commands-{})",
-                       agent, (cmds_env.body.starts_with("/compact") ? "compact" : "clear"),
-                       agent);
-          std::fflush(stderr);  // stderr is block-buffered when redirected
-          return;
+      if (cmds_log_r) {
+        if (auto p = cmds_log_r->peek(cmds_cursors.consumerCursor(""), 1);
+            p && !p->empty()) {
+          const auto& rec = (*p)[0];
+          const auto cmds_env = bus::msg::decodeEnvelope(rec.payload);
+          if (cmds_env.body == "/clear" || cmds_env.body == "/compact" ||
+              cmds_env.body.starts_with("/clear ") ||
+              cmds_env.body.starts_with("/compact ")) {
+            std::println(stderr,
+                         "delivery: defer agent-inbox dispatch for {} "
+                         "(blocking-op /{} pending on commands-{})",
+                         agent, (cmds_env.body.starts_with("/compact") ? "compact" : "clear"),
+                         agent);
+            std::fflush(stderr);  // stderr is block-buffered when redirected
+            return;
+          }
         }
       }
     }
   }
 
-  bus::Journal log{topicLogPath(cfg_.state_dir, cfg.name)};
+  auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, cfg.name));
+  if (!log_r) return;
   bus::CursorStore cursors{cfg_.state_dir, cfg.name};
-  auto r = log.peek(cursors.consumerCursor(""), 4);
+  auto r = log_r->peek(cursors.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   // Pick the first record that isn't expired AND isn't already
@@ -687,9 +691,10 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
   if (hasPresenceFile(agent)) return;
   if (blocking_ops_.contains(agent)) return;
 
-  bus::Journal log{topicLogPath(cfg_.state_dir, cfg.name)};
+  auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, cfg.name));
+  if (!log_r) return;
   bus::CursorStore cursors{cfg_.state_dir, cfg.name};
-  auto r = log.peek(cursors.consumerCursor(""), 4);
+  auto r = log_r->peek(cursors.consumerCursor(""), 4);
   if (!r || r->empty()) return;
 
   const auto now = nowMs();
@@ -771,14 +776,15 @@ auto Loop::escalate(const InFlight& f, std::string_view reason,
   // audit escalation — separate from inbox-comms which surfaces real
   // messages directed at the human.
   auto _ig = registry_.getOrAutoCreate("inbox-ops");
-  bus::Journal ops_log{cfg_.state_dir + "/topics/inbox-ops.log"};
+  auto ops_log_r = bus::Journal::openOrCreate(cfg_.state_dir + "/topics/inbox-ops.log");
+  if (!ops_log_r) return;  // ops sink is advisory — skip on I/O failure
   bus::msg::Envelope menv;
   menv.sender = "broker";
   menv.protocol = "delivery-failure";
   stampEpoch(menv, current_epoch_);
   menv.body = std::format(
       "delivery to {} exhausted ({}): {}", f.agent, reason, body);
-  auto _ig2 = ops_log.append(bus::msg::encodeEnvelope(menv));
+  auto _ig2 = ops_log_r->append(bus::msg::encodeEnvelope(menv));
 }
 
 auto Loop::scanRetries() -> void {
@@ -802,9 +808,10 @@ auto Loop::scanRetries() -> void {
     // Read the original record off the topic log so we can re-send
     // it. The record sits at offset cursor_after - record_len, but
     // re-walking from cursor is simpler: peek from the topic cursor.
-    bus::Journal log{topicLogPath(cfg_.state_dir, f.topic)};
+    auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, f.topic));
     bus::CursorStore log_cursors{cfg_.state_dir, f.topic};
-    auto r = log.peek(log_cursors.consumerCursor(""), 1);
+    if (!log_r) continue;
+    auto r = log_r->peek(log_cursors.consumerCursor(""), 1);
     if (!r || r->empty() || r->front().id != id) {
       // Record disappeared or cursor moved past; drop the stale
       // in-flight without escalation (this shouldn't happen).
@@ -1041,10 +1048,12 @@ auto Loop::maybeAutoClear() -> void {
 
     // Inbox depth — peek 1 record from cursor.
     {
-      bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + name)};
+      auto inbox_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, "inbox-" + name));
       bus::CursorStore inbox_cursors{cfg_.state_dir, "inbox-" + name};
-      if (auto r = inbox.peek(inbox_cursors.consumerCursor(""), 1); r && !r->empty()) {
-        continue;  // mail pending, defer the clear
+      if (inbox_r) {
+        if (auto r = inbox_r->peek(inbox_cursors.consumerCursor(""), 1); r && !r->empty()) {
+          continue;  // mail pending, defer the clear
+        }
       }
     }
 
@@ -1063,14 +1072,15 @@ auto Loop::maybeAutoClear() -> void {
     if (auto cr = registry_.getOrAutoCreate(commands_topic); !cr) continue;
     const std::string log_path =
         cfg_.state_dir + "/topics/" + commands_topic + ".log";
-    bus::Journal cmd_log{log_path};
+    auto cmd_log_r = bus::Journal::openOrCreate(log_path);
+    if (!cmd_log_r) continue;
     bus::msg::Envelope cmd_env;
     cmd_env.sender = "broker";
     cmd_env.protocol = "auto-clear";
     cmd_env.deliver_when = 1;  // idle
     cmd_env.body = "/clear";
     stampEpoch(cmd_env, current_epoch_);
-    auto _ig = cmd_log.append(bus::msg::encodeEnvelope(cmd_env));
+    auto _ig = cmd_log_r->append(bus::msg::encodeEnvelope(cmd_env));
 
     // Cool down for 5 minutes so we don't re-enqueue while the clear
     // is still resolving (SessionStart from /clear will overwrite the
@@ -1093,9 +1103,10 @@ auto Loop::maybeAutoClear() -> void {
 // True iff a record sits past agent's inbox cursor. A pure read fed into the
 // PolicyContext snapshot (was an inline lambda in maybeAutoRecover).
 auto Loop::inboxPending(const std::string& agent) const -> bool {
-  bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + agent)};
+  auto inbox_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, "inbox-" + agent));
+  if (!inbox_r) return false;
   bus::CursorStore inbox_cursors{cfg_.state_dir, "inbox-" + agent};
-  auto r = inbox.peek(inbox_cursors.consumerCursor(""), 1);
+  auto r = inbox_r->peek(inbox_cursors.consumerCursor(""), 1);
   return r && !r->empty();
 }
 
@@ -1180,9 +1191,10 @@ auto Loop::runPolicy() -> void {
   // assignment.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != TopicKind::WorkQueue) continue;
-    bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
+    auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, tcfg.name));
+    if (!log_r) continue;
     bus::CursorStore wq_cursors{cfg_.state_dir, tcfg.name};
-    auto r = log.peek(wq_cursors.consumerCursor(""), 16);  // bounded head window → batch-assign
+    auto r = log_r->peek(wq_cursors.consumerCursor(""), 16);  // bounded head window → batch-assign
     if (!r) continue;
     for (const auto& rec : *r) {
       const auto wq_env = bus::msg::decodeEnvelope(rec.payload);
@@ -1195,9 +1207,10 @@ auto Loop::runPolicy() -> void {
   // persists, so a restart resumes past already-notified posts.
   for (const auto& tcfg : registry_.list()) {
     if (tcfg.kind != TopicKind::Blackboard) continue;
-    bus::Journal log{topicLogPath(cfg_.state_dir, tcfg.name)};
+    auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, tcfg.name));
+    if (!log_r) continue;
     bus::CursorStore bb_cursors{cfg_.state_dir, tcfg.name};
-    auto r = log.peek(bb_cursors.consumerCursor("_dispatch"), 16);  // bounded window of new posts
+    auto r = log_r->peek(bb_cursors.consumerCursor("_dispatch"), 16);  // bounded window of new posts
     if (!r || r->empty()) continue;
     for (const auto& rec : *r) {
       const auto bb_env = bus::msg::decodeEnvelope(rec.payload);
@@ -1229,14 +1242,15 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
       } else if (auto cr = registry_.getOrAutoCreate(a.topic); !cr) {
         return;
       }
-      bus::Journal log{cfg_.state_dir + "/topics/" + a.topic + ".log"};
+      auto log_r = bus::Journal::openOrCreate(cfg_.state_dir + "/topics/" + a.topic + ".log");
+      if (!log_r) return;
       bus::msg::Envelope env;
       env.sender = "broker";
       env.protocol = a.protocol;
       env.deliver_when = a.deliver_when;
       stampEpoch(env, current_epoch_);
       env.body = a.body;
-      auto appended = log.append(bus::msg::encodeEnvelope(env));
+      auto appended = log_r->append(bus::msg::encodeEnvelope(env));
       // M2 work-queue claim: after the task is durably in the recipient inbox,
       // consume the source queue head (advance its "" cursor past the head),
       // reusing the fetch primitive's semantics. Append-then-consume = if the
@@ -1261,9 +1275,10 @@ auto Loop::executePolicyAction(const policy::PolicyAction& a) -> void {
 // (kernel plane) performs it on a DispatchActor's consume_from intent, so the
 // actor never advances a cursor. No-op if the queue is empty.
 auto Loop::consumeQueueHead(const std::string& topic) -> void {
-  bus::Journal log{topicLogPath(cfg_.state_dir, topic)};
+  auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, topic));
+  if (!log_r) return;
   bus::CursorStore cq_cursors{cfg_.state_dir, topic};
-  auto r = log.peek(cq_cursors.consumerCursor(""), 1);
+  auto r = log_r->peek(cq_cursors.consumerCursor(""), 1);
   if (!r || r->empty()) return;
   cq_cursors.ack("", bus::Journal::cursorAfter(r->front()));
 }
@@ -1328,10 +1343,12 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // Mail queued past the inbox cursor?
     bool has_mail = false;
     {
-      bus::Journal inbox{topicLogPath(cfg_.state_dir, "inbox-" + name)};
+      auto inbox_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, "inbox-" + name));
       bus::CursorStore inbox_wake_cursors{cfg_.state_dir, "inbox-" + name};
-      auto r = inbox.peek(inbox_wake_cursors.consumerCursor(""), 1);
-      has_mail = r && !r->empty();
+      if (inbox_r) {
+        auto r = inbox_r->peek(inbox_wake_cursors.consumerCursor(""), 1);
+        has_mail = r && !r->empty();
+      }
     }
     if (!has_mail) {  // drained / nothing queued → healthy
       mail_queued_since_ms_.erase(name);

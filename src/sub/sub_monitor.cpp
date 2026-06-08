@@ -13,6 +13,7 @@
 
 #include "../agent_status.h"
 #include "../broker.h"
+#include "../context_stats.h"
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../signals.h"
@@ -207,84 +208,6 @@ auto formatMail(std::int64_t unread) -> std::string {
   return std::to_string(unread);
 }
 
-// Scan `"<key>": <int>` after `"<scope>"` — avoids json::parse because
-// the statusline payload has float fields (cost.total_cost_usd) and
-// our json_min doesn't speak floats.
-auto scanIntAfter(std::string_view content,
-                  std::string_view scope_key,
-                  std::string_view leaf_key) -> long long {
-  auto scope = content.find(scope_key);
-  if (scope == std::string_view::npos) return -1;
-  auto key = content.find(leaf_key, scope);
-  if (key == std::string_view::npos) return -1;
-  auto i = content.find(':', key);
-  if (i == std::string_view::npos) return -1;
-  ++i;
-  while (i < content.size() && (content[i] == ' ' || content[i] == '\t')) ++i;
-  long long n = 0;
-  bool seen = false;
-  while (i < content.size() && content[i] >= '0' && content[i] <= '9') {
-    n = n * 10 + (content[i] - '0');
-    seen = true;
-    ++i;
-  }
-  return seen ? n : -1;
-}
-
-struct CtxStats {
-  int pct{-1};                // used_percentage against the REAL window
-  long long size_tokens{-1};  // REAL per-model window (the honest denominator)
-  long long tokens{-1};       // total_input_tokens — drives the policy marker
-  std::string model;          // model id ("" if absent)
-  std::string effort;         // live effort level; "" if unavailable (gap)
-};
-
-// Context + effort for an agent. AUTHORITATIVE source is the statusline
-// capture ($STATE/statusline/<agent>.json — real per-model window + live
-// effort, the only place those exist; see settings/hooks-shared/
-// statusline.sh). Falls back to the broker's transcript-derived
-// $STATE/status (knob window, no effort) when the capture is absent — e.g.
-// before the wrapper has rolled out to a pane.
-auto contextStatsFor(std::string_view agent) -> CtxStats {
-  CtxStats out;
-
-  // Preferred: the statusline capture (flat JSON we control).
-  {
-    const std::string sl =
-        stateDir() + "/statusline/" + std::string{agent} + ".json";
-    std::ifstream in{sl};
-    if (in) {
-      std::string content((std::istreambuf_iterator<char>(in)),
-                          std::istreambuf_iterator<char>());
-      if (const auto v = json::parse(content); v && v->isObject()) {
-        out.tokens = v->getOrInt("total_input_tokens", -1);
-        out.size_tokens = v->getOrInt("context_window_size", -1);
-        const auto p = v->getOrInt("used_percentage", -1);
-        if (p >= 0) out.pct = static_cast<int>(p > 100 ? 100 : p);
-        out.model = v->getOrString("model_id");
-        out.effort = v->getOrString("effort_level");
-        if (out.size_tokens > 0) return out;  // authoritative window
-      }
-    }
-  }
-
-  // Fallback: broker status (knob-denominated window, no effort).
-  const std::string path =
-      stateDir() + "/status/" + std::string{agent} + ".json";
-  std::ifstream in{path};
-  if (!in) return out;
-  std::ostringstream buf;
-  buf << in.rdbuf();
-  const auto content = buf.str();
-  const auto pct = scanIntAfter(content, "\"context_window\"",
-                                "\"used_percentage\"");
-  if (pct >= 0) out.pct = static_cast<int>(pct > 100 ? 100 : pct);
-  out.size_tokens = scanIntAfter(content, "\"context_window\"",
-                                 "\"context_window_size\"");
-  out.model = extractStr(content, "model");
-  return out;
-}
-
 // MODEL column — abbreviates the status JSON's model string (strips the
 // "claude-" vendor prefix: "claude-opus-4-8" → "opus-4-8") so the
 // model+ctx pair reads at a glance. "—" until the broker's token-scan
@@ -453,7 +376,7 @@ auto render(const Snapshot& snap, std::int64_t now_ms) -> void {
     const auto lane = formatLane(lane_raw);
     const auto file_title = titleFromFile(name);
     const auto title = formatTitle(file_title);
-    const auto ctx_stats = contextStatsFor(name);
+    const auto ctx_stats = contextStatsFor(stateDir(), name);
     const auto ctx_cell = formatCtx(ctx_stats);
     const auto model_cell = formatModel(ctx_stats.model);
     const auto effort_cell = formatEffort(ctx_stats.effort);

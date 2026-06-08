@@ -44,6 +44,7 @@ target_include_directories(bus_core PUBLIC src)
 # the one-shot `bus verify` in src/sub/, still bound to its CLI shell.)
 add_library(bus_readers STATIC
     src/agent_status.cpp
+    src/context_stats.cpp
     src/task_model.cpp
     src/trigger_feed.cpp
 )
@@ -176,6 +177,7 @@ add_executable(bus_tests
     tests/unit/test_peer_registry.cpp
     tests/unit/test_envelope.cpp
     tests/unit/test_agent_status.cpp
+    tests/unit/test_context_stats.cpp
     tests/unit/test_fold.cpp
     tests/unit/test_readiness.cpp
     tests/unit/test_doorbell_readiness.cpp

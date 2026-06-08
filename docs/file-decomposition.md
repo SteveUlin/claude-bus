@@ -145,7 +145,13 @@ authority). `sub_monitor.cpp` keeps `render()` and the small display formatters.
 **Blast:** ~60 lines move into `bus_readers`; `sub_monitor.cpp` gains an include.
 The rest of the viewer (one cohesive `render`) stays — correctly.
 
-**Status:** [ ] proposed
+**Status:** [x] LANDED — `bus::CtxStats` + `contextStatsFor(state_root, agent)`
+in `bus_readers` (state root INJECTED, Readers convention), display formatters
+(`formatCtx`/`ctxColorFor`/`formatModel`) stay in `sub_monitor`.
+`tests/unit/test_context_stats.cpp` (4 cases). Follow-up: `scanIntAfter` moved
+with it but its string sibling (`extractStr` in `sub_monitor`) is now a private
+copy in `context_stats.cpp` — these two flat-JSON scanners want a shared
+`json_scan` util (the float fields block `json::parse`); noted, not built.
 
 ---
 

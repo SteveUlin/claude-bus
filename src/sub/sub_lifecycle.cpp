@@ -8,16 +8,14 @@
 #include "../sub.h"
 #include "../broker.h"
 #include "../json_min.h"
+#include "../process.h"
 #include "../rpc.h"
 #include "../state_paths.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-#include <array>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -66,79 +64,12 @@ auto busRoot() -> std::string {
   return self.substr(0, slash);
 }
 
-auto runSync(const std::vector<const char*>& argv) -> int {
-  const pid_t pid = ::fork();
-  if (pid < 0) return -1;
-  if (pid == 0) {
-    std::vector<char*> a;
-    a.reserve(argv.size() + 1);
-    for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-    a.push_back(nullptr);
-    ::execvp(a[0], a.data());
-    _exit(127);
-  }
-  int status = 0;
-  while (::waitpid(pid, &status, 0) < 0) {
-    if (errno != EINTR) return -1;
-  }
-  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-// Capture stdout from a subprocess. Used here to read
-// `zellij action query-tab-names` for the pre-spawn dedup check; the
-// equivalent helper inside pane.cpp is anonymous-namespace, so we
-// repeat the minimum needed (no timeout — zellij query-tab-names
-// returns in < 50 ms in practice; if it doesn't the spawn caller
-// will notice).
-auto runCaptureLocal(const std::vector<const char*>& argv)
-    -> std::pair<int, std::string> {
-  int pipefd[2]{};
-  if (::pipe(pipefd) != 0) return {-1, {}};
-  const pid_t pid = ::fork();
-  if (pid < 0) {
-    ::close(pipefd[0]);
-    ::close(pipefd[1]);
-    return {-1, {}};
-  }
-  if (pid == 0) {
-    ::close(pipefd[0]);
-    ::dup2(pipefd[1], STDOUT_FILENO);
-    ::close(pipefd[1]);
-    std::vector<char*> a;
-    a.reserve(argv.size() + 1);
-    for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-    a.push_back(nullptr);
-    ::execvp(a[0], a.data());
-    _exit(127);
-  }
-  ::close(pipefd[1]);
-  std::string out;
-  std::array<char, 4096> buf{};
-  for (;;) {
-    const auto n = ::read(pipefd[0], buf.data(), buf.size());
-    if (n > 0) {
-      out.append(buf.data(), static_cast<std::size_t>(n));
-      continue;
-    }
-    if (n == 0) break;
-    if (errno == EINTR) continue;
-    break;
-  }
-  ::close(pipefd[0]);
-  int status = 0;
-  while (::waitpid(pid, &status, 0) < 0) {
-    if (errno != EINTR) return {-1, std::move(out)};
-  }
-  const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-  return {code, std::move(out)};
-}
-
 // Returns true if the live zellij session already has a tab named
 // `name`. On query failure we fall through to "no" — better to let
 // zellij itself error on the new-tab call than to refuse spawn
 // because we couldn't read the tab list.
 auto tabNameExists(std::string_view name) -> bool {
-  const auto [rc, out] = runCaptureLocal({"zellij", "action",
+  const auto [rc, out] = process::runCapture({"zellij", "action",
                                           "query-tab-names"});
   if (rc != 0) return false;
   std::istringstream in{out};
@@ -178,7 +109,7 @@ auto isClaudeFor(pid_t pid, const std::string& name) -> bool {
 // command line. Returns the first match, or -1.
 auto pgrepClaude(const std::string& name) -> pid_t {
   const std::string pat = "claude --name " + name;
-  const auto [rc, out] = runCaptureLocal({"pgrep", "-f", pat.c_str()});
+  const auto [rc, out] = process::runCapture({"pgrep", "-f", pat.c_str()});
   if (rc != 0) return -1;
   std::istringstream in{out};
   long p = -1;
@@ -287,7 +218,7 @@ layout {{
 )LAYOUT",
       name, bus_bin, agent_launch, pane_cwd, launch_args);
 
-  const int rc = runSync({"zellij", "action", "new-tab", "--name",
+  const int rc = process::runSilent({"zellij", "action", "new-tab", "--name",
                           name.c_str(), "--layout-string", layout.c_str()});
   if (rc != 0) {
     std::println(stderr, "bus spawn: zellij action new-tab failed (rc={})", rc);
@@ -384,8 +315,8 @@ auto subDespawn(std::span<const char* const> args) -> int {
   // close on go-to-tab-name succeeding avoids ever closing the wrong (merely
   // focused) tab if this peer's tab already vanished.
   if (tabNameExists(name) &&
-      runSync({"zellij", "action", "go-to-tab-name", name.c_str()}) == 0) {
-    runSync({"zellij", "action", "close-tab"});
+      process::runSilent({"zellij", "action", "go-to-tab-name", name.c_str()}) == 0) {
+    process::runSilent({"zellij", "action", "close-tab"});
   }
 
   // Reap the peer's broker topics (inbox-NAME / commands-NAME) so a

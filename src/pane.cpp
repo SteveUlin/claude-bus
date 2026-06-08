@@ -1,13 +1,9 @@
 #include "pane.h"
 
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include "process.h"
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -23,158 +19,6 @@ namespace {
 
 constexpr std::string_view kPromptMarker = "\xe2\x9d\xaf";  // U+276F ❯
 constexpr std::string_view kDivider = "\xe2\x94\x80";       // U+2500 ─
-
-// Default subprocess timeout. Every zellij invocation lives on the
-// broker's main pselect thread, so a hang here halts the delivery
-// loop: scanEvents stops draining UPS acks, scanRetries stops firing,
-// and no other RPC tick fires until the child returns. 5 s is way
-// past zellij's normal latency (dump-screen returns in <100 ms) while
-// still giving slow systems some headroom.
-constexpr auto kDefaultSubprocessTimeout = std::chrono::milliseconds{5000};
-
-// Wait for `pid` up to `timeout`, polling waitpid(WNOHANG) every
-// ~20 ms. Returns {reaped, status}. When `reaped` is false the caller
-// is responsible for SIGKILL'ing the runaway child and harvesting the
-// final status — see waitWithTimeoutOrKill.
-auto waitWithTimeoutOrKill(pid_t pid, std::chrono::milliseconds timeout)
-    -> std::pair<bool /*timed_out*/, int /*status*/> {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  int status = 0;
-  while (std::chrono::steady_clock::now() < deadline) {
-    const pid_t r = ::waitpid(pid, &status, WNOHANG);
-    if (r == pid) return {false, status};
-    if (r < 0) {
-      if (errno == EINTR) continue;
-      return {false, 0};  // already reaped or other error
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
-  }
-  // Timed out — kill the child and reap synchronously. SIGKILL since
-  // a hung `zellij action ...` is wedged on the zellij server IPC and
-  // won't notice SIGTERM in a useful timeframe.
-  ::kill(pid, SIGKILL);
-  while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-  }
-  return {true, status};
-}
-
-// Drain a pipe FD into a string with a deadline. The fd must be
-// O_NONBLOCK. Stops on EOF, deadline-exceeded, or read error.
-auto slurpFdWithDeadline(int fd, std::chrono::steady_clock::time_point deadline)
-    -> std::string {
-  std::string out;
-  std::array<char, 4096> buf{};
-  while (std::chrono::steady_clock::now() < deadline) {
-    const auto n = ::read(fd, buf.data(), buf.size());
-    if (n > 0) {
-      out.append(buf.data(), static_cast<std::size_t>(n));
-      continue;
-    }
-    if (n == 0) break;  // EOF
-    if (errno == EINTR) continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      // No data right now; sleep briefly so we don't burn CPU.
-      std::this_thread::sleep_for(std::chrono::milliseconds{10});
-      continue;
-    }
-    break;  // genuine read error
-  }
-  return out;
-}
-
-// Fork + exec a command with stdout captured, stderr discarded.
-// Returns {exit_code, stdout}. exit_code is -1 on spawn failure OR
-// when the child blew past the timeout (we SIGKILL it and continue —
-// the caller decides what -1 means for its semantics).
-auto runCapture(const std::vector<const char*>& argv,
-                std::chrono::milliseconds timeout =
-                    kDefaultSubprocessTimeout)
-    -> std::pair<int, std::string> {
-  int pipefd[2]{};
-  if (::pipe(pipefd) != 0) return {-1, {}};
-
-  // Build the execvp argv BEFORE fork. In a multithreaded process the
-  // child inherits only the forking thread; any other thread holding
-  // the malloc arena lock at fork time leaves it locked forever in the
-  // child, so a heap alloc (vector push_back) between fork and execvp
-  // can deadlock. Keep the child path async-signal-safe (syscalls only).
-  std::vector<char*> a;
-  a.reserve(argv.size() + 1);
-  for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-  a.push_back(nullptr);
-
-  const pid_t pid = ::fork();
-  if (pid < 0) {
-    ::close(pipefd[0]);
-    ::close(pipefd[1]);
-    return {-1, {}};
-  }
-  if (pid == 0) {
-    ::close(pipefd[0]);
-    ::dup2(pipefd[1], STDOUT_FILENO);
-    ::close(pipefd[1]);
-    // stderr to /dev/null — pane-id-ambiguous and dump-screen-failed
-    // surface through exit codes, not noisy stderr leakage.
-    const int devnull = ::open("/dev/null", O_WRONLY);
-    if (devnull >= 0) {
-      ::dup2(devnull, STDERR_FILENO);
-      ::close(devnull);
-    }
-    ::execvp(a[0], a.data());
-    _exit(127);
-  }
-
-  ::close(pipefd[1]);
-  // Non-blocking reads so the deadline drain doesn't get stuck on
-  // a hung child that hasn't closed the pipe yet.
-  const int flags = ::fcntl(pipefd[0], F_GETFL, 0);
-  if (flags >= 0) ::fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
-
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  auto out = slurpFdWithDeadline(pipefd[0], deadline);
-  ::close(pipefd[0]);
-
-  // Remaining time after the drain. If we already hit the deadline
-  // drain-side, waitWithTimeoutOrKill gets a zero budget and kills
-  // immediately — exactly what we want.
-  const auto wait_budget = std::chrono::duration_cast<std::chrono::milliseconds>(
-      deadline - std::chrono::steady_clock::now());
-  const auto [timed_out, status] = waitWithTimeoutOrKill(
-      pid, wait_budget.count() > 0 ? wait_budget
-                                   : std::chrono::milliseconds{0});
-  if (timed_out) return {-1, std::move(out)};
-  const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-  return {code, std::move(out)};
-}
-
-// Run a command with no stdin/stdout/stderr captured (silent). Returns
-// the exit code (-1 on spawn failure or timeout). Used by sendToPane.
-auto runSilent(const std::vector<const char*>& argv,
-               std::chrono::milliseconds timeout =
-                   kDefaultSubprocessTimeout) -> int {
-  // Build argv before fork — see runCapture for the arena-lock rationale.
-  std::vector<char*> a;
-  a.reserve(argv.size() + 1);
-  for (const auto* s : argv) a.push_back(const_cast<char*>(s));
-  a.push_back(nullptr);
-
-  const pid_t pid = ::fork();
-  if (pid < 0) return -1;
-  if (pid == 0) {
-    const int devnull = ::open("/dev/null", O_RDWR);
-    if (devnull >= 0) {
-      ::dup2(devnull, STDIN_FILENO);
-      ::dup2(devnull, STDOUT_FILENO);
-      ::dup2(devnull, STDERR_FILENO);
-      ::close(devnull);
-    }
-    ::execvp(a[0], a.data());
-    _exit(127);
-  }
-  const auto [timed_out, status] = waitWithTimeoutOrKill(pid, timeout);
-  if (timed_out) return -1;
-  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
 
 // Trim leading and trailing whitespace, including UTF-8 NBSP (Claude
 // Code uses U+00A0 to pad the input area; without this rule an "empty"
@@ -475,7 +319,7 @@ auto listPanesJsonCached() -> std::string {
   if (valid && (now - at) < std::chrono::milliseconds{listPanesJsonTtlMs()}) {
     return cached;
   }
-  const auto [rc, out] = runCapture({"zellij", "action", "list-panes",
+  const auto [rc, out] = process::runCapture({"zellij", "action", "list-panes",
                                      "--json"});
   // Only a SUCCESSFUL fetch refreshes the cached value. A failed/timed-out
   // query must NOT cache empty: that makes every caller in the TTL window
@@ -583,12 +427,12 @@ auto sendToPane(std::string_view pane_id, std::string_view text) -> bool {
     if (c == '\n') c = ' ';
   }
   // write-chars NAMED-PANE TEXT
-  if (runSilent({"zellij", "action", "write-chars", "--pane-id",
+  if (process::runSilent({"zellij", "action", "write-chars", "--pane-id",
                  pane_s.c_str(), text_s.c_str()}) != 0) {
     return false;
   }
   // send-keys NAMED-PANE "Enter"
-  if (runSilent({"zellij", "action", "send-keys", "--pane-id",
+  if (process::runSilent({"zellij", "action", "send-keys", "--pane-id",
                  pane_s.c_str(), "Enter"}) != 0) {
     return false;
   }
@@ -598,7 +442,7 @@ auto sendToPane(std::string_view pane_id, std::string_view text) -> bool {
 auto sendKey(std::string_view pane_id, std::string_view key) -> bool {
   const std::string pane_s{pane_id};
   const std::string key_s{key};
-  return runSilent({"zellij", "action", "send-keys", "--pane-id",
+  return process::runSilent({"zellij", "action", "send-keys", "--pane-id",
                     pane_s.c_str(), key_s.c_str()}) == 0;
 }
 
@@ -668,7 +512,7 @@ auto sendToPaneSafe(std::string_view agent_name,
   // Enter from sendToPane and reset the prompt before we re-key.
   if (!saved.empty()) {
     std::this_thread::sleep_for(std::chrono::milliseconds{100});
-    runSilent({"zellij", "action", "write-chars", "--pane-id",
+    process::runSilent({"zellij", "action", "write-chars", "--pane-id",
                pane.c_str(), saved.c_str()});
   }
   return true;
@@ -679,7 +523,7 @@ auto paneState(std::string_view name) -> PaneState {
   const std::string pid = paneId(name);
   if (pid.empty()) return ps;
 
-  const auto [rc, dump] = runCapture({"zellij", "action", "dump-screen",
+  const auto [rc, dump] = process::runCapture({"zellij", "action", "dump-screen",
                                       "--pane-id", pid.c_str(), "--ansi"});
   if (rc != 0) return ps;
 

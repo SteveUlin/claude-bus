@@ -51,6 +51,15 @@ target_include_directories(bus_readers PUBLIC src)
 # json symbols must resolve after this archive on the link line.
 target_link_libraries(bus_readers PUBLIC bus_core bus_envelope)
 
+# Child-process spawn: fork/exec + stdout-capture + timeout-kill (process.h).
+# One implementation of the machinery that was hand-rolled twice (pane.cpp's
+# runCapture/runSilent and sub_lifecycle.cpp's runSync/runCaptureLocal). No deps
+# beyond libc; testable in isolation (tests/unit/test_process.cpp).
+add_library(bus_process STATIC
+    src/process.cpp
+)
+target_include_directories(bus_process PUBLIC src)
+
 # Pane acquisition + actuators (paneState, sendToPaneSafe, the loop-thread TTL
 # cache). The loop/Daemon plane: single-thread-owned mutable caches that must
 # NOT enter Readers. Kept its own unit so the read plane can't pull pane.cpp by
@@ -59,6 +68,8 @@ add_library(bus_pane STATIC
     src/pane.cpp
 )
 target_include_directories(bus_pane PUBLIC src)
+# pane.cpp drives zellij through the shared spawn module.
+target_link_libraries(bus_pane PUBLIC bus_process)
 
 # The Policy seam (docs/policy-actors.md): autonomous broker behaviors as
 # actors that observe a Readers snapshot, apply their own guards, and return
@@ -157,6 +168,7 @@ add_executable(bus_tests
     tests/unit/test_doorbell_readiness.cpp
     tests/unit/test_tail_reader.cpp
     tests/unit/test_pane_cache.cpp
+    tests/unit/test_process.cpp
     tests/unit/test_topic_registry.cpp
     tests/unit/test_task_graph.cpp
     tests/unit/test_recovery.cpp

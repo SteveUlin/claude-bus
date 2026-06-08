@@ -14,6 +14,8 @@ Driven as separate build-green, force-verified commits on `main`. Skip these in 
 - **C1** — `TopicKind` enum replaces the raw `kind` string, 39 sites (`0194b202`)
 - **D1** — `TokenWatcher` extracted out of the `delivery::Loop` god-object (`1b334a55`)
 - **D3 + D4** — `emitAudit()` + `isAgentIdle()` private helpers in `delivery::Loop` (`fcf9f081`)
+- **JN3** — `okResponse`/`errorResponse` moved from `bus::json` to `bus::rpc`, 42 sites (`ad87752a`)
+- **C5** — typed enums for `TaskState` / `Boundary` / `RecoveryMode` (`91a2fb57`)
 
 Also landed earlier in the session (journal kernel): in-place trim removed (offsets immutable), `retention_ms` dropped, read-truncation surfaced (`truncated_at`), per-file UUID header (wire v7, tag from UUID).
 

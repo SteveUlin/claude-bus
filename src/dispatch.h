@@ -22,8 +22,7 @@
 // per tick — a long-stuck dispatch only stalls deliveries to THAT
 // topic, not others.
 
-#include "broker.h"
-
+#include <functional>
 #include <string_view>
 
 namespace bus::dispatch {
@@ -31,7 +30,10 @@ namespace bus::dispatch {
 // Returns true if the body was successfully written into the pane.
 // false on persistent failure (pane vanished, all attempts saw the
 // pane in a non-INSERT state, etc.).
-auto dispatchTui(const BrokerConfig& cfg, std::string_view agent,
-                 std::string_view body) -> bool;
+// `should_stop` is polled during backoff sleeps; return true to abort
+// the dispatch early (e.g. broker SIGTERM).
+auto dispatchTui(std::string_view state_dir, std::string_view agent,
+                 std::string_view body,
+                 const std::function<bool()>& should_stop) -> bool;
 
 }  // namespace bus::dispatch

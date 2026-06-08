@@ -17,6 +17,20 @@
 
 namespace bus {
 
+namespace {
+
+auto isValidTopicName(std::string_view name) -> bool {
+  if (name.empty() || name.size() > 128) return false;
+  for (char c : name) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                    c == '-' || c == '_';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 auto topicKindFromStr(std::string_view s) -> TopicKind {
   if (s == kKindAgentInbox) return TopicKind::AgentInbox;
   if (s == kKindTuiCommands) return TopicKind::TuiCommands;
@@ -38,16 +52,6 @@ auto topicKindToStr(TopicKind k) -> std::string_view {
     case TopicKind::Unknown:     return "";
   }
   return "";  // unreachable, silences -Wreturn-type
-}
-
-auto isValidTopicName(std::string_view name) -> bool {
-  if (name.empty() || name.size() > 128) return false;
-  for (char c : name) {
-    const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                    c == '-' || c == '_';
-    if (!ok) return false;
-  }
-  return true;
 }
 
 auto TopicConfig::toJson() const -> json::Value {

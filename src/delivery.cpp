@@ -12,6 +12,7 @@
 #include "pane.h"
 #include "recovery.h"
 #include "recovery_actor.h"
+#include "rpc.h"
 #include "state_paths.h"
 #include "tail_reader.h"
 #include "tty_policy.h"
@@ -728,7 +729,8 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     // Run the dispatch state machine. Synchronous — can take up to
     // ~5s on retries. Only this topic stalls; other topics still
     // dispatch on subsequent ticks.
-    if (!dispatch::dispatchTui(cfg_, agent, env.body)) {
+    if (!dispatch::dispatchTui(cfg_.state_dir, agent, env.body,
+                               [] { return rpc::Server::stopRequested(); })) {
       return;  // dispatch failed (pane gone or stuck); retry next tick
     }
 
@@ -845,7 +847,8 @@ auto Loop::scanRetries() -> void {
     // dedup is tracked as a separate follow-up.
     const auto* tcfg = registry_.get(f.topic);
     if (tcfg != nullptr && tcfg->kind == TopicKind::TuiCommands) {
-      dispatch::dispatchTui(cfg_, f.agent, rec_env.body);
+      dispatch::dispatchTui(cfg_.state_dir, f.agent, rec_env.body,
+                            [] { return rpc::Server::stopRequested(); });
     }
     f.attempts += 1;  // deadline tick (agent-inbox) / re-dispatch count (tui)
     f.next_retry_at = now + ackTimeoutMs();

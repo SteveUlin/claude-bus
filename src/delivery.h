@@ -125,15 +125,13 @@ class Loop {
   // ticks (D8 Part B). Recomputed by maybeEscalateStuck every tick.
   auto nextDeadlineMs() const -> std::int64_t { return next_deadline_ms_; }
 
+ private:
   // The wall-clock instant (ms) of the most recent detected forward clock JUMP
   // (suspend/resume / NTP step) — the broker is the only proc that can spot a
   // lid-close, which btime/systemBootMs() misses. 0 = no jump seen this run.
-  // The reporting-truth continuity clamp (kvothe) consumes this:
-  // max(systemBootMs(), continuitySinceMs()) floors event-age so a resume can't
-  // flip an agent red on staleness alone. Updated every tick by updateContinuity.
+  // Persisted to $STATE/continuity.ms; broker reads it back via bus::readU64File.
+  // Updated every tick by updateContinuity.
   auto continuitySinceMs() const -> std::int64_t { return continuity_since_ms_; }
-
- private:
   const BrokerConfig& cfg_;
   TopicRegistry& registry_;
   std::uint64_t current_epoch_{0};

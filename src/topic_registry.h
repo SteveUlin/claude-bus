@@ -121,7 +121,4 @@ class TopicRegistry {
   std::map<std::string, TopicConfig, std::less<>> topics_;
 };
 
-// Validate topic name characters. Lowercase + digits + hyphen.
-auto isValidTopicName(std::string_view name) -> bool;
-
 }  // namespace bus

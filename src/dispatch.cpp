@@ -1,7 +1,6 @@
 #include "dispatch.h"
 
 #include "pane.h"
-#include "rpc.h"
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -10,6 +9,7 @@
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <thread>
 
@@ -23,18 +23,19 @@ auto sleepFor(std::chrono::milliseconds d) -> void {
   std::this_thread::sleep_for(d);
 }
 
-// Sleep up to d, waking every ~50ms to recheck the broker stop flag.
+// Sleep up to d, waking every ~50ms to recheck the stop predicate.
 // Returns false the moment a shutdown is observed so a multi-second
 // backoff can't park the delivery thread past SIGTERM.
-auto sleepUnlessStopping(std::chrono::milliseconds d) -> bool {
+auto sleepUnlessStopping(std::chrono::milliseconds d,
+                         const std::function<bool()>& should_stop) -> bool {
   constexpr std::chrono::milliseconds kSlice{50};
   for (auto left = d; left > std::chrono::milliseconds::zero();) {
-    if (rpc::Server::stopRequested()) return false;
+    if (should_stop()) return false;
     const auto chunk = left < kSlice ? left : kSlice;
     std::this_thread::sleep_for(chunk);
     left -= chunk;
   }
-  return !rpc::Server::stopRequested();
+  return !should_stop();
 }
 
 // Acquire the per-pane TTY flock. The lock is the same one
@@ -82,12 +83,13 @@ auto normalize(std::string_view pane_id) -> void {
 
 }  // namespace
 
-auto dispatchTui(const BrokerConfig& cfg, std::string_view agent,
-                 std::string_view body) -> bool {
+auto dispatchTui(std::string_view state_dir, std::string_view agent,
+                 std::string_view body,
+                 const std::function<bool()>& should_stop) -> bool {
   const auto pane = paneId(agent);
   if (pane.empty()) return false;
 
-  const std::string lock_dir = cfg.state_dir + "/tui-locks";
+  const std::string lock_dir = std::string{state_dir} + "/tui-locks";
   std::error_code ec;
   fs::create_directories(lock_dir, ec);
   const std::string lock_path =
@@ -103,12 +105,12 @@ auto dispatchTui(const BrokerConfig& cfg, std::string_view agent,
       std::chrono::milliseconds{4000},
   };
   for (int i = 0; i < 3; ++i) {
-    if (rpc::Server::stopRequested()) return false;
+    if (should_stop()) return false;
     if (isReady(agent)) {
       return sendToPane(pane, body);
     }
     normalize(pane);
-    if (!sleepUnlessStopping(backoffs[i])) return false;
+    if (!sleepUnlessStopping(backoffs[i], should_stop)) return false;
   }
   return false;
 }

@@ -72,6 +72,8 @@ class Server {
 
   // Signal the run loop to exit. Safe to call from a signal handler
   // (sets a volatile atomic flag the accept loop polls).
+  // NOTE: requestStop()/stopRequested() operate on a single process-global
+  // flag — there is exactly one rpc::Server per process.
   static auto requestStop() -> void;
 
   // True once requestStop()/SIGTERM has been observed. Lets bounded

@@ -39,7 +39,7 @@ auto subMsg(std::span<const char* const> args) -> int {
   if (cmd == "drop") return subDrop(sub_args);
 
   std::println(stderr, "bus msg: unknown command \"{}\"", cmd);
-  return 1;
+  return 2;
 }
 
 }  // namespace bus

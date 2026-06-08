@@ -457,19 +457,34 @@ auto runBroker(const BrokerConfig& cfg) -> int {
   // -- enqueue / peek / fetch -------------------------------------
   //
   // Topic logs live on disk under $STATE/topics/<name>.log; we open a
-  // Journal lazily on first access and keep a cache so subsequent
-  // calls don't re-stat the registry path.
+  // Journal + CursorStore lazily on first access and kept cached so
+  // subsequent calls don't re-open the same topic's handles.
   const std::string topics_dir = cfg.state_dir + "/topics";
-  std::map<std::string, bus::Journal> logs;
+  struct TopicHandles {
+    bus::Journal log;
+    bus::CursorStore cursors;
+  };
+  std::map<std::string, TopicHandles> logs;
 
-  auto getOrOpenLog = [&](std::string_view name) -> bus::Journal& {
+  auto getOrOpen = [&](std::string_view name) -> TopicHandles& {
     auto it = logs.find(std::string{name});
     if (it != logs.end()) return it->second;
     const std::string path =
         topics_dir + "/" + std::string{name} + ".log";
-    auto [ins, _] =
-        logs.emplace(std::string{name}, bus::Journal{path});
+    auto [ins, _] = logs.emplace(
+        std::string{name},
+        TopicHandles{bus::Journal{path},
+                     bus::CursorStore{cfg.state_dir, std::string{name}}});
     return ins->second;
+  };
+
+  auto getOrOpenLog = [&](std::string_view name) -> bus::Journal& {
+    return getOrOpen(name).log;
+  };
+
+  auto getOrOpenCursors =
+      [&](std::string_view name) -> bus::CursorStore& {
+    return getOrOpen(name).cursors;
   };
 
   server.on("enqueue", [&](const json::Value& req) {
@@ -526,7 +541,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       auto all = log.dump();
       if (all && !all->empty()) {
         const auto& latest = all->back();
-        bus::CursorStore bb_cursors{cfg.state_dir, name};
+        auto& bb_cursors = getOrOpenCursors(name);
         bb_cursors.ack("", latest.position);
       }
     }
@@ -573,7 +588,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         single_recipient ? std::string{} : req.getOrString("consumer");
     const auto limit = req.getOrInt("limit", 0);
 
-    bus::CursorStore peek_cursors{cfg.state_dir, name};
+    auto& peek_cursors = getOrOpenCursors(name);
     const auto from = peek_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
@@ -632,9 +647,8 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       std::size_t unread = 0;
       {
         const auto topic = std::string{"inbox-"} + name;
-        bus::Journal inbox_log{topicLogPath(cfg.state_dir, topic)};
-        bus::CursorStore inbox_cursors{cfg.state_dir, topic};
-        auto r = inbox_log.peek(inbox_cursors.consumerCursor(""));
+        auto& inbox_handles = getOrOpen(topic);
+        auto r = inbox_handles.log.peek(inbox_handles.cursors.consumerCursor(""));
         if (r) unread = r->size();
       }
 
@@ -763,7 +777,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto consumer =
         single_recipient ? std::string{} : req.getOrString("consumer");
 
-    bus::CursorStore fetch_cursors{cfg.state_dir, name};
+    auto& fetch_cursors = getOrOpenCursors(name);
     const auto from = fetch_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
@@ -853,7 +867,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       return rpc::okResponse(std::move(resp));
     }
 
-    bus::CursorStore drain_cursors{cfg.state_dir, topic_name};
+    auto& drain_cursors = getOrOpenCursors(topic_name);
     const auto from = drain_cursors.consumerCursor("");
     auto& log = getOrOpenLog(topic_name);
     constexpr std::size_t kDrainCap = 16;
@@ -973,7 +987,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     {
       const auto cursor_after =
           bus::Journal::cursorFromToken(cursor_after_token);
-      bus::CursorStore drop_cursors{cfg.state_dir, found_topic};
+      auto& drop_cursors = getOrOpenCursors(found_topic);
       drop_cursors.ack("", cursor_after);  // forward-only, no-op if already past
     }
 
@@ -1107,14 +1121,14 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         skip(tc.name, "in-flight");
         continue;
       }
-      bus::Journal log{topicLogPath(cfg.state_dir, tc.name)};
-      bus::CursorStore gc_cursors{cfg.state_dir, tc.name};
-      auto pend = log.peek(gc_cursors.consumerCursor(""));
+      auto& gc_handles = getOrOpen(tc.name);
+      auto pend = gc_handles.log.peek(gc_handles.cursors.consumerCursor(""));
       if (pend && !pend->empty()) {
         skip(tc.name,
              std::format("undrained ({} unread)", pend->size()));
         continue;
       }
+      const auto log_path = gc_handles.log.path();
 
       // Eligible — reap registry entry + cursor dir + log file.
       if (auto r = registry.remove(tc.name); !r) {
@@ -1123,7 +1137,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       }
       std::error_code ec;
       fs::remove_all(cfg.state_dir + "/cursors/" + tc.name, ec);
-      fs::remove(log.path(), ec);
+      fs::remove(log_path, ec);
       logs.erase(tc.name);  // drop any cached open handle
       reaped.push_back(json::Value::from(tc.name));
 

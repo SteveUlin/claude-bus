@@ -48,7 +48,9 @@ delete their copies. Unit-testable against `/bin/echo` etc.
 `bus_process` lib (or fold into `bus_core`). Call sites are already
 `runCapture(...)`-shaped, so they barely change.
 
-**Status:** [ ] proposed
+**Status:** [x] LANDED — `bus::process`, main `5c462d4f`. Behavior delta:
+lifecycle `new-tab`/`close-tab` moved off the old inherited-stdio, unbounded
+`runSync` onto `runSilent` (stdio → /dev/null, 5 s timeout-kill).
 
 ---
 
@@ -118,7 +120,8 @@ split uses.
 
 **Blast:** ~250 lines move; `pane.h` public surface untouched.
 
-**Status:** [ ] proposed
+**Status:** [x] LANDED — `bus::pane_parse` (+ `bus_pane_parse` lib),
+`tests/unit/test_pane_parse.cpp` (10 cases). Verbatim move, zero behavior change.
 
 ---
 

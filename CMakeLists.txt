@@ -60,6 +60,16 @@ add_library(bus_process STATIC
 )
 target_include_directories(bus_process PUBLIC src)
 
+# Pure parser for zellij `dump-screen --ansi` (pane_parse.h): string-in /
+# struct-out mode/bypass/input detection, no syscalls. Links NOTHING — that
+# empty dep set is the structural guard: a parser that reaches for a pane
+# actuator or subprocess fails to build here. Unit-tested in isolation
+# (tests/unit/test_pane_parse.cpp); pane.cpp's paneState is the production caller.
+add_library(bus_pane_parse STATIC
+    src/pane_parse.cpp
+)
+target_include_directories(bus_pane_parse PUBLIC src)
+
 # Pane acquisition + actuators (paneState, sendToPaneSafe, the loop-thread TTL
 # cache). The loop/Daemon plane: single-thread-owned mutable caches that must
 # NOT enter Readers. Kept its own unit so the read plane can't pull pane.cpp by
@@ -68,8 +78,9 @@ add_library(bus_pane STATIC
     src/pane.cpp
 )
 target_include_directories(bus_pane PUBLIC src)
-# pane.cpp drives zellij through the shared spawn module.
-target_link_libraries(bus_pane PUBLIC bus_process)
+# pane.cpp drives zellij through the shared spawn module and parses dumps via
+# the pure parser.
+target_link_libraries(bus_pane PUBLIC bus_process bus_pane_parse)
 
 # The Policy seam (docs/policy-actors.md): autonomous broker behaviors as
 # actors that observe a Readers snapshot, apply their own guards, and return
@@ -168,6 +179,7 @@ add_executable(bus_tests
     tests/unit/test_doorbell_readiness.cpp
     tests/unit/test_tail_reader.cpp
     tests/unit/test_pane_cache.cpp
+    tests/unit/test_pane_parse.cpp
     tests/unit/test_process.cpp
     tests/unit/test_topic_registry.cpp
     tests/unit/test_task_graph.cpp

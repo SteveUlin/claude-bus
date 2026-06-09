@@ -19,7 +19,7 @@ verified bug or sulin's stated focus.
 |---|------|-----|-------------|--------|
 | 1 | **Wire 18 itests into ctest** (`itest` label) | code-quality | low / low | ✓ LANDED `a094a067` |
 | 2 | **Continuity grace in `maybeEscalateStuck`** | reliability | low / low | ✓ LANDED `d37e301b` |
-| 3 | **Readiness sentinel — Slice 1 only** (`isAgentIdle`) | feature | low / med | tracked (agent-contract), unbuilt |
+| 3 | **Readiness sentinel — Slice 1** (`isAgentIdle`) | feature | low / med | 1a (reader) ✓ `3b7ac520`; 1b (write-hook) pending |
 | 4 | **Age-release stale drain in-flight** | reliability | med / med | new latent bug |
 | 5 | Activate RecoveryActor Phase B (+ AutoClearActor extract) | reliability | med / med | tracked (P2 Phase A landed) |
 | 6 | `tasks open` writes `$STATE/title` (TASK-column lie) | observability | low / low | new |

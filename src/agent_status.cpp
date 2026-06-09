@@ -447,7 +447,7 @@ auto computeState(const AgentInfo& a, std::size_t unread,
   return State::Starting;
 }
 
-auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool {
+auto wakeReadyForMail(const AgentAxes& ax, bool ready_fresh) -> bool {
   // Normal idle at the prompt, OR a receptive orchestrator mid-turn.
   // Orchestrating is the receptivity-axis payoff (kvothe's state): a
   // Workflow/background-loop running within its lease drains queued mail at
@@ -462,13 +462,14 @@ auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool {
   // and no follow-up comes; the agent is idle at the prompt.
   if (ax.process == ProcessAxis::Compacting) return true;
   // Boot ambiguity: a fresh spawn / >30s-idle boot reads Starting/Stuck from
-  // events alone (indistinguishable from a wedged boot). An editable INSERT
-  // prompt is the ground truth that claude is ready for its first input; a
-  // wedged boot shows a modal (non-INSERT) and stays excluded — BOOT_STUCK
-  // preserved.
+  // events alone (indistinguishable from a wedged boot). A fresh readiness
+  // sentinel ($STATE/ready — the agent's own at-a-boundary signal) is the
+  // ground truth that claude is ready for input; it replaced the pane's
+  // INSERT-mode read. A wedged boot has no fresh sentinel and stays excluded —
+  // BOOT_STUCK preserved.
   if ((ax.process == ProcessAxis::Starting ||
        ax.process == ProcessAxis::Stuck) &&
-      pane != nullptr && pane->ok && pane->isInsert()) {
+      ready_fresh) {
     return true;
   }
   return false;

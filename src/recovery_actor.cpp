@@ -238,7 +238,8 @@ auto RecoveryActor::evaluate(const policy::PolicyContext& ctx)
         const auto pane = ctx.pane(name);  // forks zellij — gated above
         const auto ax_pane =
             computeAxes(info, pending ? 1 : 0, now, true, &pane);
-        const bool awaiting_input = wakeReadyForMail(ax_pane, &pane) ||
+        const bool awaiting_input =
+            wakeReadyForMail(ax_pane, pane.ok && pane.isInsert()) ||
                                     ax_pane.turn == TurnAxis::NeedsInput;
         if (!awaiting_input) {
           logWould(name, sig, action,

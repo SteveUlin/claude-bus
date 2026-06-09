@@ -1463,14 +1463,22 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // and fork a pane read ONLY when boot-ambiguous — established idle agents
     // never fork. Restores the pre-#4 risk profile while keeping fresh-spawn.
     const auto ax0 = computeAxes(info, 0, now, pane_exists);
+    bool ready_fresh = false;
     if (ax0.process == ProcessAxis::Starting ||
         ax0.process == ProcessAxis::Stuck) {
-      const auto pane = paneStateCached(name);  // forks zellij — only here
-      if (!wakeReadyForMail(computeAxes(info, 0, now, pane_exists, &pane),
-                            &pane)) {
-        continue;  // booting but not yet at an INSERT prompt — retry next scan
+      // Boot-ambiguous: the at-prompt signal now comes from the readiness
+      // sentinel ($STATE/ready, Slice 1) — NO dump-screen fork. Fall back to
+      // the pane footer only when no sentinel exists (CLAUDE_BUS_PANE_FALLBACK,
+      // default on), so a not-yet-relaunched agent still works.
+      const auto ready = readReady(cfg_.state_dir, name);
+      if (ready) {
+        ready_fresh = readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms);
+      } else if (paneFallbackEnabled()) {
+        const auto pane = paneStateCached(name);  // forks zellij — fallback only
+        ready_fresh = pane.ok && pane.isInsert();
       }
-    } else if (!wakeReadyForMail(ax0, nullptr)) {
+    }
+    if (!wakeReadyForMail(ax0, ready_fresh)) {
       continue;  // not at the prompt yet — retry next scan when ready
     }
 

@@ -236,15 +236,14 @@ auto systemBootMs() -> std::int64_t;
 // readiness predicate)? True when it's sitting at an input-ready prompt:
 //   - Alive + Ready          (Stop / idle / resume / clear)
 //   - Compacting             (post-/compact idle; SessionStart(compact) last)
-//   - (Starting | Stuck) AND pane mode INSERT — a fresh spawn or a >30s-idle
-//     boot is event-indistinguishable from a WEDGED boot ("SessionStart, no
-//     follow-up"), so it reads Starting/Stuck; the editable INSERT prompt is
-//     the ground truth that claude is ready for input. A genuinely wedged
-//     boot shows a modal (non-INSERT) and stays excluded, so BOOT_STUCK
-//     detection is preserved. Mirrors dispatchAgentInbox's Starting+INSERT
-//     gate.
-// pane may be null (no pane state) — then the INSERT-rescue can't fire.
-auto wakeReadyForMail(const AgentAxes& ax, const PaneState* pane) -> bool;
+//   - (Starting | Stuck) AND ready_fresh — a fresh spawn or a >30s-idle boot
+//     is event-indistinguishable from a WEDGED boot ("SessionStart, no
+//     follow-up"), so it reads Starting/Stuck; a fresh readiness sentinel
+//     ($STATE/ready, the agent's own at-a-boundary signal) is the ground truth
+//     that replaced the pane's INSERT-mode read. A wedged boot has no fresh
+//     sentinel and stays excluded, so BOOT_STUCK detection is preserved.
+// ready_fresh: caller resolves from sentinel (or pane fallback) before calling.
+auto wakeReadyForMail(const AgentAxes& ax, bool ready_fresh) -> bool;
 
 // Read /tmp/claude-bus/events.jsonl, return latest event per agent.
 // `filter` restricts to specific agents when non-empty.

@@ -12,86 +12,66 @@ auto axes(ProcessAxis p, TurnAxis t) -> AgentAxes {
   return ax;
 }
 
-auto pane(bool ok, std::string mode) -> PaneState {
-  PaneState p;
-  p.ok = ok;
-  p.mode = std::move(mode);
-  return p;
-}
-
 }  // namespace
 
-// ── the two unchanged wakeable shapes ──────────────────────────────────
+// wakeReadyForMail now takes a `ready_fresh` bool — the readiness sentinel
+// ($STATE/ready, the agent's own at-a-boundary signal) — instead of a
+// PaneState*. true = a fresh sentinel (replacing the old "editable INSERT
+// prompt" pane read); the resolve-from-sentinel-or-pane-fallback happens in the
+// caller (delivery's doorbell, recovery_actor).
+
+// ── the two unchanged wakeable shapes (ready_fresh irrelevant) ─────────────
 
 TEST(wake_alive_ready_is_wakeable) {
-  auto p = pane(true, "NORMAL");  // pane mode irrelevant when Alive+Ready
-  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Ready), &p));
-  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Ready), nullptr));
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Ready), false));
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Ready), true));
 }
 
 TEST(wake_compacting_is_wakeable) {
-  CHECK(wakeReadyForMail(axes(ProcessAxis::Compacting, TurnAxis::None),
-                         nullptr));
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Compacting, TurnAxis::None), false));
 }
 
-// ── the fix: fresh-idle boot at an INSERT prompt (harness-gap #4) ──────
+// ── the fix: a fresh-idle boot with a fresh sentinel (harness-gap #4) ──────
 
-TEST(wake_fresh_starting_at_insert_is_wakeable) {
-  auto p = pane(true, "INSERT");
-  CHECK(wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), &p));
+TEST(wake_fresh_starting_ready_is_wakeable) {
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), true));
 }
 
-TEST(wake_stuck_boot_at_insert_is_wakeable) {
-  // >30s idle fresh boot reads Stuck, but an INSERT prompt means ready.
-  auto p = pane(true, "INSERT");
-  CHECK(wakeReadyForMail(axes(ProcessAxis::Stuck, TurnAxis::None), &p));
+TEST(wake_stuck_boot_ready_is_wakeable) {
+  // A >30s-idle fresh boot reads Stuck, but a fresh sentinel means ready.
+  CHECK(wakeReadyForMail(axes(ProcessAxis::Stuck, TurnAxis::None), true));
 }
 
-// ── BOOT_STUCK preserved: a wedged boot (non-INSERT / no pane) is NOT woken ─
+// ── BOOT_STUCK preserved: a wedged boot has no fresh sentinel → NOT woken ──
+// (covers the former modal / pane-read-failed / non-INSERT cases — all now
+// collapse to "ready_fresh == false".)
 
-TEST(wake_wedged_boot_modal_not_wakeable) {
-  auto p = pane(true, "LOCKED");  // a modal overlay, not an editable prompt
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Stuck, TurnAxis::None), &p));
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), &p));
+TEST(wake_wedged_boot_no_sentinel_not_wakeable) {
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Stuck, TurnAxis::None), false));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), false));
 }
 
-TEST(wake_boot_no_pane_state_not_wakeable) {
-  auto p = pane(false, "INSERT");  // pane read failed → can't trust mode
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Stuck, TurnAxis::None), &p));
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), nullptr));
-}
-
-TEST(wake_boot_normal_mode_not_wakeable) {
-  auto p = pane(true, "NORMAL");
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Starting, TurnAxis::None), &p));
-}
-
-// ── other states are never woken (even at INSERT) ──────────────────────
+// ── other states are never woken (even with a fresh sentinel) ──────────────
 
 TEST(wake_working_not_wakeable) {
-  auto p = pane(true, "INSERT");
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Working), &p));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Working), true));
 }
 
 // Orchestrating = receptive mid-turn (Workflow within its lease). The gate
-// flip: deliverable like Ready, unlike the true Working turn above. This is
-// the activating half of kvothe's behavior-neutral state landing.
+// flip: deliverable like Ready, unlike the true Working turn above.
 TEST(wake_orchestrating_is_wakeable) {
-  auto p = pane(true, "INSERT");
   CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Orchestrating),
-                         &p));
+                         false));
   CHECK(wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::Orchestrating),
-                         nullptr));
+                         true));
 }
 
 TEST(wake_needs_input_not_wakeable) {
-  auto p = pane(true, "INSERT");
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::NeedsInput), &p));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Alive, TurnAxis::NeedsInput), true));
 }
 
 TEST(wake_gone_ended_new_not_wakeable) {
-  auto p = pane(true, "INSERT");
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Gone, TurnAxis::None), &p));
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::Ended, TurnAxis::None), &p));
-  CHECK(!wakeReadyForMail(axes(ProcessAxis::New, TurnAxis::None), &p));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Gone, TurnAxis::None), true));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::Ended, TurnAxis::None), true));
+  CHECK(!wakeReadyForMail(axes(ProcessAxis::New, TurnAxis::None), true));
 }

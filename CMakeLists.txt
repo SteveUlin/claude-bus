@@ -25,6 +25,7 @@ add_library(bus_core STATIC
     src/journal.cpp
     src/cursor_store.cpp
     src/peer_registry.cpp
+    src/spawn.cpp
 )
 # Envelope codec — messaging layer above the domain-agnostic Journal kernel.
 # bus_core must NOT depend on it; only the delivery binary and bus_readers
@@ -192,6 +193,7 @@ add_executable(bus_tests
     tests/unit/test_recovery.cpp
     tests/unit/test_policy.cpp
     tests/unit/test_ready.cpp
+    tests/unit/test_spawn.cpp
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)

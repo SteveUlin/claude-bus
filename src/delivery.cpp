@@ -933,15 +933,27 @@ auto Loop::maybeEscalateStuck() -> void {
       continue;
     }
 
+    // Suspend/resume grace: updateContinuity() arms stuck_grace_until_mono_ms_
+    // when it detects a wall-clock jump (lid-close, NTP step). Ages spanning the
+    // jump are untrustworthy — suppress first-fire alarms until the grace expires.
+    // Mirrors RecoveryActor's suspend_grace_until_mono_ms_ / CLAUDE_BUS_SUSPEND_GRACE_MS.
+    // Agents already in *_alarmed_ fired before the jump and are unaffected; only
+    // first-fire (not yet in the set) is suppressed, so a pre-jump genuine stuck
+    // is never silenced.
+    const bool in_grace = nowMonoMs() < stuck_grace_until_mono_ms_;
+
     // Turn-stuck: a turn open past budget with no progress.
     if (info.turn_start_ms > 0) {
       const auto dl = info.turn_start_ms + stuck_budget;
       if (now >= dl) {
         if (!turn_stuck_alarmed_.contains(name)) {
-          turn_stuck_alarmed_.insert(name);
-          auditAlarm("turn-stuck",
-                     std::format("turn-stuck agent={} open_ms={} budget_ms={}",
-                                 name, now - info.turn_start_ms, stuck_budget));
+          if (!in_grace) {
+            turn_stuck_alarmed_.insert(name);
+            auditAlarm("turn-stuck",
+                       std::format("turn-stuck agent={} open_ms={} budget_ms={}",
+                                   name, now - info.turn_start_ms, stuck_budget));
+          }
+          // In grace: skip insert + emit so the alarm re-evaluates after expiry.
         }
       } else {
         consider(dl);  // future, still pending
@@ -955,12 +967,15 @@ auto Loop::maybeEscalateStuck() -> void {
       const auto dl = info.open_tool_since_ms + tool_budget;
       if (now >= dl) {
         if (!tool_wedged_alarmed_.contains(name)) {
-          tool_wedged_alarmed_.insert(name);
-          auditAlarm("tool-wedged",
-                     std::format("tool-wedged agent={} tool={} open_ms={} "
-                                 "budget_ms={}",
-                                 name, info.open_tool,
-                                 now - info.open_tool_since_ms, tool_budget));
+          if (!in_grace) {
+            tool_wedged_alarmed_.insert(name);
+            auditAlarm("tool-wedged",
+                       std::format("tool-wedged agent={} tool={} open_ms={} "
+                                   "budget_ms={}",
+                                   name, info.open_tool,
+                                   now - info.open_tool_since_ms, tool_budget));
+          }
+          // In grace: skip insert + emit so the alarm re-evaluates after expiry.
         }
       } else {
         consider(dl);
@@ -1139,10 +1154,19 @@ auto Loop::updateContinuity() -> void {
       // a valid event-age floor, and max(systemBootMs(),…) supersedes it after a
       // reboot.
       bus::writeU64File(cfg_.state_dir + "/continuity.ms", now);
+      // Arm the stuck-alarm grace: suppress new turn-stuck / tool-wedged alarms
+      // for the same window RecoveryActor uses — ages spanning the jump are
+      // untrustworthy until agents emit fresh post-resume events.
+      std::int64_t grace_ms = 60'000;
+      if (const char* e = std::getenv("CLAUDE_BUS_SUSPEND_GRACE_MS");
+          e != nullptr && *e != '\0') {
+        if (const auto v = std::atoll(e); v > 0) grace_ms = v;
+      }
+      stuck_grace_until_mono_ms_ = mono + grace_ms;
       std::println(stderr,
                    "continuity: clock jump (d_wall={}ms d_mono={}ms) — "
-                   "continuity_since_ms={}",
-                   d_wall, d_mono, now);
+                   "continuity_since_ms={} stuck_grace_until_mono_ms={}",
+                   d_wall, d_mono, now, stuck_grace_until_mono_ms_);
     }
   }
   cont_last_wall_ms_ = now;

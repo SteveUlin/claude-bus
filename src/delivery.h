@@ -202,6 +202,11 @@ class Loop {
   std::int64_t cont_last_wall_ms_{0};
   std::int64_t cont_last_mono_ms_{0};
   std::int64_t continuity_since_ms_{0};
+  // Monotonic deadline: maybeEscalateStuck skips new alarm emissions while
+  // nowMonoMs() < stuck_grace_until_mono_ms_. Armed by updateContinuity on a
+  // detected jump (same shape/threshold as RecoveryActor::suspend_grace_until_mono_ms_);
+  // 0 = no active grace. Auto-expires when the mono clock passes the deadline.
+  std::int64_t stuck_grace_until_mono_ms_{0};
   auto updateContinuity() -> void;
 
   auto scanEvents() -> void;

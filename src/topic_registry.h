@@ -10,13 +10,11 @@
 #include "json_min.h"
 #include "types.h"
 
-#include <expected>
 #include <map>
 #include <string>
 #include <variant>
 #include <vector>
 #include <string_view>
-#include <vector>
 
 namespace bus {
 
@@ -32,7 +30,9 @@ struct PubsubConfig {
   std::vector<std::string> subscribers;
 };
 
-struct WorkQueueConfig {};
+struct WorkQueueConfig {
+  std::vector<std::string> workers;  // eligible agent names; empty = pool-wide
+};
 
 struct BlackboardConfig {};
 

@@ -64,6 +64,7 @@ struct QueuedTask {
   std::string topic;  // the work-queue topic this task came from
   std::string id;     // record id (head ordering)
   std::string body;   // the task payload
+  std::vector<std::string> workers;  // eligible agent names; empty = pool-wide
 };
 
 // A new post on a blackboard topic, folded into the snapshot by the loop plane

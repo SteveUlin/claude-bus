@@ -1,10 +1,11 @@
-// `bus queue push/pop/peek/list` — ergonomic sugar over work-queue RPCs.
+// `bus queue create/push/pop/peek/list` — ergonomic sugar over work-queue RPCs.
 // Every action is one existing broker RPC; no broker-side changes.
 
 #include "../broker.h"
 #include "../json_min.h"
 #include "../rpc.h"
 #include "../sub.h"
+#include "sub_util.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace bus {
 
@@ -44,11 +46,64 @@ auto ensureQueue(const BrokerConfig& cfg, const std::string& name) -> bool {
 
 auto subQueue(std::span<const char* const> args) -> int {
   if (args.empty()) {
-    std::println(stderr, "usage: bus queue <push|pop|peek|list> [...]");
+    std::println(stderr, "usage: bus queue <create|push|pop|peek|list> [...]");
     return 2;
   }
   const std::string_view verb{args[0]};
   const auto sub = args.subspan(1);
+
+  // ── create ──────────────────────────────────────────────────────────────
+  // bus queue create <queue> [--workers a,b,c]
+  if (verb == "create") {
+    if (sub.empty()) {
+      std::println(stderr, "usage: bus queue create QUEUE [--workers A,B,C]");
+      return 2;
+    }
+    const std::string queue{sub[0]};
+    std::string workers_csv;
+
+    for (std::size_t i = 1; i < sub.size(); ++i) {
+      const std::string_view a{sub[i]};
+      if (a == "--workers") {
+        if (++i >= sub.size()) return 2;
+        workers_csv = sub[i];
+      } else {
+        std::println(stderr, "bus queue create: unknown flag \"{}\"", a);
+        return 2;
+      }
+    }
+
+    const auto cfg = resolveConfig();
+    std::map<std::string, json::Value> req;
+    req.insert({"op", json::Value::from("topic_create")});
+    req.insert({"name", json::Value::from(queue)});
+    req.insert({"kind", json::Value::from("work-queue")});
+
+    if (!workers_csv.empty()) {
+      std::vector<json::Value> ws;
+      for (const auto& w : splitCsv(workers_csv))
+        ws.push_back(json::Value::from(w));
+      std::map<std::string, json::Value> kc;
+      kc.insert({"workers", json::Value::fromArray(std::move(ws))});
+      req.insert({"kind_config", json::Value::fromObject(std::move(kc))});
+    }
+
+    auto resp = rpc::call(cfg.socket_path, json::Value::fromObject(std::move(req)));
+    if (!resp) {
+      std::println(stderr, "bus queue create: {}", resp.error().message);
+      return 1;
+    }
+    if (!resp->getOrBool("ok")) {
+      std::println(stderr, "bus queue create: {}", resp->getOrString("error"));
+      return 1;
+    }
+    if (workers_csv.empty()) {
+      std::println("created {} (kind=work-queue, workers=pool-wide)", queue);
+    } else {
+      std::println("created {} (kind=work-queue, workers={})", queue, workers_csv);
+    }
+    return 0;
+  }
 
   // ── push ────────────────────────────────────────────────────────────────
   // bus queue push <queue> <body...> [--protocol TAG]
@@ -204,7 +259,7 @@ auto subQueue(std::span<const char* const> args) -> int {
     return 0;
   }
 
-  std::println(stderr, "bus queue: unknown command \"{}\"", verb);
+  std::println(stderr, "bus queue: unknown command \"{}\" (try: create push pop peek list)", verb);
   return 2;
 }
 

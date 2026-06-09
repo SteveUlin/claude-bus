@@ -1,6 +1,5 @@
 #include "harness.h"
 
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -195,7 +194,7 @@ TEST(recovery_actor_soft_clears_idle) {
 TEST(dispatch_assigns_head_to_idle_agent) {
   DispatchActor actor;
   policy::PolicyContext ctx;
-  ctx.queue_head.push_back({"work-queue", "t1", "do the thing"});
+  ctx.queue_head.push_back({"work-queue", "t1", "do the thing", {}});
   AgentInfo idle = mkInfo("Stop", 1000);
   policy::AgentSnapshot s;
   s.name = "alice";
@@ -214,8 +213,8 @@ TEST(dispatch_assigns_head_to_idle_agent) {
 TEST(dispatch_batch_assigns_one_task_per_idle_agent) {
   DispatchActor actor;
   policy::PolicyContext ctx;
-  ctx.queue_head.push_back({"work-queue", "t1", "task-1"});
-  ctx.queue_head.push_back({"work-queue", "t2", "task-2"});
+  ctx.queue_head.push_back({"work-queue", "t1", "task-1", {}});
+  ctx.queue_head.push_back({"work-queue", "t2", "task-2", {}});
   for (const char* n : {"alice", "bob"}) {
     policy::AgentSnapshot s;
     s.name = n;
@@ -235,7 +234,7 @@ TEST(dispatch_batch_assigns_one_task_per_idle_agent) {
 TEST(dispatch_batch_bounded_by_task_count) {
   DispatchActor actor;
   policy::PolicyContext ctx;
-  ctx.queue_head.push_back({"work-queue", "t1", "only-task"});
+  ctx.queue_head.push_back({"work-queue", "t1", "only-task", {}});
   for (const char* n : {"alice", "bob", "carol"}) {
     policy::AgentSnapshot s;
     s.name = n;
@@ -262,7 +261,7 @@ TEST(dispatch_empty_queue_is_inert) {
 TEST(dispatch_skips_ineligible_agents) {
   DispatchActor actor;
   policy::PolicyContext ctx;
-  ctx.queue_head.push_back({"work-queue", "t1", "task"});
+  ctx.queue_head.push_back({"work-queue", "t1", "task", {}});
 
   AgentInfo working = mkInfo("PreToolUse", 1000);
   policy::AgentSnapshot busy;
@@ -288,6 +287,88 @@ TEST(dispatch_skips_ineligible_agents) {
   ctx.agents.push_back(pending);
 
   CHECK_EQ(static_cast<int>(actor.evaluate(ctx).size()), 0);  // none eligible
+}
+
+TEST(dispatch_scoped_queue_only_assigns_listed_agent) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  // Task scoped to bob only.
+  policy::QueuedTask task;
+  task.topic = "work-queue";
+  task.id = "t1";
+  task.body = "scoped task";
+  task.workers = {"bob"};
+  ctx.queue_head.push_back(task);
+
+  for (const char* n : {"alice", "bob"}) {
+    policy::AgentSnapshot s;
+    s.name = n;
+    s.info = nullptr;
+    s.axes.turn = TurnAxis::Ready;
+    ctx.agents.push_back(s);
+  }
+
+  auto out = actor.evaluate(ctx);
+  // Only bob is eligible; alice must NOT receive the task.
+  CHECK_EQ(static_cast<int>(out.size()), 1);
+  CHECK_EQ(out[0].topic, std::string{"inbox-bob"});
+  CHECK_EQ(out[0].body, std::string{"scoped task"});
+  CHECK_EQ(out[0].consume_from, std::string{"work-queue"});
+}
+
+TEST(dispatch_empty_workers_is_pool_wide) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  // Task with empty workers = pool-wide.
+  policy::QueuedTask task;
+  task.topic = "work-queue";
+  task.id = "t1";
+  task.body = "pool task";
+  // task.workers deliberately left empty
+  ctx.queue_head.push_back(task);
+
+  policy::AgentSnapshot s;
+  s.name = "alice";
+  s.info = nullptr;
+  s.axes.turn = TurnAxis::Ready;
+  ctx.agents.push_back(s);
+
+  auto out = actor.evaluate(ctx);
+  // Empty workers = any idle agent is eligible.
+  CHECK_EQ(static_cast<int>(out.size()), 1);
+  CHECK_EQ(out[0].topic, std::string{"inbox-alice"});
+  CHECK_EQ(out[0].body, std::string{"pool task"});
+}
+
+TEST(dispatch_scoped_unavailable_does_not_block_pool) {
+  DispatchActor actor;
+  policy::PolicyContext ctx;
+  // A head task scoped to bob (not idle here), with a pool task behind it.
+  policy::QueuedTask scoped;
+  scoped.topic = "qa";
+  scoped.id = "a1";
+  scoped.body = "scoped to bob";
+  scoped.workers = {"bob"};
+  ctx.queue_head.push_back(scoped);
+  policy::QueuedTask pool;
+  pool.topic = "qb";
+  pool.id = "b1";
+  pool.body = "pool task";  // workers empty = pool-wide
+  ctx.queue_head.push_back(pool);
+
+  policy::AgentSnapshot s;  // only alice idle; bob unavailable
+  s.name = "alice";
+  s.info = nullptr;
+  s.axes.turn = TurnAxis::Ready;
+  ctx.agents.push_back(s);
+
+  auto out = actor.evaluate(ctx);
+  // alice skips the bob-scoped head and takes the pool task — a scoped task
+  // whose worker is unavailable does not head-of-line-block a pool task.
+  CHECK_EQ(static_cast<int>(out.size()), 1);
+  CHECK_EQ(out[0].topic, std::string{"inbox-alice"});
+  CHECK_EQ(out[0].body, std::string{"pool task"});
+  CHECK_EQ(out[0].consume_from, std::string{"qb"});
 }
 
 // ── BlackboardActor::evaluate (M2 second pattern — fan-out, broker-free) ────

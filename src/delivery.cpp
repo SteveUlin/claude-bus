@@ -1243,7 +1243,8 @@ auto Loop::runPolicy() -> void {
     if (!r) continue;
     for (const auto& rec : *r) {
       const auto wq_env = bus::msg::decodeEnvelope(rec.payload);
-      ctx.queue_head.push_back({tcfg.name, rec.id, wq_env.body});
+      const auto& wq_cfg = std::get<WorkQueueConfig>(tcfg.parsed_config);
+      ctx.queue_head.push_back({tcfg.name, rec.id, wq_env.body, wq_cfg.workers});
     }
   }
 

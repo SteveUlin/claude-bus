@@ -6,11 +6,9 @@
 
 #include <cerrno>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <print>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -75,8 +73,18 @@ auto kindConfigFromJson(TopicKind kind, const json::Value* kc)
       }
       return PubsubConfig{std::move(subs)};
     }
-    case TopicKind::WorkQueue:
-      return WorkQueueConfig{};
+    case TopicKind::WorkQueue: {
+      std::vector<std::string> workers;
+      if (kc != nullptr) {
+        if (const auto* arr = kc->get("workers");
+            arr != nullptr && arr->isArray()) {
+          for (const auto& s : arr->asArray()) {
+            if (s.isString()) workers.push_back(s.asString());
+          }
+        }
+      }
+      return WorkQueueConfig{std::move(workers)};
+    }
     case TopicKind::Blackboard:
       return BlackboardConfig{};
     case TopicKind::AppendLog:
@@ -105,6 +113,14 @@ auto kindConfigToJson(const TopicKindConfig& pc) -> std::optional<json::Value> {
             subs.push_back(json::Value::from(s));
           std::map<std::string, json::Value> kc;
           kc.insert({"subscribers", json::Value::fromArray(std::move(subs))});
+          return json::Value::fromObject(std::move(kc));
+        } else if constexpr (std::is_same_v<T, WorkQueueConfig>) {
+          if (v.workers.empty()) return std::nullopt;
+          std::vector<json::Value> ws;
+          for (const auto& w : v.workers)
+            ws.push_back(json::Value::from(w));
+          std::map<std::string, json::Value> kc;
+          kc.insert({"workers", json::Value::fromArray(std::move(ws))});
           return json::Value::fromObject(std::move(kc));
         } else {
           return std::nullopt;

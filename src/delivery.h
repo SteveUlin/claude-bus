@@ -25,6 +25,7 @@
 //   - tui-commands dispatch via the dispatch state machine (4d)
 //   - pubsub / blackboard / work-queue (4f)
 
+#include "agent_status.h"
 #include "broker.h"
 #include "envelope.h"
 #include "journal.h"
@@ -69,6 +70,18 @@ struct InFlight {
   Journal::Cursor cursor_after;
   std::int32_t attempts{1};      // re-dispatch count; 1 = first send
   std::int64_t next_retry_at{};  // dispatched_at_ms + kAckTimeoutMs
+  // True when delivered via the off-TTY drain pull (not TTY push).
+  // Persisted. On deadline, scanRetries forgets the entry so the next
+  // drain re-reads the un-advanced cursor (re-delivery), rather than
+  // TTY-re-dispatching (which has no pane to type into).
+  bool drain_origin{false};
+  // True when this entry has been acked but is held because an older
+  // in-flight entry for the same (topic, agent) has not yet acked. The
+  // cursor advance is deferred until the contiguous acked prefix clears.
+  // NOT persisted (always false on load — a held-acked entry becomes
+  // re-deliverable on restart, which is acceptable at-least-once; the
+  // lastid dedup absorbs the duplicate).
+  bool acked_held{false};
 };
 
 // Tunables. Override via $CLAUDE_BUS_ACK_TIMEOUT_MS for tests so they
@@ -109,12 +122,19 @@ class Loop {
   // audit trail), or std::nullopt otherwise.
   auto forgetInflight(const std::string& msg_id) -> std::optional<InFlight>;
 
+  // M5: called by broker RPC handlers that detect a truncated journal so the
+  // Loop's single-fire latch can emit the "journal-corrupt" audit event.
+  // No-op if already reported for this topic this run.
+  auto reportJournalCorrupt(const std::string& topic,
+                            std::int64_t offset) -> void;
+
   // Register a record delivered via the off-TTY drain pull as in-flight,
   // awaiting a {event:bus-ack,msg_id}. The cursor is NOT advanced here
-  // (the ack advances it); next_retry_at is 0 so scanRetries never
-  // TTY-re-dispatches it (off-TTY has no pane to type into) — re-delivery
-  // happens by the next drain re-reading the un-advanced cursor. Called
-  // from the broker's `drain` RPC handler. Idempotent per msg_id.
+  // (the ack advances it). An ack deadline is set; on expiry scanRetries
+  // forgets the in-flight entry so the next drain re-reads the un-advanced
+  // cursor (re-delivery at-least-once), rather than TTY-re-dispatching
+  // (which has no pane to write to). At kMaxAttempts, escalates via the
+  // same audit/inbox-human path as TTY retries. Idempotent per msg_id.
   auto noteDrainDelivery(const std::string& msg_id, const std::string& topic,
                          const std::string& agent,
                          Journal::Cursor cursor_after) -> void;
@@ -211,17 +231,28 @@ class Loop {
 
   auto scanEvents() -> void;
   auto scanRetries() -> void;
-  auto dispatchAgentInbox(const TopicConfig& cfg) -> void;
-  auto dispatchTuiCommands(const TopicConfig& cfg) -> void;
+  // C2a: advance the (topic, agent) cursor through the leading run of
+  // acked-held in-flight entries. Called after an oldest-entry ack and from
+  // the scanRetries sweep (the blocker can also vanish by expiry/escalation).
+  auto drainHeldPrefix(const std::string& topic,
+                       const std::string& agent) -> void;
+  // M2: takes the tick-level agents snapshot to avoid re-parsing events.jsonl.
+  auto dispatchAgentInbox(const TopicConfig& cfg,
+                          const std::map<std::string, AgentInfo>& agents_snap)
+      -> void;
+  auto dispatchTuiCommands(const TopicConfig& cfg,
+                           const std::map<std::string, AgentInfo>& agents_snap)
+      -> void;
   auto escalate(const InFlight& f, std::string_view reason,
                 std::string_view body) -> void;
-  auto maybeAutoClear() -> void;
+  auto maybeAutoClear(const std::map<std::string, AgentInfo>& agents_snap)
+      -> void;
   // Policy engine driver (replaces the inline maybeAutoRecover): build the
   // per-tick PolicyContext (a Readers snapshot + clocks + a lazy pane
   // resolver), run every registered actor, and execute the declarative actions
   // they return through the existing append paths. The engine never advances a
   // cursor — docs/policy-actors.md.
-  auto runPolicy() -> void;
+  auto runPolicy(const std::map<std::string, AgentInfo>& agents_snap) -> void;
   auto executePolicyAction(const policy::PolicyAction& a) -> void;
   // Consume a topic's head (advance its "" cursor past the head, like `fetch`).
   // The M2 work-queue claim, performed by the loop on a consume_from intent.
@@ -229,19 +260,23 @@ class Loop {
   // True iff a record sits past agent's inbox cursor — a snapshot input for the
   // policy context. Pure read.
   auto inboxPending(const std::string& agent) const -> bool;
-  auto maybeWakeIdleOffTty() -> void;
-  auto maybeEscalateStuck() -> void;
+  auto maybeWakeIdleOffTty(
+      const std::map<std::string, AgentInfo>& agents_snap) -> void;
+  auto maybeEscalateStuck(
+      const std::map<std::string, AgentInfo>& agents_snap) -> void;
 
   // Rate-limited entry from tick(). Trims the advisory events.jsonl log
   // (D1). Byte offsets in topic logs are immutable; no per-topic trim.
-  auto maybeTrimLogs() -> void;
+  auto maybeTrimLogs(const std::map<std::string, AgentInfo>& agents_snap)
+      -> void;
   auto trimEventsLog() -> void;
   // Evict a vanished agent's soft per-agent state (cooldown/alarm maps) so
   // P4 dynamic-peer churn can't grow them unbounded. Cooldown/alarm state
   // only, never in-flight/blocking (those are lifecycle-managed). Driven by
   // pruneDeadAgents from the trim sweep.
   auto forgetAgent(std::string_view name) -> void;
-  auto pruneDeadAgents() -> void;
+  auto pruneDeadAgents(
+      const std::map<std::string, AgentInfo>& agents_snap) -> void;
 
   // Append one record to the audit topic. Auto-creates "audit" if absent,
   // opens the journal, constructs an Envelope (sender="broker", epoch-stamped),
@@ -250,13 +285,22 @@ class Loop {
   auto emitAudit(std::string_view protocol, std::string_view body) -> void;
 
   // True iff `agent` is ready to receive a deliver_when=idle record right now.
-  // Reads events.jsonl filtered to the single agent, calls paneStateCached and
-  // computeState, and evaluates the idle predicate. Both dispatchAgentInbox and
-  // dispatchTuiCommands gate deliver_when=1 records on this.
-  auto isAgentIdle(const std::string& agent, std::int64_t now) const -> bool;
+  // Takes a pre-computed agents snapshot from tick() to avoid re-parsing
+  // events.jsonl per-agent. Both dispatchAgentInbox and dispatchTuiCommands
+  // gate deliver_when=1 records on this.
+  auto isAgentIdle(const std::string& agent, std::int64_t now,
+                   const std::map<std::string, AgentInfo>& agents_snap) const
+      -> bool;
 
   auto writeInflight(const InFlight& f) -> void;
   auto removeInflight(const std::string& msg_id) -> void;
+
+  // M5: topics whose journal corruption has already been reported this run.
+  // A per-topic latch so the "journal-corrupt" audit event fires once, not
+  // every 250 ms tick (which would flood the audit topic and spin the timerfd).
+  // Entries are never evicted — a corrupt log stays corrupt, so re-reporting
+  // on the same topic would be misleading.
+  std::set<std::string> corrupt_reported_;
 
   // ACK an in-flight record by id: monotonically advance its topic's default
   // cursor past the record, optionally stamp the lastid dedup marker, then

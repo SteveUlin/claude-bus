@@ -611,8 +611,10 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto from = peek_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
+    std::int64_t trunc = -1;
     auto r = log.peek(from,
-                      limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX);
+                      limit > 0 ? static_cast<std::size_t>(limit) : SIZE_MAX,
+                      &trunc);
     if (!r) return rpc::errorResponse(r.error().message);
     std::vector<json::Value> arr;
     const auto now = nowMs();
@@ -626,6 +628,12 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     std::map<std::string, json::Value> resp;
     resp.insert({"messages", json::Value::fromArray(std::move(arr))});
+    // M5: surface corruption to callers in-band; -1 = clean.
+    resp.insert({"truncated_at", json::Value::from(trunc)});
+    if (trunc >= 0) {
+      logEvent(cfg.state_dir, "WARN",
+               std::format("journal-corrupt topic={} offset={}", name, trunc));
+    }
     return rpc::okResponse(std::move(resp));
   });
 
@@ -830,8 +838,13 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto from = fetch_cursors.consumerCursor(consumer);
 
     auto& log = getOrOpenLog(name);
-    auto r = log.peek(from, 1);
+    std::int64_t fetch_trunc = -1;
+    auto r = log.peek(from, 1, &fetch_trunc);
     if (!r) return rpc::errorResponse(r.error().message);
+    // M5: surface corruption via the Loop's single-fire latch.
+    if (fetch_trunc >= 0) {
+      dl_ref.reportJournalCorrupt(name, fetch_trunc);
+    }
     if (r->empty()) {
       std::map<std::string, json::Value> resp;
       resp.insert({"message", json::Value{}});
@@ -920,8 +933,13 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     const auto from = drain_cursors.consumerCursor("");
     auto& log = getOrOpenLog(topic_name);
     constexpr std::size_t kDrainCap = 16;
-    auto r = log.peek(from, kDrainCap);
+    std::int64_t drain_trunc = -1;
+    auto r = log.peek(from, kDrainCap, &drain_trunc);
     if (!r) return rpc::errorResponse(r.error().message);
+    // M5: surface corruption to the drain caller and via the Loop's audit path.
+    if (drain_trunc >= 0) {
+      dl_ref.reportJournalCorrupt(topic_name, drain_trunc);
+    }
 
     // C2 idempotency read — skip a record already acked (its bus-ack
     // advanced the cursor and stamped this marker). Guards the boundary
@@ -943,6 +961,7 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     // stale-epoch / already-acked). Default-constructed = no advance needed.
     bus::Journal::Cursor advance_cursor;
     bool has_advance = false;
+    bool advance_blocked = false;  // C2a: latched true on first in-flight seen
     bool delivered_any = false;
     for (const auto& rec : *r) {
       const auto drain_env = bus::msg::decodeEnvelope(rec.payload);
@@ -955,11 +974,21 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       // In-flight guard: if push already delivered this record and is waiting
       // for a bus-ack, a second drain before that ack arrives would re-inject
       // the same message (the lastid dedup only fires AFTER ack). Skip it —
-      // the ack path advances the cursor and stamps lastid, so the next drain
-      // will not see it.
+      // once its ack arrives, scanEvents advances the cursor and the next
+      // drain will not see it.
       const bool already_inflight = dl_ref.inFlight().contains(rec.id);
       if (ttl_expired || stale_epoch || already_acked || already_inflight) {
-        if (!delivered_any && !already_inflight) {  // leading drop only
+        // C2a leapfrog fix: once we see an in-flight record, latch
+        // advance_blocked — NO subsequent skippable record (ttl/epoch/acked)
+        // may advance the cursor past this in-flight one. Without this latch,
+        // a [rec0 in-flight, rec1 ttl-expired] sequence advances the cursor
+        // past rec0 even though its ack was lost, silently consuming it.
+        if (already_inflight) {
+          advance_blocked = true;
+        }
+        if (!delivered_any && !advance_blocked) {
+          // Leading drop (ttl/epoch/acked) and no in-flight block: safe to
+          // advance the cursor past this record.
           advance_cursor = bus::Journal::cursorAfter(rec);
           has_advance = true;
         }

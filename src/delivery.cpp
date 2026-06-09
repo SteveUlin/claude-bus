@@ -32,6 +32,7 @@
 #include <format>
 #include <fstream>
 #include <print>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -253,6 +254,10 @@ auto Loop::load() -> void {
         v->getOrString("cursor_after"));
     f.attempts = static_cast<std::int32_t>(v->getOrInt("attempts", 1));
     f.next_retry_at = v->getOrInt("next_retry_at", 0);
+    f.drain_origin = v->getOrInt("drain_origin", 0) != 0;
+    // acked_held is never persisted — always false on load (at-least-once
+    // re-delivery on restart; lastid dedup absorbs the duplicate).
+    f.acked_held = false;
     if (!f.msg_id.empty()) {
       in_flight_.insert_or_assign(f.msg_id, f);
     }
@@ -260,6 +265,14 @@ auto Loop::load() -> void {
 
   loadBlockingOps();
   // events_offset_ stays at -1 so the first tick seeks to EOF.
+}
+
+auto Loop::reportJournalCorrupt(const std::string& topic,
+                                std::int64_t offset) -> void {
+  if (corrupt_reported_.contains(topic)) return;
+  corrupt_reported_.insert(topic);
+  emitAudit("journal-corrupt",
+            std::format("journal-corrupt topic={} offset={}", topic, offset));
 }
 
 auto Loop::emitAudit(std::string_view protocol, std::string_view body) -> void {
@@ -283,12 +296,13 @@ auto Loop::emitAudit(std::string_view protocol, std::string_view body) -> void {
   auto _ = audit_log_r->append(bus::msg::encodeEnvelope(env));
 }
 
-auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool {
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  std::set<std::string> filter{agent};
-  auto agents = readAgents(events_log, filter);
+auto Loop::isAgentIdle(const std::string& agent, std::int64_t now,
+                       const std::map<std::string, AgentInfo>& agents_snap)
+    const -> bool {
   AgentInfo info;
-  if (auto it = agents.find(agent); it != agents.end()) info = it->second;
+  if (auto it = agents_snap.find(agent); it != agents_snap.end()) {
+    info = it->second;
+  }
 
   // Readiness sentinel: a fresh $STATE/ready/<agent>.json means the agent is
   // parked at a turn boundary. As of Slice 3 this is the SOLE idle signal — the
@@ -320,6 +334,11 @@ auto Loop::writeInflight(const InFlight& f) -> void {
   obj.insert({"attempts", json::Value::from(static_cast<std::int64_t>(
                               f.attempts))});
   obj.insert({"next_retry_at", json::Value::from(f.next_retry_at)});
+  // Persist drain_origin so a restarted broker knows not to TTY-re-dispatch
+  // an entry that was delivered off-TTY. acked_held is NOT persisted — on
+  // restart the entry is re-deliverable (at-least-once; lastid dedup absorbs).
+  obj.insert({"drain_origin", json::Value::from(
+                  static_cast<std::int64_t>(f.drain_origin ? 1 : 0))});
   const auto wire = json::serialize(json::Value::fromObject(std::move(obj)));
   const std::string tmp = path + ".tmp";
   std::ofstream out{tmp};
@@ -366,10 +385,82 @@ auto Loop::onAck(const std::string& msg_id, bool write_lastid) -> bool {
   auto it = in_flight_.find(msg_id);
   if (it == in_flight_.end()) return false;  // unknown / already acked
   const auto& f = it->second;
-  bus::CursorStore cursors{cfg_.state_dir, f.topic};
-  cursors.ack("", f.cursor_after, write_lastid ? msg_id : "");
+  const auto topic = f.topic;
+  const auto agent = f.agent;
+  const auto this_cursor = f.cursor_after;
+  const auto this_lastid = write_lastid ? msg_id : std::string{};
+
+  // C2a reorder buffer: only advance the cursor if this entry is the OLDEST
+  // in-flight for its (topic, agent) pair (by cursor_after). Acking a newer
+  // entry while an older one is still un-acked would leapfrog the cursor past
+  // the unacked record, silently consuming it without delivery.
+  //
+  // Find the smallest cursor_after among all in-flight entries for this
+  // (topic, agent), excluding entries already acked-held.
+  Journal::Cursor oldest_cursor;
+  bool found_oldest = false;
+  for (const auto& [id, entry] : in_flight_) {
+    if (entry.topic != topic || entry.agent != agent) continue;
+    if (entry.acked_held) continue;  // already waiting in the held set
+    if (!found_oldest || entry.cursor_after < oldest_cursor) {
+      oldest_cursor = entry.cursor_after;
+      found_oldest = true;
+    }
+  }
+
+  if (!found_oldest || this_cursor != oldest_cursor) {
+    // Not the oldest — mark as acked-held. The cursor advances when the
+    // contiguous acked prefix clears. On broker restart, held entries are
+    // not persisted and become re-deliverable (at-least-once; lastid absorbs).
+    it->second.acked_held = true;
+    // Update the on-disk file so a restart doesn't see a stale next_retry_at
+    // that fires immediately — a held entry's deadline is irrelevant, but the
+    // file must not trigger a spurious scanRetries escalation. Clearing
+    // next_retry_at to 0 suppresses scanRetries for this entry.
+    it->second.next_retry_at = 0;
+    writeInflight(it->second);
+    return true;
+  }
+
+  // This is the oldest un-acked entry: advance the cursor past it, then let
+  // drainHeldPrefix advance through any acked-held entries it was blocking.
+  bus::CursorStore cursors{cfg_.state_dir, topic};
+  cursors.ack("", this_cursor, this_lastid);
   forgetInflight(msg_id);  // removes file + erases map + clears blocking-op
+  drainHeldPrefix(topic, agent);
   return true;
+}
+
+auto Loop::drainHeldPrefix(const std::string& topic,
+                           const std::string& agent) -> void {
+  // Advance the consumer cursor through the leading run of acked-held
+  // entries for (topic, agent), ordered by cursor_after. The only barrier
+  // to advancing is an entry still awaiting its ack — offset gaps between
+  // in-flight entries are records the drain handler already dropped
+  // (ttl/epoch/acked) and are safe to jump; cursor_after values are never
+  // contiguous (each is the offset after a non-empty record), so offset
+  // adjacency cannot be the test.
+  std::vector<std::pair<Journal::Cursor, std::string>> entries;
+  for (const auto& [id, entry] : in_flight_) {
+    if (entry.topic != topic || entry.agent != agent) continue;
+    entries.push_back({entry.cursor_after, id});
+  }
+  if (entries.empty()) return;
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  Journal::Cursor advance_to;
+  std::string advance_lastid;
+  std::vector<std::string> to_forget;
+  for (const auto& [cur, id] : entries) {
+    if (!in_flight_.at(id).acked_held) break;
+    advance_to = cur;
+    advance_lastid = id;
+    to_forget.push_back(id);
+  }
+  if (to_forget.empty()) return;
+  bus::CursorStore cursors{cfg_.state_dir, topic};
+  cursors.ack("", advance_to, advance_lastid);
+  for (const auto& id : to_forget) forgetInflight(id);
 }
 
 auto Loop::noteDrainDelivery(const std::string& msg_id,
@@ -383,8 +474,32 @@ auto Loop::noteDrainDelivery(const std::string& msg_id,
   f.dispatched_at_ms = nowMs();
   f.cursor_after = cursor_after;
   f.attempts = 1;
-  f.next_retry_at = 0;  // scanRetries skips (<=0): drain re-delivers, never
-                        // TTY-re-dispatch an off-TTY record.
+  // C2b: when scanRetries "forgets" a drain entry (to allow re-delivery) it
+  // leaves the in-flight file on disk with the incremented attempts count
+  // rather than removing it. Carry that count forward so repeated lost-ack
+  // cycles accumulate toward kMaxAttempts rather than resetting each drain.
+  {
+    const auto path = inflightPath(cfg_, msg_id);
+    std::ifstream in{path};
+    if (in) {
+      std::ostringstream buf;
+      buf << in.rdbuf();
+      if (auto v = json::parse(buf.str())) {
+        const auto prior =
+            static_cast<std::int32_t>(v->getOrInt("attempts", 1));
+        if (prior > f.attempts) f.attempts = prior;
+      }
+    }
+  }
+  // Set a real ack deadline so scanRetries detects a lost bus-ack. On expiry,
+  // scanRetries FORGETS this entry (never TTY-re-dispatches — drain_origin=true
+  // marks it off-TTY) so the next drain re-reads the un-advanced cursor and
+  // re-delivers (at-least-once). At kMaxAttempts, escalates via the existing
+  // audit/inbox-human path. The old next_retry_at=0 left a lost-ack wedged
+  // permanently (C2b fix).
+  f.next_retry_at = f.dispatched_at_ms + ackTimeoutMs();
+  f.drain_origin = true;
+  f.acked_held = false;
   in_flight_.insert_or_assign(msg_id, f);
   writeInflight(f);
 }
@@ -549,7 +664,9 @@ auto Loop::scanEvents() -> void {
   events_offset_ = reader.offset();
 }
 
-auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
+auto Loop::dispatchAgentInbox(
+    const TopicConfig& cfg,
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   if (cfg.kind != TopicKind::AgentInbox) return;
 
   // Resolve recipient agent from parsed_config.
@@ -608,7 +725,18 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, cfg.name));
   if (!log_r) return;
   bus::CursorStore cursors{cfg_.state_dir, cfg.name};
-  auto r = log_r->peek(cursors.consumerCursor(""), 4);
+  std::int64_t trunc = -1;
+  auto r = log_r->peek(cursors.consumerCursor(""), 4, &trunc);
+  // M5: surface corruption once per topic via the audit machinery so the
+  // human learns the log is damaged. The delivery path stops here (the
+  // corrupt record acts as a logical EOF), which surfaces as a permanent
+  // delivery stall — better than silently swallowing the corruption.
+  if (trunc >= 0 && !corrupt_reported_.contains(cfg.name)) {
+    corrupt_reported_.insert(cfg.name);
+    emitAudit("journal-corrupt",
+              std::format("journal-corrupt topic={} offset={}", cfg.name,
+                          trunc));
+  }
   if (!r || r->empty()) return;
 
   // Pick the first record that isn't expired AND isn't already
@@ -661,7 +789,7 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
     //   2. State::Starting + pane in INSERT — broker has no event
     //      history for this agent (fresh boot, post-wipe) but the
     //      pane is visibly at the prompt; trust the TTY.
-    if (env.deliver_when == 1 && !isAgentIdle(agent, now)) return;
+    if (env.deliver_when == 1 && !isAgentIdle(agent, now, agents_snap)) return;
 
     // Build payload — inline for small, pointer for large.
     std::string payload;
@@ -702,7 +830,9 @@ auto Loop::dispatchAgentInbox(const TopicConfig& cfg) -> void {
   }
 }
 
-auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
+auto Loop::dispatchTuiCommands(
+    const TopicConfig& cfg,
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   if (cfg.kind != TopicKind::TuiCommands) return;
 
   const std::string agent = cfg.agentName();
@@ -715,7 +845,15 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
   auto log_r = bus::Journal::openOrCreate(topicLogPath(cfg_.state_dir, cfg.name));
   if (!log_r) return;
   bus::CursorStore cursors{cfg_.state_dir, cfg.name};
-  auto r = log_r->peek(cursors.consumerCursor(""), 4);
+  std::int64_t trunc = -1;
+  auto r = log_r->peek(cursors.consumerCursor(""), 4, &trunc);
+  // M5: surface corruption once per topic.
+  if (trunc >= 0 && !corrupt_reported_.contains(cfg.name)) {
+    corrupt_reported_.insert(cfg.name);
+    emitAudit("journal-corrupt",
+              std::format("journal-corrupt topic={} offset={}", cfg.name,
+                          trunc));
+  }
   if (!r || r->empty()) return;
 
   const auto now = nowMs();
@@ -749,7 +887,7 @@ auto Loop::dispatchTuiCommands(const TopicConfig& cfg) -> void {
     // tui-commands records default to deliver_when=idle (set by
     // `bus msg slash`). Same gate as dispatchAgentInbox: Idle, or
     // Starting+INSERT for post-wipe boots with no event history.
-    if (env.deliver_when == 1 && !isAgentIdle(agent, now)) return;
+    if (env.deliver_when == 1 && !isAgentIdle(agent, now, agents_snap)) return;
 
     // Run the dispatch state machine. Synchronous — can take up to
     // ~5s on retries. Only this topic stalls; other topics still
@@ -821,6 +959,9 @@ auto Loop::scanRetries() -> void {
         blocking_ops_.at(f.agent) == id) {
       continue;
     }
+    // Skip acked-held entries (they're waiting for an older sibling to ack
+    // first; their next_retry_at was cleared to 0 in onAck).
+    if (f.acked_held) continue;
     due.push_back(id);
   }
 
@@ -856,6 +997,34 @@ auto Loop::scanRetries() -> void {
       continue;
     }
 
+    if (f.drain_origin) {
+      // C2b fix: off-TTY (drain-origin) entry — a lost bus-ack wedged the
+      // cursor permanently under the old next_retry_at=0 scheme. Instead of
+      // TTY-re-dispatching (there is no pane to type into for off-TTY agents),
+      // forget the in-flight entry so the next drain re-reads the un-advanced
+      // cursor and re-delivers (at-least-once). Increment attempts so repeated
+      // lost-ack cycles eventually hit kMaxAttempts and escalate rather than
+      // looping forever.
+      f.attempts += 1;
+      if (f.attempts >= kMaxAttempts) {
+        escalate(f, "drain: no bus-ack after max attempts", rec_env.body);
+        log_cursors.ack("", bus::Journal::cursorAfter(rec));
+        removeInflight(id);
+        in_flight_.erase(id);
+      } else {
+        // Persist the incremented attempts count BEFORE erasing from memory so
+        // that the next noteDrainDelivery (when the drain re-delivers this
+        // record) can read it and carry the count forward. Without this,
+        // attempts reset to 1 on every drain cycle and kMaxAttempts is never
+        // reached.
+        writeInflight(f);
+        // Erase from memory only — file remains on disk as an attempts sidecar.
+        // noteDrainDelivery reads it on the next drain.
+        in_flight_.erase(id);
+      }
+      continue;
+    }
+
     // An agent-inbox record is in-flight ONLY because deliverInline
     // already SUCCEEDED at dispatch — dispatchAgentInbox returns WITHOUT
     // marking in-flight when the write is deferred — so an in-flight
@@ -881,26 +1050,41 @@ auto Loop::scanRetries() -> void {
     f.next_retry_at = now + ackTimeoutMs();
     writeInflight(f);
   }
+
+  // C2a: a held-acked entry's blocker can vanish by expiry or escalation
+  // (handled above) rather than by acking — sweep so held prefixes don't
+  // strand as phantom unread once nothing un-acked sits below them.
+  std::set<std::pair<std::string, std::string>> held_pairs;
+  for (const auto& [id, f] : in_flight_) {
+    if (f.acked_held) held_pairs.insert({f.topic, f.agent});
+  }
+  for (const auto& [topic, agent] : held_pairs) drainHeldPrefix(topic, agent);
 }
 
 auto Loop::tick() -> void {
   updateContinuity();
   scanEvents();
   scanRetries();
-  maybeAutoClear();
-  runPolicy();
+  // M2: compute ONE agents snapshot for the whole tick. Every sub-scan that
+  // previously called readAgents() independently now shares this single parse
+  // of events.jsonl. The `state` RPC handler in broker.cpp has its own call
+  // context and is left untouched.
+  const std::string events_log = cfg_.state_dir + "/events.jsonl";
+  const auto agents_snap = readAgents(events_log, {});
+  maybeAutoClear(agents_snap);
+  runPolicy(agents_snap);
   token_watcher_.scan();
-  maybeWakeIdleOffTty();
-  maybeTrimLogs();
+  maybeWakeIdleOffTty(agents_snap);
+  maybeTrimLogs(agents_snap);
   for (const auto& cfg : registry_.list()) {
-    if (cfg.kind == TopicKind::AgentInbox) dispatchAgentInbox(cfg);
+    if (cfg.kind == TopicKind::AgentInbox) dispatchAgentInbox(cfg, agents_snap);
     else if (cfg.kind == TopicKind::TuiCommands)
-      dispatchTuiCommands(cfg);
+      dispatchTuiCommands(cfg, agents_snap);
   }
   // D8 Part B: emit any overrun escalations + recompute next_deadline_ms_
   // last, so it reflects post-dispatch in-flight state. The rpc loop reads
   // it via nextDeadlineMs() to arm the timerfd.
-  maybeEscalateStuck();
+  maybeEscalateStuck(agents_snap);
 }
 
 // D8 Part B — the escalation deadline source. Emits a one-shot audit alarm
@@ -916,7 +1100,8 @@ auto Loop::tick() -> void {
 // Observability ONLY — the recovery action (nudge / clear / respawn) is R1's
 // triage table. This run-on-every-tick scan (no rate-limit) is what lets a
 // timerfd fire translate into an alarm the instant the budget elapses.
-auto Loop::maybeEscalateStuck() -> void {
+auto Loop::maybeEscalateStuck(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   const auto now = nowMs();
 
   std::int64_t stuck_budget = 5 * 60'000;  // turn open this long w/o Stop
@@ -944,9 +1129,7 @@ auto Loop::maybeEscalateStuck() -> void {
     emitAudit(protocol, body);
   };
 
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  auto agents = readAgents(events_log, {});
-  for (const auto& [name, info] : agents) {
+  for (const auto& [name, info] : agents_snap) {
     // Live pane only — ghost markers from dead sessions don't escalate.
     if (gate_on_pane && paneId(name).empty()) {
       turn_stuck_alarmed_.erase(name);
@@ -1040,7 +1223,8 @@ auto Loop::maybeEscalateStuck() -> void {
 // Idle ≥ 10 min implies cache-cold (5-min TTL), so the cache-TTL gate
 // from the doc is automatically satisfied by the idle threshold —
 // no separate check needed.
-auto Loop::maybeAutoClear() -> void {
+auto Loop::maybeAutoClear(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   // When the recovery engine is in soft/on mode it OWNS idle-context clearing
   // (R1, through the breaker/backoff ledger) — stand aside so the agent isn't
   // cleared twice. In observe/off mode (the default) this standalone loop stays
@@ -1067,10 +1251,7 @@ auto Loop::maybeAutoClear() -> void {
   // Role-exclusion list — comms and primary hold cross-thread continuity
   // (see clear-policy.md §6); they should only clear under explicit
   // human direction. Anything else is fair game.
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  auto agents = readAgents(events_log, {});
-
-  for (const auto& [name, info] : agents) {
+  for (const auto& [name, info] : agents_snap) {
     if (std::find(kNoClearRoles.begin(), kNoClearRoles.end(),
                   std::string_view{name}) != kNoClearRoles.end()) continue;
     if (info.last.event != "Stop") continue;
@@ -1199,14 +1380,16 @@ auto Loop::updateContinuity() -> void {
 // they return. The snapshot fields are exactly what the inline maybeAutoRecover
 // computed per agent; pane acquisition stays here (the loop plane owns the TTL
 // cache), pulled lazily via ctx.pane only when an actor's cheap signals match.
-auto Loop::runPolicy() -> void {
+auto Loop::runPolicy(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   policy::PolicyContext ctx;
   ctx.now_wall_ms = nowMs();
   ctx.now_mono_ms = nowMonoMs();
   ctx.pane = [](const std::string& n) { return paneStateCached(n); };
 
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  auto agents = readAgents(events_log, {});  // stable for the tick
+  // Use the tick-level snapshot (M2) — no second readAgents call here.
+  // Make a mutable copy so we can take non-const pointers for AgentSnapshot.
+  auto agents = agents_snap;
   for (auto& [name, info] : agents) {
     if (paneId(name).empty()) continue;  // live pane only
     policy::AgentSnapshot s;
@@ -1360,7 +1543,8 @@ auto Loop::consumeQueueHead(const std::string& topic) -> void {
 // UNATTENDED past CLAUDE_BUS_STRAND_MS (default 120s) emits a one-shot
 // audit alarm (protocol=doorbell-strand) — the objective "no mail
 // strands silently" signal. Cleared when the mail drains.
-auto Loop::maybeWakeIdleOffTty() -> void {
+auto Loop::maybeWakeIdleOffTty(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   const auto now = nowMs();
   if (now - wake_last_scan_ms_ < 5'000) return;  // every 5 s
   wake_last_scan_ms_ = now;
@@ -1371,10 +1555,7 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     if (const auto v = std::atoll(env); v > 0) strand_ms = v;
   }
 
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  auto agents = readAgents(events_log, {});
-
-  for (const auto& [name, info] : agents) {
+  for (const auto& [name, info] : agents_snap) {
     if (isTtyAgent(name)) continue;  // off-TTY agents only (the default)
 
     // No live pane → gone/transitioning; the topic-log record replays on
@@ -1505,7 +1686,8 @@ auto Loop::trimEventsLog() -> void {
 
 // maybeTrimLogs — rate-limited trim of the advisory events.jsonl log (D1).
 // Topic log byte offsets are immutable; no per-topic head trim is performed.
-auto Loop::maybeTrimLogs() -> void {
+auto Loop::maybeTrimLogs(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   const auto now = nowMs();
   // Default 60 s; CLAUDE_BUS_TRIM_INTERVAL_MS lets tests trigger the sweep
   // promptly (mirrors CLAUDE_BUS_ACK_TIMEOUT_MS).
@@ -1521,7 +1703,7 @@ auto Loop::maybeTrimLogs() -> void {
 
   // CRIT #4: evict soft per-agent state for vanished agents on the same 60 s
   // cadence as the log trim — same "GC my own $STATE" sweep.
-  pruneDeadAgents();
+  pruneDeadAgents(agents_snap);
 }
 
 // Erase a vanished agent's SOFT per-agent state (cooldown/alarm maps). These
@@ -1543,11 +1725,10 @@ auto Loop::forgetAgent(std::string_view name) -> void {
 // Prune soft per-agent state for agents no longer present in the events log.
 // events.jsonl is retention-bounded (D1), so a long-despawned dynamic peer
 // ages out of readAgents and its cooldown/alarm entries are reclaimed.
-auto Loop::pruneDeadAgents() -> void {
-  const std::string events_log = cfg_.state_dir + "/events.jsonl";
-  const auto live = readAgents(events_log, {});
+auto Loop::pruneDeadAgents(
+    const std::map<std::string, AgentInfo>& agents_snap) -> void {
   const auto isDead = [&](const std::string& agent) {
-    return !live.contains(agent);
+    return !agents_snap.contains(agent);
   };
   // Collect dead agents across the maps, then forget each once.
   std::set<std::string> dead;
@@ -1561,7 +1742,7 @@ auto Loop::pruneDeadAgents() -> void {
   // Policy actors GC their own per-agent state given the live set — the loop
   // can't enumerate their maps (e.g. recovery's would-recover cooldowns).
   std::set<std::string> live_names;
-  for (const auto& [k, _] : live) live_names.insert(k);
+  for (const auto& [k, _] : agents_snap) live_names.insert(k);
   engine_.pruneDeadAgents(live_names);
   token_watcher_.pruneDead(live_names);
 }

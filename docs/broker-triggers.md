@@ -40,7 +40,7 @@ for reactions the turn does *not* need to wait on.
                                                                 │
                                                    RunScript action (async)
                                                                 │
-                                          fork-detached script  ← event JSON on stdin
+                                       child script (dies w/ broker)  ← event JSON on stdin
 ```
 
 - **Event in** — unchanged. Hooks append to `events.jsonl`; the broker already
@@ -50,9 +50,10 @@ for reactions the turn does *not* need to wait on.
 - **Match** — each new event is matched against the trigger table (event name +
   agent/role + payload conditions).
 - **RunScript out** — a match emits a `RunScript` policy action.
-- **Execute** — the loop **fork-detaches** the script (never waits) and passes
-  the event JSON on the script's stdin, exactly as Claude Code passes a hook its
-  payload. A trigger script *is* a hook script — just run by the broker, async.
+- **Execute** — the loop spawns the script as a **broker child** (never waits;
+  the child dies with the broker — §5) and passes the event JSON on its stdin,
+  exactly as Claude Code passes a hook its payload. A trigger script *is* a hook
+  script — just run by the broker, async.
 
 ## 3. The trigger table
 
@@ -63,11 +64,9 @@ restart, like everything). One entry:
 ```kdl
 trigger "fact-extract" {
     on "Stop"                       // event name (root .event)
-    match role="scholar"            // optional: role / agent / payload.* conditions
+    match role="scholar"            // optional: role / agent / payload.* equality
     run  "settings/triggers/fact-extract.sh"
     model "haiku"                   // convenience env for the script
-    cooldown_ms 0
-    max_concurrent 2                // backpressure (see §5)
 }
 ```
 
@@ -93,30 +92,40 @@ loop executes" pattern — no new plane:
 The kernel (cursor/ack/in-flight) is **untouched** — a trigger never advances a
 delivery cursor or moves mail; it only spawns a side-effecting script.
 
-## 5. Async execution — the load-bearing constraint
+## 5. Execution — a broker child, never blocking, dies with the broker
 
-The broker is **single-threaded** (the delivery/pselect loop). It **must never
-block** on a triggered script — a `claude -p` takes seconds; blocking the loop is
-the exact saturation-wedge the pane-fork discipline exists to prevent. So:
+Two constraints at once. The broker is **single-threaded** (the delivery/pselect
+loop), so it **must never block** on a triggered script — a `claude -p` takes
+seconds; blocking the loop is the saturation-wedge the pane-fork discipline
+exists to prevent. AND a triggered process **must die when the broker dies**
+(sulin) — no orphaned `claude -p` outliving the broker that spawned it.
 
-- **Fire-and-forget spawn.** `process.{h,cpp}` (the existing spawn module) is
-  *blocking-with-timeout* — wrong for this. Triggers need a new
-  **`spawnDetached(argv, env, stdin_bytes)`** primitive: `fork`, in the child
-  `setsid` + redirect stdio (event JSON → stdin, stdout/stderr → a per-trigger
-  log or `/dev/null`), `exec`; the parent returns immediately and **does not
-  wait**.
-- **Reaping without blocking.** A detached child re-parents to init on exit
-  (double-fork), so the broker needn't `waitpid` — no zombies, no SIGCHLD
-  handling in the hot loop.
-- **Backpressure (mandatory).** A trigger that fires every `Stop` across a busy
-  fleet could spawn dozens of `claude -p` at once — cost + rate-limit blowout.
-  The broker caps concurrent trigger processes (per-trigger `max_concurrent` +
-  a global ceiling); over the cap, **drop with an audit event** (never queue
-  unboundedly, never block). Triggers are best-effort by construction.
-- **Best-effort, not at-least-once.** Unlike mail, a missed trigger is not
-  re-delivered (it has no cursor). A trigger that must not be lost should write
-  durable state itself (the fact-extract script appends to a file). State this
-  so no one mistakes a trigger for guaranteed delivery.
+- **Spawn as a broker CHILD, fire-and-forget.** A new `spawnChild(argv, env,
+  stdin_bytes)` primitive: `fork`; in the child set
+  `prctl(PR_SET_PDEATHSIG, SIGKILL)` (the kernel kills it if the broker exits),
+  keep it in the broker's process group, redirect stdio (event JSON → stdin;
+  stdout/stderr → a per-trigger log or `/dev/null`), `exec`. The parent records
+  the pid and **returns immediately — it does not wait.** Explicitly **NOT**
+  `setsid`/double-fork/detached — that would let the child outlive the broker,
+  exactly what's forbidden here.
+- **Die-with-broker, belt + suspenders.** `PR_SET_PDEATHSIG` covers a broker
+  crash / `SIGKILL`. The broker's clean shutdown also `kill(-pgid, SIGTERM →
+  SIGKILL)`s its trigger process group — the deterministic primary path.
+  (PDEATHSIG has known edge cases — see [[project_broker_orphan_reap]] — so the
+  group-kill on clean stop is primary, PDEATHSIG the crash backstop.)
+- **Reap without blocking.** These are real children (not re-parented), so the
+  broker must reap them or leak zombies: a single `waitpid(-1, WNOHANG)` sweep
+  per tick harvests finished triggers — non-blocking, no SIGCHLD handler in the
+  hot loop.
+- **No concurrency cap in v1 — deferred to a higher-level policy.** Capping how
+  many triggers run at once is a **policy** concern (a policy decides), not a
+  field on a trigger; v1 spawns on every match. Known limitation: a trigger on a
+  high-frequency event across a busy fleet could spawn many `claude -p` at once —
+  the fact-extraction-on-`Stop` first use is low-rate, so accept it for now and
+  add throttling as a policy when a real trigger needs it.
+- **Best-effort, not at-least-once.** A trigger has no cursor; a missed trigger
+  is not re-delivered. A trigger that must not be lost writes durable state
+  itself (the fact-extract script appends to a file).
 
 ## 6. First trigger: fact-extraction → the facts log
 
@@ -145,16 +154,17 @@ periodic policy) over the accumulated `$STATE/facts/*`.
 - **Landed-from-main only** — the broker launches scripts; the table + scripts
   materialize from `main` exactly like hooks (no live-editable trigger surface,
   no per-agent injection). A trigger is as trusted as a hook, no more.
-- **SEC-1 interaction** — a trigger script that hits the network (a `claude -p`
-  does) must honor the same netns/squid cage as the agent it fires for, or run
-  uncaged by explicit policy. Flag at build.
+- **SEC-1 isolation — deferred past v1.** A network-hitting trigger (a `claude
+  -p` does) will eventually need to honor the agent's netns/squid cage, but
+  that's not a first-pass concern; v1 runs triggers in the broker's own context.
 - **Observability** — every fire (and every backpressure drop) emits an audit
   event, so `bus log` shows the trigger history.
 
 ## 8. Migration — smallest first slice
 
-1. **`spawnDetached` primitive** + a unit test (spawn `/bin/sh -c 'echo $X'`,
-   confirm fire-and-forget + stdin delivery + no broker block).
+1. **`spawnChild` primitive** + a unit test (spawn a child, confirm fire-and-
+   forget + stdin delivery + no broker block + `PR_SET_PDEATHSIG` set + harvested
+   by the `WNOHANG` sweep).
 2. **`RunScript` action + `TriggerActor` + `new_events` in `PolicyContext`** with
    a **hardcoded** single trigger (fact-extract on `Stop`), behind an env flag —
    prove the path end-to-end on one agent with no config surface yet.
@@ -164,17 +174,18 @@ periodic policy) over the accumulated `$STATE/facts/*`.
 
 Each step keeps the broker delivering mail; the kernel never changes.
 
-## 9. Open questions for sulin
+## 9. Decisions (resolved with sulin, 2026-06-09)
 
-- **Table format** — KDL (matches layouts) vs JSON (matches settings)? Lean KDL.
-- **Match expressiveness** — start with `event + role/agent + simple payload
-  equality`; defer a full predicate DSL (the §9 "declarative policy DSL" is the
-  horizon, not v1).
-- **Per-trigger vs global concurrency cap** defaults, and the drop-vs-defer
-  policy at the cap (proposal: drop + audit; never defer).
-- **Caged or uncaged** for network-hitting trigger scripts (SEC-1 tier).
-- **`spawnDetached` location** — extend `process.h`, or a sibling `spawn.h` (it's
-  a different contract — no return value, no wait). Lean sibling.
+- **Table format: KDL** (matches layouts).
+- **Match expressiveness:** v1 = `event + role/agent + simple payload equality`;
+  a predicate **DSL is on hold**.
+- **Concurrency cap: a higher-level policy concept, NOT in v1.** Not a trigger
+  field; a policy implements throttling if/when a trigger needs it (§5).
+- **SEC-1 isolation: not in the first pass.**
+- **Lifetime: triggered processes die with the broker** — `PR_SET_PDEATHSIG` +
+  process-group kill on clean shutdown; never detached (§5).
+- **`spawnChild` lives in a sibling `spawn.h`** — a different contract from the
+  blocking `process.h` (no return value, no wait). Lean sibling.
 
 ## 10. Out of scope
 

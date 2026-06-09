@@ -196,3 +196,20 @@ target_link_libraries(bus_tests PRIVATE bus_core bus_envelope bus_readers bus_pa
 set_target_properties(bus_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_test(NAME unit COMMAND bus_tests)
+set_tests_properties(unit PROPERTIES LABELS unit)
+
+# Integration tests: real broker + fake-zellij harness, hermetic ($STATE
+# isolated per-test via mktemp, self-cleaning via EXIT trap). Behind the
+# `itest` label so `ctest -L unit` stays fast; `ctest -L itest` runs the
+# real delivery-loop gate. RUN_SERIAL because each spawns its own broker
+# and binds a Unix socket — no concurrency between them.
+file(GLOB BUS_ITESTS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*-itest.sh)
+foreach(itest_path ${BUS_ITESTS})
+  get_filename_component(itest_name ${itest_path} NAME_WE)
+  add_test(NAME ${itest_name} COMMAND bash ${itest_path}
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  set_tests_properties(${itest_name} PROPERTIES
+      LABELS itest
+      RUN_SERIAL TRUE
+      TIMEOUT 180)
+endforeach()

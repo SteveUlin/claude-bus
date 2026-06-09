@@ -147,6 +147,7 @@ add_executable(bus
     src/sub/sub_monitor.cpp
     src/sub/sub_pane.cpp
     src/sub/sub_produce.cpp
+    src/sub/sub_queue.cpp
     src/sub/sub_roles.cpp
     src/sub/sub_state.cpp
     src/sub/sub_tasks.cpp

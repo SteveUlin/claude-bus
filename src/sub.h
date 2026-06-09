@@ -48,6 +48,9 @@ auto subBroker(std::span<const char* const>) -> int;
 // Topic registry (defined in src/sub/sub_topic.cpp).
 auto subTopic(std::span<const char* const>) -> int;
 
+// Work-queue sugar (defined in src/sub/sub_queue.cpp).
+auto subQueue(std::span<const char* const>) -> int;
+
 // Producers + consumers (defined in src/sub/sub_{produce,consume}.cpp).
 auto subEnqueue(std::span<const char* const>) -> int;
 auto subMail(std::span<const char* const>) -> int;

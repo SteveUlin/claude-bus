@@ -26,6 +26,7 @@ const Subcommand kSubcommands[] = {
     {"monitor", subMonitor, "dashboard of all bus agents"},
     {"msg", subMsg, "message operations: send, fetch, mail, slash, broadcast, etc."},
     {"pane-id", subPaneId, "resolve pane name → terminal_N"},
+    {"queue", subQueue, "work-queue sugar: push / pop / peek / list"},
     {"pane-send", subPaneSend, "raw TTY write to a pane id (no flock)"},
     {"pane-state", subPaneState, "introspect a pane (mode, buffer, …)"},
     {"recover", subRecover,

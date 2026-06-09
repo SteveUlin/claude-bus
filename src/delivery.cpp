@@ -172,16 +172,6 @@ auto readyTtlMs() -> std::int64_t {
   return 90 * 1000;
 }
 
-// Whether to fall back to pane-read when no fresh sentinel exists.
-// Default TRUE — keeps Slice 1a a no-op until the write-hook ships.
-// Disabled by CLAUDE_BUS_PANE_FALLBACK=0.
-auto paneFallbackEnabled() -> bool {
-  const char* env = std::getenv("CLAUDE_BUS_PANE_FALLBACK");
-  if (!env || env[0] == '\0') return true;
-  // Treat "0" as the only off value (cheap, no string copy needed).
-  return !(env[0] == '0' && env[1] == '\0');
-}
-
 }  // namespace
 
 Loop::Loop(const BrokerConfig& cfg, TopicRegistry& registry,
@@ -300,27 +290,20 @@ auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool
   AgentInfo info;
   if (auto it = agents.find(agent); it != agents.end()) info = it->second;
 
-  // Readiness sentinel (agent-contract Slice 1): a fresh $STATE/ready/<agent>.json
-  // means the agent is parked at a turn boundary — replacing the pane footer read.
-  // The staleness fence (ts_ms >= last event) excludes an agent that resumed working.
+  // Readiness sentinel: a fresh $STATE/ready/<agent>.json means the agent is
+  // parked at a turn boundary. As of Slice 3 this is the SOLE idle signal — the
+  // pane fallback is gone, so the delivery path never forks dump-screen. The
+  // staleness fence (ts_ms >= last event) excludes an agent that resumed
+  // working; an absent/stale sentinel reads not-idle, and the agent re-stamps
+  // on its next Stop/Notification boundary.
   const auto ready = readReady(cfg_.state_dir, agent);
-  const bool fresh =
-      ready && readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms);
-  if (fresh) {
-    // Sentinel proves alive + at a boundary; no pane fork. Starting+fresh is the
-    // boot at-prompt proof that pane.isInsert() used to give.
-    const auto st = computeState(info, 0, now, /*pane_exists=*/true);
-    return st == State::Idle || st == State::Starting;
+  if (!(ready && readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms))) {
+    return false;
   }
-  // No fresh sentinel. During rollout (before the write-hook ships) fall back to
-  // today's pane read so behavior is unchanged; CLAUDE_BUS_PANE_FALLBACK=0 disables.
-  if (paneFallbackEnabled()) {
-    const auto pane = paneStateCached(agent);
-    const auto st = computeState(info, 0, now, pane.ok);
-    return st == State::Idle ||
-           (st == State::Starting && pane.ok && pane.isInsert());
-  }
-  return false;
+  // Sentinel proves alive + at a boundary. Starting+fresh is the boot at-prompt
+  // proof that pane.isInsert() used to give.
+  const auto st = computeState(info, 0, now, /*pane_exists=*/true);
+  return st == State::Idle || st == State::Starting;
 }
 
 auto Loop::writeInflight(const InFlight& f) -> void {
@@ -1453,30 +1436,19 @@ auto Loop::maybeWakeIdleOffTty() -> void {
     // excluded so BOOT_STUCK detection is intact. (Mid-compaction is
     // PreCompact => Working, still excluded.)
     //
-    // Cost discipline (broker-wedge fix): paneStateCached() forks a 5 s-capped
-    // `zellij dump-screen` on this single delivery-loop thread, so reading a
-    // pane for EVERY candidate every scan serializes into tens of seconds
-    // under a multi-agent fan-out and starves RPC (saturation wedge, recv-q
-    // backs up, never accept()s). The pane is ONLY needed to disambiguate the
-    // boot-ambiguous Starting/Stuck states; Alive+Ready / Compacting (the vast
-    // majority of idle agents) decide event-only. So classify event-only first
-    // and fork a pane read ONLY when boot-ambiguous — established idle agents
-    // never fork. Restores the pre-#4 risk profile while keeping fresh-spawn.
+    // The at-prompt signal for the boot-ambiguous Starting/Stuck states comes
+    // SOLELY from the readiness sentinel ($STATE/ready) as of Slice 3 — no
+    // dump-screen fork on this single delivery-loop thread (the saturation-wedge
+    // cost the old read had to ration). Alive+Ready / Compacting decide
+    // event-only. An absent/stale sentinel reads not-ready; the agent re-stamps
+    // on its next boundary.
     const auto ax0 = computeAxes(info, 0, now, pane_exists);
     bool ready_fresh = false;
     if (ax0.process == ProcessAxis::Starting ||
         ax0.process == ProcessAxis::Stuck) {
-      // Boot-ambiguous: the at-prompt signal now comes from the readiness
-      // sentinel ($STATE/ready, Slice 1) — NO dump-screen fork. Fall back to
-      // the pane footer only when no sentinel exists (CLAUDE_BUS_PANE_FALLBACK,
-      // default on), so a not-yet-relaunched agent still works.
       const auto ready = readReady(cfg_.state_dir, name);
-      if (ready) {
-        ready_fresh = readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms);
-      } else if (paneFallbackEnabled()) {
-        const auto pane = paneStateCached(name);  // forks zellij — fallback only
-        ready_fresh = pane.ok && pane.isInsert();
-      }
+      ready_fresh =
+          ready && readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms);
     }
     if (!wakeReadyForMail(ax0, ready_fresh)) {
       continue;  // not at the prompt yet — retry next scan when ready

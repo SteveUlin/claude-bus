@@ -1,6 +1,7 @@
 #include "delivery.h"
 
 #include "agent_status.h"
+#include "ready.h"
 #include "blackboard_actor.h"
 #include "cursor_store.h"
 #include "dispatch.h"
@@ -162,6 +163,25 @@ auto formatPointerBody(const bus::Record& r,
       env.sender, env.protocol, r.id);
 }
 
+// TTL for readiness sentinels (agent-contract Slice 1). Default 90 s.
+auto readyTtlMs() -> std::int64_t {
+  if (const char* env = std::getenv("CLAUDE_BUS_READY_TTL_MS")) {
+    const auto v = std::atoll(env);
+    if (v > 0) return v;
+  }
+  return 90 * 1000;
+}
+
+// Whether to fall back to pane-read when no fresh sentinel exists.
+// Default TRUE — keeps Slice 1a a no-op until the write-hook ships.
+// Disabled by CLAUDE_BUS_PANE_FALLBACK=0.
+auto paneFallbackEnabled() -> bool {
+  const char* env = std::getenv("CLAUDE_BUS_PANE_FALLBACK");
+  if (!env || env[0] == '\0') return true;
+  // Treat "0" as the only off value (cheap, no string copy needed).
+  return !(env[0] == '0' && env[1] == '\0');
+}
+
 }  // namespace
 
 Loop::Loop(const BrokerConfig& cfg, TopicRegistry& registry,
@@ -279,10 +299,28 @@ auto Loop::isAgentIdle(const std::string& agent, std::int64_t now) const -> bool
   auto agents = readAgents(events_log, filter);
   AgentInfo info;
   if (auto it = agents.find(agent); it != agents.end()) info = it->second;
-  const auto pane = paneStateCached(agent);
-  const auto st = computeState(info, 0, now, pane.ok);
-  return st == State::Idle ||
-         (st == State::Starting && pane.ok && pane.isInsert());
+
+  // Readiness sentinel (agent-contract Slice 1): a fresh $STATE/ready/<agent>.json
+  // means the agent is parked at a turn boundary — replacing the pane footer read.
+  // The staleness fence (ts_ms >= last event) excludes an agent that resumed working.
+  const auto ready = readReady(cfg_.state_dir, agent);
+  const bool fresh =
+      ready && readyFresh(*ready, now, readyTtlMs(), info.last.ts_ms);
+  if (fresh) {
+    // Sentinel proves alive + at a boundary; no pane fork. Starting+fresh is the
+    // boot at-prompt proof that pane.isInsert() used to give.
+    const auto st = computeState(info, 0, now, /*pane_exists=*/true);
+    return st == State::Idle || st == State::Starting;
+  }
+  // No fresh sentinel. During rollout (before the write-hook ships) fall back to
+  // today's pane read so behavior is unchanged; CLAUDE_BUS_PANE_FALLBACK=0 disables.
+  if (paneFallbackEnabled()) {
+    const auto pane = paneStateCached(agent);
+    const auto st = computeState(info, 0, now, pane.ok);
+    return st == State::Idle ||
+           (st == State::Starting && pane.ok && pane.isInsert());
+  }
+  return false;
 }
 
 auto Loop::writeInflight(const InFlight& f) -> void {

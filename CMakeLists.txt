@@ -45,6 +45,7 @@ target_include_directories(bus_core PUBLIC src)
 add_library(bus_readers STATIC
     src/agent_status.cpp
     src/context_stats.cpp
+    src/ready.cpp
     src/task_model.cpp
     src/trigger_feed.cpp
 )
@@ -189,6 +190,7 @@ add_executable(bus_tests
     tests/unit/test_task_graph.cpp
     tests/unit/test_recovery.cpp
     tests/unit/test_policy.cpp
+    tests/unit/test_ready.cpp
     src/topic_registry.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)

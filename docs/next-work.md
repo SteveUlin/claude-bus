@@ -19,7 +19,7 @@ verified bug or sulin's stated focus.
 |---|------|-----|-------------|--------|
 | 1 | **Wire 18 itests into ctest** (`itest` label) | code-quality | low / low | ✓ LANDED `a094a067` |
 | 2 | **Continuity grace in `maybeEscalateStuck`** | reliability | low / low | ✓ LANDED `d37e301b` |
-| 3 | **Readiness sentinel** (idle-gate + doorbell off the pane) | feature | low / med | ✓ Slice 1 (`3b7ac520` + `e30d659f`) + Slice 2 doorbell (`ded61ce8`); Slice 3 = delete the `CLAUDE_BUS_PANE_FALLBACK` flag after soak |
+| 3 | **Readiness sentinel** (idle-gate + doorbell off the pane) | feature | low / med | ✓ COMPLETE — Slice 1 (`3b7ac520`+`e30d659f`) + Slice 2 (`ded61ce8`) + Slice 3 fallback removed (`2e0a96cf`). Delivery path no longer forks dump-screen. |
 | 4 | **Age-release stale drain in-flight** | reliability | med / med | new latent bug |
 | 5 | Activate RecoveryActor Phase B (+ AutoClearActor extract) | reliability | med / med | tracked (P2 Phase A landed) |
 | 6 | `tasks open` writes `$STATE/title` (TASK-column lie) | observability | low / low | new |

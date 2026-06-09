@@ -6,8 +6,14 @@
 namespace bus {
 
 auto parseIso8601Ms(std::string_view s) -> std::int64_t {
+  // Copy into a NUL-terminated buffer so sscanf cannot read past the view.
+  // "YYYY-MM-DDTHH:MM:SS.mmmZ" is 24 chars; 32 gives comfortable headroom.
+  char buf[32];
+  const auto len = s.size() < sizeof(buf) - 1 ? s.size() : sizeof(buf) - 1;
+  s.copy(buf, len);
+  buf[len] = '\0';
   int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0, ms = 0;
-  if (std::sscanf(s.data(), "%4d-%2d-%2dT%2d:%2d:%2d.%3d", &Y, &M, &D, &h, &m,
+  if (std::sscanf(buf, "%4d-%2d-%2dT%2d:%2d:%2d.%3d", &Y, &M, &D, &h, &m,
                   &sec, &ms) != 7) {
     return 0;
   }

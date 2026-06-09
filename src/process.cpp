@@ -78,7 +78,11 @@ auto buildArgv(const std::vector<const char*>& argv) -> std::vector<char*> {
 auto runCapture(const std::vector<const char*>& argv,
                 std::chrono::milliseconds timeout) -> Captured {
   int pipefd[2]{};
-  if (::pipe(pipefd) != 0) return {-1, {}};
+  // O_CLOEXEC: the pipe fds must not leak into zellij children the broker
+  // forks. The child side dup2s pipefd[1] to STDOUT_FILENO before exec —
+  // dup2 always clears CLOEXEC on the destination fd, so stdout survives
+  // exec correctly while the raw pipefd[1] is closed before exec.
+  if (::pipe2(pipefd, O_CLOEXEC) != 0) return {-1, {}};
 
   auto a = buildArgv(argv);
 

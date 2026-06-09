@@ -190,9 +190,14 @@ auto readAll(const std::string& path) -> Result<std::vector<std::byte>> {
   }
   std::vector<std::byte> buf(static_cast<std::size_t>(st.st_size));
   if (buf.empty()) return buf;
-  if (::pread(fd.get(), buf.data(), buf.size(), 0) !=
-      static_cast<ssize_t>(buf.size())) {
+  const auto nread = ::pread(fd.get(), buf.data(), buf.size(), 0);
+  if (nread < 0) {
     return std::unexpected{errFromErrno(errno, "pread journal")};
+  }
+  if (static_cast<std::size_t>(nread) != buf.size()) {
+    return std::unexpected{err(std::format(
+        "pread journal: short read ({} of {} bytes); file may have shrunk",
+        nread, buf.size()))};
   }
   if (buf.size() >= kJournalHeaderBytes) {
     const auto v = getU32({buf.data() + kVersionOffset, 4});

@@ -226,7 +226,16 @@ auto Server::dispatch(const json::Value& req) -> json::Value {
   if (it == handlers_.end()) {
     return errorResponse(std::string{"unknown op: "} + handler_name);
   }
-  return it->second(req);
+  // Guard: a stray throw from a handler must not terminate the broker.
+  // Handlers are documented "should NOT throw", but a bug or an
+  // unexpected std::bad_alloc must not take the whole fleet down.
+  try {
+    return it->second(req);
+  } catch (const std::exception& ex) {
+    return errorResponse(std::string{"handler exception: "} + ex.what());
+  } catch (...) {
+    return errorResponse("handler exception: unknown");
+  }
 }
 
 // Phase 1 (Pillar D / W23 + W24): producer/consumer split. The INTAKE
@@ -412,7 +421,7 @@ auto Server::run(std::chrono::milliseconds tick_interval,
     // (the client half-closes after writing — see call()), so we read one
     // line, parse it, and hand the fd to processing.
     while (true) {
-      const int conn = ::accept(listen_fd_, nullptr, nullptr);
+      const int conn = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
       if (conn < 0) {
         if (errno == EINTR) continue;
         break;  // EAGAIN/EWOULDBLOCK or error → backlog drained
@@ -550,6 +559,19 @@ auto call(const std::string& socket_path, const json::Value& req)
     ::close(fd);
     return std::unexpected{Error{std::string{"connect "} + socket_path + ": " +
                            std::strerror(e)}};
+  }
+  // Client-side timeout: mirror the server's accepted-conn timeout so a
+  // wedged broker (alive but processing thread stuck) doesn't park the
+  // calling agent indefinitely.  connect() on a Unix socket is a kernel
+  // operation against the server's accept() backlog — it completes in
+  // microseconds or fails immediately, so a non-blocking-connect dance
+  // buys nothing here; the read/write timeouts are the important guard.
+  {
+    const auto ms = connTimeoutMs();
+    const struct timeval tv{.tv_sec = ms / 1000,
+                            .tv_usec = (ms % 1000) * 1000};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   }
   const auto wire = json::serialize(req);
   if (!writeAll(fd, wire)) {

@@ -497,14 +497,28 @@ auto runBroker(const BrokerConfig& cfg) -> int {
     }
     const auto sender = req.getOrString("sender", "unknown");
     const auto body = req.getOrString("body");
+    const auto protocol = req.getOrString("protocol", "text");
+
+    // C1: guard encodeEnvelope's 255-byte field limits — a client-supplied
+    // overlong value would hit bus::fatal() inside encodeEnvelope, killing
+    // the broker. Validate here and return an error response instead.
+    if (sender.size() > 0xFF)
+      return rpc::errorResponse("sender exceeds 255 bytes");
+    if (protocol.size() > 0xFF)
+      return rpc::errorResponse("protocol exceeds 255 bytes");
+
+    // N3: negative ttl_ms wraps to ~49 days via the unsigned cast.
+    const auto ttl_raw = req.getOrInt("ttl_ms", 0);
+    if (ttl_raw < 0 || ttl_raw > static_cast<std::int64_t>(UINT32_MAX))
+      return rpc::errorResponse("ttl_ms out of range");
 
     bus::msg::Envelope env;
     env.sender = sender;
     env.body = body;
-    env.ttl_ms = static_cast<std::uint32_t>(req.getOrInt("ttl_ms", 0));
+    env.ttl_ms = static_cast<std::uint32_t>(ttl_raw);
     const auto dw = req.getOrString("deliver_when", "immediate");
     env.deliver_when = (dw == "idle") ? 1 : 0;
-    env.protocol = req.getOrString("protocol", "text");
+    env.protocol = protocol;
     // Stamp the broker epoch so dispatch can quarantine records that
     // outlive a broker restart. Same epoch on the pubsub cascade
     // below so subscribers all see consistent provenance.
@@ -527,7 +541,14 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         const auto inbox = std::string{"inbox-"} + sub;
         if (auto cr = registry.getOrAutoCreate(inbox); !cr) continue;
         auto& sublog = getOrOpenLog(inbox);
-        auto _ig = sublog.append(bus::msg::encodeEnvelope(env));
+        // N4: subscriber append failure is non-fatal for the producer, but
+        // must be observable — emit to broker.log so the loss isn't silent.
+        if (auto sr = sublog.append(bus::msg::encodeEnvelope(env)); !sr) {
+          logEvent(cfg.state_dir, "WARN",
+                   std::format("pubsub cascade append failed topic={} "
+                               "subscriber={} err={}",
+                               name, sub, sr.error().message));
+        }
       }
     }
 
@@ -636,6 +657,20 @@ auto runBroker(const BrokerConfig& cfg) -> int {
         bus::readU64File(cfg.state_dir + "/continuity.ms");
     const auto continuity_floor = std::max(systemBootMs(), continuity_since_ms);
     std::map<std::string, json::Value> out;
+    // M4: inline topic-name validation matching isValidTopicName in
+    // topic_registry.cpp — same rule: lowercase + digit + '-' + '_', 1-128
+    // chars. Applied to the agent-name portion (the "inbox-" prefix adds 6
+    // more chars, still under 128).
+    auto isValidAgentName = [](std::string_view n) -> bool {
+      if (n.empty() || n.size() > 122) return false;
+      for (char c : n) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                        c == '-' || c == '_';
+        if (!ok) return false;
+      }
+      return true;
+    };
+
     for (const auto& [name, info] : agents) {
       const auto pane = paneState(name);
 
@@ -644,10 +679,26 @@ auto runBroker(const BrokerConfig& cfg) -> int {
       // peeking the topic log themselves, so the count must be honest.
       std::size_t unread = 0;
       {
+        // M4: skip names that would create rogue files outside topics/.
+        // Open the inbox log WITHOUT creating it — a missing log means no
+        // mail, so unread stays 0. Do NOT call getOrOpen (which creates via
+        // openOrCreate) and do NOT cache a non-existent log in `logs`.
         const auto topic = std::string{"inbox-"} + name;
-        auto& inbox_handles = getOrOpen(topic);
-        auto r = inbox_handles.log.peek(inbox_handles.cursors.consumerCursor(""));
-        if (r) unread = r->size();
+        if (isValidAgentName(name)) {
+          const auto log_path_s = topics_dir + "/" + topic + ".log";
+          // Use the cache when the journal is already open; open (no-create)
+          // when it isn't — never insert a missing-file handle into `logs`.
+          if (auto it = logs.find(topic); it != logs.end()) {
+            auto r = it->second.log.peek(
+                it->second.cursors.consumerCursor(""));
+            if (r) unread = r->size();
+          } else if (auto jr = bus::Journal::open(log_path_s); jr) {
+            auto r = jr->peek(
+                bus::CursorStore{cfg.state_dir, topic}.consumerCursor(""));
+            if (r) unread = r->size();
+          }
+          // ENOENT (jr failed) => unread stays 0; no file created.
+        }
       }
 
       const auto ax =

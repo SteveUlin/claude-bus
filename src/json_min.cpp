@@ -174,20 +174,52 @@ class Parser {
               if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
               return -1;
             };
-            int codepoint = 0;
-            for (int i = 0; i < 4; ++i) {
-              int h = hexVal(src_[pos_ + i]);
-              if (h < 0) return std::unexpected{"bad hex in \\u escape"};
-              codepoint = (codepoint << 4) | h;
-            }
+            auto parseHex4 = [&](std::size_t at) -> int {
+              int cp = 0;
+              for (int i = 0; i < 4; ++i) {
+                int h = hexVal(src_[at + i]);
+                if (h < 0) return -1;
+                cp = (cp << 4) | h;
+              }
+              return cp;
+            };
+            int codepoint = parseHex4(pos_);
+            if (codepoint < 0) return std::unexpected{"bad hex in \\u escape"};
             pos_ += 4;
+            // Surrogate pair: high surrogate (U+D800..U+DBFF) must be
+            // followed by \uXXXX low surrogate (U+DC00..U+DFFF). Combine
+            // into the real non-BMP code point before encoding to UTF-8.
+            // Unpaired surrogates are rejected (strict-parser policy).
+            if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+              // High surrogate — require the low half immediately.
+              if (pos_ + 6 > src_.size() ||
+                  src_[pos_] != '\\' || src_[pos_ + 1] != 'u') {
+                return std::unexpected{"unpaired high surrogate"};
+              }
+              const int lo = parseHex4(pos_ + 2);
+              if (lo < 0) return std::unexpected{"bad hex in surrogate low"};
+              if (lo < 0xDC00 || lo > 0xDFFF) {
+                return std::unexpected{"unpaired high surrogate"};
+              }
+              pos_ += 6;
+              codepoint = 0x10000 + ((codepoint - 0xD800) << 10) +
+                          (lo - 0xDC00);
+            } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+              // Lone low surrogate — invalid.
+              return std::unexpected{"unpaired low surrogate"};
+            }
             if (codepoint <= 0x7F) {
               out += static_cast<char>(codepoint);
             } else if (codepoint <= 0x7FF) {
               out += static_cast<char>(0xC0 | (codepoint >> 6));
               out += static_cast<char>(0x80 | (codepoint & 0x3F));
-            } else {
+            } else if (codepoint <= 0xFFFF) {
               out += static_cast<char>(0xE0 | (codepoint >> 12));
+              out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+              out += static_cast<char>(0x80 | (codepoint & 0x3F));
+            } else {
+              out += static_cast<char>(0xF0 | (codepoint >> 18));
+              out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
               out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
               out += static_cast<char>(0x80 | (codepoint & 0x3F));
             }

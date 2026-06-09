@@ -87,6 +87,30 @@ TEST(json_floats_fail_whole_parse) {
   CHECK(!json::parse(R"({"ratio":0.25})").has_value());
 }
 
+// N5: UTF-16 surrogate pair decoding. A conforming JSON encoder emits non-BMP
+// characters (e.g. emoji) as \uHHHH\uLLLL surrogate pairs. The parser must
+// combine them into the real code point and emit 4-byte UTF-8, not CESU-8.
+TEST(json_surrogate_pair_decodes_to_utf8) {
+  // U+1F600 GRINNING FACE: 😀 → 0xF0 0x9F 0x98 0x80
+  auto v = json::parse(R"("😀")");
+  CHECK(v.has_value());
+  const std::string& s = v->asString();
+  CHECK_EQ(s.size(), std::size_t{4});
+  CHECK_EQ(static_cast<unsigned char>(s[0]), 0xF0u);
+  CHECK_EQ(static_cast<unsigned char>(s[1]), 0x9Fu);
+  CHECK_EQ(static_cast<unsigned char>(s[2]), 0x98u);
+  CHECK_EQ(static_cast<unsigned char>(s[3]), 0x80u);
+}
+
+TEST(json_unpaired_surrogate_rejected) {
+  // Lone high surrogate — no low half follows.
+  CHECK(!json::parse(R"("\uD83D")").has_value());
+  // Lone low surrogate.
+  CHECK(!json::parse(R"("\uDE00")").has_value());
+  // High surrogate followed by non-surrogate \u escape.
+  CHECK(!json::parse(R"("\uD83DA")").has_value());
+}
+
 // Broker-hardening CRIT #1: unbounded recursion blows the stack → SIGSEGV.
 // The depth cap (256) must turn pathological nesting into a clean parse
 // error, never a crash. A balanced nest under the cap still parses.

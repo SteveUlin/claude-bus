@@ -3,9 +3,15 @@
 #include "journal.h"
 #include "state_paths.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <string_view>
 
 using namespace bus;
 
@@ -182,6 +188,173 @@ TEST(cursor_store_last_acked_id) {
   // Ack with the id — must be stamped.
   CHECK(cursors.ack("", ca0, id0));
   CHECK_EQ(cursors.lastAckedId(""), id0);
+
+  std::filesystem::remove_all(state_root);
+}
+
+// ── (a) write-then-read round-trip: offset+tag persist to the cursor file ────
+//
+// After ack(), the on-disk .cursor file must use the new "<offset>:<tag>\n"
+// text format. A subsequent consumerCursor() must return a cursor that carries
+// the same offset AND tag.
+TEST(cursor_store_tagged_roundtrip) {
+  const std::string state_root =
+      makeStateRoot("/tmp/claude-bus-test-cs-rt-");
+
+  auto log_r = Journal::openOrCreate(topicLogPath(state_root, "rt-topic"));
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
+  CursorStore cursors{state_root, "rt-topic"};
+
+  (void)log.append(bytesOf("x"));
+  (void)log.append(bytesOf("y"));
+
+  auto recs = log.dump();
+  CHECK(recs.has_value());
+  CHECK_EQ(recs->size(), std::size_t{2});
+
+  const auto ca0 = Journal::cursorAfter((*recs)[0]);
+  CHECK(cursors.ack("rt", ca0));
+
+  // Read the raw cursor file — must contain "<offset>:<tag>\n".
+  const std::string cursor_path =
+      state_root + "/cursors/rt-topic/rt.cursor";
+  std::ifstream f{cursor_path};
+  CHECK(f.is_open());
+  std::string line;
+  std::getline(f, line);
+  const auto colon = line.find(':');
+  CHECK(colon != std::string::npos);
+  const auto tag_str = line.substr(colon + 1);
+  const auto file_tag = static_cast<std::uint64_t>(std::stoull(tag_str));
+  CHECK(file_tag != 0);
+
+  // The tag in the file must match the journal's own tag.
+  const auto journal_tag = Journal::tagOf(topicLogPath(state_root, "rt-topic"));
+  CHECK_EQ(file_tag, journal_tag);
+
+  // consumerCursor must return the same cursor (same offset and same tag).
+  const auto read_back = cursors.consumerCursor("rt");
+  const auto tok_ack = Journal::cursorToToken(ca0);
+  const auto tok_read = Journal::cursorToToken(read_back);
+  CHECK_EQ(tok_ack, tok_read);
+
+  std::filesystem::remove_all(state_root);
+}
+
+// ── (b) legacy raw-offset file is adopted, not reset ─────────────────────────
+//
+// A pre-existing cursor file in the old 8-byte little-endian u64 format must
+// be read as a valid offset (tag 0 = unbound). The offset is adopted as-is
+// and is NOT reset to start-of-log.
+TEST(cursor_store_legacy_file_adopted) {
+  const std::string state_root =
+      makeStateRoot("/tmp/claude-bus-test-cs-leg-");
+
+  // Create the journal so tagOf() returns a non-zero tag.
+  auto log_r = Journal::openOrCreate(topicLogPath(state_root, "legacy-topic"));
+  CHECK(log_r.has_value());
+  auto& log = *log_r;
+  (void)log.append(bytesOf("rec"));
+
+  // Determine a valid non-zero byte offset inside the log.
+  auto recs = log.dump();
+  CHECK(recs.has_value());
+  CHECK_EQ(recs->size(), std::size_t{1});
+  const auto ca0 = Journal::cursorAfter((*recs)[0]);
+  const auto tok = Journal::cursorToToken(ca0);
+  // Extract the raw byte offset from the token (decimal before ':').
+  const auto colon = tok.find(':');
+  CHECK(colon != std::string::npos);
+  const std::uint64_t raw_offset =
+      static_cast<std::uint64_t>(std::stoull(tok.substr(0, colon)));
+  CHECK(raw_offset > 0);
+
+  // Write the cursor file in the old 8-byte LE u64 format.
+  const std::string cursor_dir =
+      state_root + "/cursors/legacy-topic";
+  std::filesystem::create_directories(cursor_dir);
+  const std::string cursor_path = cursor_dir + "/_default.cursor";
+  {
+    const int fd =
+        ::open(cursor_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0);
+    std::uint8_t buf[8];
+    for (int i = 0; i < 8; ++i)
+      buf[i] = static_cast<std::uint8_t>((raw_offset >> (i * 8)) & 0xFF);
+    (void)::write(fd, buf, 8);
+    ::close(fd);
+  }
+
+  // consumerCursor must return the stored offset — NOT start-of-log.
+  CursorStore cursors{state_root, "legacy-topic"};
+  const auto c = cursors.consumerCursor();
+  const auto read_tok = Journal::cursorToToken(c);
+  const auto read_colon = read_tok.find(':');
+  CHECK(read_colon != std::string::npos);
+  const auto read_offset =
+      static_cast<std::uint64_t>(std::stoull(read_tok.substr(0, read_colon)));
+  CHECK_EQ(read_offset, raw_offset);
+
+  std::filesystem::remove_all(state_root);
+}
+
+// ── (c) stale cursor (tag mismatch) resets to start-of-log ───────────────────
+//
+// A cursor written against journal A must be discarded when the journal file
+// is replaced by journal B (new UUID → new tag). consumerCursor must return
+// start-of-log (offset 0) rather than applying the stale offset from journal A.
+TEST(cursor_store_stale_tag_resets_to_start) {
+  const std::string state_root =
+      makeStateRoot("/tmp/claude-bus-test-cs-stale-");
+
+  const std::string topic_path = topicLogPath(state_root, "stale-topic");
+
+  // ── Phase 1: build journal A and advance the cursor into it. ──────────────
+  {
+    auto log_r = Journal::openOrCreate(topic_path);
+    CHECK(log_r.has_value());
+    auto& log = *log_r;
+    (void)log.append(bytesOf("a1"));
+    (void)log.append(bytesOf("a2"));
+    auto recs = log.dump();
+    CHECK(recs.has_value());
+    CursorStore cs{state_root, "stale-topic"};
+    const auto ca1 = Journal::cursorAfter((*recs)[1]);
+    CHECK(cs.ack("", ca1));
+    // Sanity: cursor is past the header.
+    const auto c = cs.consumerCursor();
+    const auto tok = Journal::cursorToToken(c);
+    const auto colon = tok.find(':');
+    CHECK(colon != std::string::npos);
+    const auto off =
+        static_cast<std::uint64_t>(std::stoull(tok.substr(0, colon)));
+    CHECK(off > 0);
+  }
+
+  // ── Phase 2: delete journal A and create journal B at the same path. ──────
+  std::filesystem::remove(topic_path);
+  {
+    auto log_r = Journal::create(topic_path);
+    CHECK(log_r.has_value());
+    auto& log = *log_r;
+    (void)log.append(bytesOf("b1"));
+  }
+
+  // The new journal must have a different tag.
+  const auto tag_b = Journal::tagOf(topic_path);
+  CHECK(tag_b != 0);
+
+  // ── Phase 3: stale cursor must be discarded — reset to start-of-log. ──────
+  CursorStore cs2{state_root, "stale-topic"};
+  const auto c2 = cs2.consumerCursor();
+  // Offset must be 0 (start-of-log), not the non-zero offset from journal A.
+  const auto tok2 = Journal::cursorToToken(c2);
+  const auto colon2 = tok2.find(':');
+  CHECK(colon2 != std::string::npos);
+  const auto off2 =
+      static_cast<std::uint64_t>(std::stoull(tok2.substr(0, colon2)));
+  CHECK_EQ(off2, std::uint64_t{0});
 
   std::filesystem::remove_all(state_root);
 }

@@ -194,7 +194,9 @@ add_executable(bus_tests
     tests/unit/test_policy.cpp
     tests/unit/test_ready.cpp
     tests/unit/test_spawn.cpp
+    tests/unit/test_rpc.cpp
     src/topic_registry.cpp
+    src/rpc.cpp
 )
 target_include_directories(bus_tests PRIVATE src tests/unit)
 target_link_libraries(bus_tests PRIVATE bus_core bus_envelope bus_readers bus_pane bus_policy)

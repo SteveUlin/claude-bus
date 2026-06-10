@@ -65,12 +65,13 @@ by RPC arrival + pending-deadline timerfds), and the retry / ack / audit /
 `inbox-human` escalation path. Hooks only emit state events to `events.jsonl`;
 the broker decides when to push.
 
-The full spec — topic kinds (`agent-inbox`, `tui-commands`, `work-queue`,
-`pubsub`, `blackboard`, `append-log`), cursor / ACK semantics, the
-`[bus-attach]` presence sentinel, reliability, and the broker **launch
-contract** (must be a direct zellij child; never `nohup`/`setsid`/`disown` it)
-— is in [docs/broker-spec.md](docs/broker-spec.md). Read it before touching
-delivery or restarting the broker.
+Key invariants: topic kinds are `agent-inbox`, `tui-commands`, `work-queue`,
+`pubsub`, `blackboard`, and `append-log`; cursors advance only on ACK; the
+`[bus-attach]` sentinel marks human presence; and the broker **launch
+contract** — it must run as a direct zellij child, never
+`nohup`/`setsid`/`disown`. The spec lives in the source: read the headers
+(`src/delivery.h`, `src/journal.h`, `src/broker.cpp`'s handler comments)
+before touching delivery or restarting the broker.
 
 ## Conventions
 
@@ -92,11 +93,10 @@ Four principles for any edit here. Apply with judgment — trivial fixes don't n
 ## Commands
 
 Everything runs through the unified `bin/bus` binary; `bus help` lists every
-subcommand. The full annotated catalog — lifecycle, topic registry,
-produce/consume, direct/low-level pane writes, viewers — is in
-[docs/bus-commands.md](docs/bus-commands.md). The broker daemon (`bus broker
-run`) owns all topic state and drives delivery; CLI tools talk to it via
-JSON-RPC on `$STATE/broker.sock`.
+subcommand (lifecycle, topic registry, produce/consume, direct/low-level pane
+writes, viewers). The broker daemon (`bus broker run`) owns all topic state
+and drives delivery; CLI tools talk to it via JSON-RPC on
+`$STATE/broker.sock`.
 
 Start a bus session (focus shifts to the new tab):
 

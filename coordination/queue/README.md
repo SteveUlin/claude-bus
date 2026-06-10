@@ -12,9 +12,8 @@ mail. The claim (consuming the task so it isn't re-assigned) is performed by the
 broker, reusing the same cursor advance as `bus msg fetch`.
 
 This is the first coordination pattern realized as a **Policy actor** rather than
-a layer of per-agent hooks + scripts (M2; see
-[docs/work-queue-dispatch.md](../../docs/work-queue-dispatch.md) and
-[docs/policy-actors.md](../../docs/policy-actors.md) §6).
+a layer of per-agent hooks + scripts (M2; the actor contract lives in
+`src/policy.h` and `src/dispatch_actor.h`).
 
 ## How a pattern activates
 

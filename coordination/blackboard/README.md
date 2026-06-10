@@ -13,9 +13,8 @@ board with `bus msg peek` (which does not consume it).
 
 This is the second coordination pattern realized as a **Policy actor**, proving
 the substrate admits **fan-out** (1→N broadcast) as cleanly as the work-queue's
-competing-consumer claim (1→1). See
-[docs/blackboard-notify.md](../../docs/blackboard-notify.md) and
-[docs/policy-actors.md](../../docs/policy-actors.md) §6. It is the *purest* actor
+competing-consumer claim (1→1). See `src/blackboard_actor.h` and
+`src/policy.h`. It is the *purest* actor
 — stateless: its watermark is a loop-owned cursor.
 
 ## How a pattern activates
